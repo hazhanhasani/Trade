@@ -12,15 +12,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Validate PHP
         run: find backend -type f -name '*.php' -print0 | xargs -0 -n1 php -l
-      - name: Create deployment archive
+
+      - name: Create easy cPanel deployment archive
         run: |
-          mkdir -p dist
-          zip -r dist/Trade-cPanel.zip backend \
-            -x 'backend/storage/config.php' \
-               'backend/storage/install.lock' \
-               'backend/storage/*.log'
+          rm -rf dist
+          mkdir -p dist/package
+          cp -a backend/. dist/package/
+          rm -f dist/package/storage/config.php \
+                dist/package/storage/install.lock \
+                dist/package/storage/*.log
+          (
+            cd dist/package
+            zip -r ../Trade-cPanel.zip .
+          )
+
       - uses: actions/upload-artifact@v4
         with:
           name: Trade-cPanel
