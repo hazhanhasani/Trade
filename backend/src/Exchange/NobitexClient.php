@@ -49,9 +49,7 @@ final class NobitexClient
     {
         $symbol = $this->safeSymbol($symbol);
         $allowed = ['1','5','15','30','60','180','240','360','720','D','2D','3D'];
-        if (!in_array($resolution, $allowed, true)) {
-            $resolution = '15';
-        }
+        if (!in_array($resolution, $allowed, true)) $resolution = '15';
         $countback = max(20, min(500, $countback));
         return $this->request('GET', '/market/udf/history', [
             'symbol' => $symbol,
@@ -76,9 +74,7 @@ final class NobitexClient
     {
         $payload = [];
         if ($id !== null && $id !== '') {
-            if (!ctype_digit($id)) {
-                throw new \InvalidArgumentException('Invalid Nobitex order id.');
-            }
+            if (!ctype_digit($id)) throw new \InvalidArgumentException('Invalid Nobitex order id.');
             $payload['id'] = (int) $id;
         } elseif ($clientOrderId !== null && $clientOrderId !== '') {
             $payload['clientOrderId'] = $this->safeClientOrderId($clientOrderId);
@@ -97,9 +93,7 @@ final class NobitexClient
     {
         $payload = ['status' => 'canceled'];
         if ($id !== null && $id !== '') {
-            if (!ctype_digit($id)) {
-                throw new \InvalidArgumentException('Invalid Nobitex order id.');
-            }
+            if (!ctype_digit($id)) throw new \InvalidArgumentException('Invalid Nobitex order id.');
             $payload['order'] = (int) $id;
         } elseif ($clientOrderId !== null && $clientOrderId !== '') {
             $payload['clientOrderId'] = $this->safeClientOrderId($clientOrderId);
@@ -124,9 +118,7 @@ final class NobitexClient
 
         $headers = ['Accept: application/json', 'User-Agent: Trade/1.1'];
         if ($method !== 'GET') $headers[] = 'Content-Type: application/json';
-        if ($authenticated) {
-            foreach ($this->authHeaders($method, $fullPath, $body) as $header) $headers[] = $header;
-        }
+        if ($authenticated) foreach ($this->authHeaders($method, $fullPath, $body) as $header) $headers[] = $header;
 
         $ch = curl_init($this->baseUrl . $fullPath);
         if ($ch === false) throw new \RuntimeException('Unable to initialize cURL for Nobitex.');
@@ -169,7 +161,8 @@ final class NobitexClient
         $timestamp = (string) time();
         $payload = $timestamp . $method . $fullPath . $body;
         $signature = sodium_crypto_sign_detached($payload, $this->signingSecretKey($this->privateKey));
-        $signatureB64 = rtrim(strtr(base64_encode($signature), '+/', '-_'), '=');
+        // Official docs use urlsafe_b64encode and keep normal Base64 padding.
+        $signatureB64 = strtr(base64_encode($signature), '+/', '-_');
         return [
             'Nobitex-Key: ' . $this->publicKey,
             'Nobitex-Signature: ' . $signatureB64,
@@ -180,9 +173,7 @@ final class NobitexClient
     private function signingSecretKey(string $encoded): string
     {
         $bytes = $this->base64UrlDecode($encoded);
-        if (strlen($bytes) === SODIUM_CRYPTO_SIGN_SEEDBYTES) {
-            return sodium_crypto_sign_secretkey(sodium_crypto_sign_seed_keypair($bytes));
-        }
+        if (strlen($bytes) === SODIUM_CRYPTO_SIGN_SEEDBYTES) return sodium_crypto_sign_secretkey(sodium_crypto_sign_seed_keypair($bytes));
         if (strlen($bytes) === SODIUM_CRYPTO_SIGN_SECRETKEYBYTES) return $bytes;
         throw new \RuntimeException('Nobitex private key must decode to a 32-byte Ed25519 seed or 64-byte secret key.');
     }
@@ -217,12 +208,9 @@ final class NobitexHttpException extends \RuntimeException
     public function __construct(public readonly int $statusCode, public readonly array $response)
     {
         $message = 'Nobitex HTTP ' . $statusCode;
-        foreach (['message', 'detail', 'error', 'code', 'errmsg'] as $key) {
+        foreach (['message','detail','error','code','errmsg'] as $key) {
             $value = $response[$key] ?? null;
-            if (is_scalar($value) && trim((string) $value) !== '') {
-                $message .= ' — ' . mb_substr(trim((string) $value), 0, 220);
-                break;
-            }
+            if (is_scalar($value) && trim((string) $value) !== '') { $message .= ' — ' . mb_substr(trim((string) $value), 0, 220); break; }
         }
         parent::__construct($message);
     }
