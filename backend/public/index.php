@@ -54,7 +54,8 @@ try {
             'ok' => $db,
             'service' => 'Trade',
             'mode' => (bool) Config::get('trading.enabled', false) ? 'live' : 'live_disabled',
-            'version' => '0.3.0',
+            'capital_asset' => (string) Config::get('trading.capital_asset', 'TON'),
+            'version' => '0.3.1',
             'app_url' => (string) Config::get('app.url', 'https://rado-taxi.sbs'),
             'database' => $db ? 'ok' : 'error',
             'time_utc' => gmdate(DATE_ATOM),
@@ -70,6 +71,7 @@ try {
         $kill = (string) ($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn() ?: '0');
         respond(['ok' => true, 'data' => [
             'mode' => (bool) Config::get('trading.enabled', false) ? 'live' : 'live_disabled',
+            'capital_asset' => (string) Config::get('trading.capital_asset', 'TON'),
             'kill_switch' => $kill === '1',
             'credentials_configured' => (bool) $pdo->query("SELECT EXISTS(SELECT 1 FROM exchange_credentials WHERE exchange_name='bitpin')")->fetchColumn(),
             'orders_logged' => (int) $pdo->query('SELECT COUNT(*) FROM orders')->fetchColumn(),
