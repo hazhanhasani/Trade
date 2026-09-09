@@ -20,6 +20,7 @@ $requirements = [
     'PDO MySQL' => extension_loaded('pdo_mysql'),
     'cURL' => extension_loaded('curl'),
     'OpenSSL' => extension_loaded('openssl'),
+    'ZIP' => extension_loaded('zip'),
     'JSON' => extension_loaded('json'),
 ];
 
@@ -93,6 +94,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'max_order_value' => $maxOrderValue,
                     'max_orders_per_hour' => $maxOrdersPerHour,
                 ],
+                'updates' => [
+                    'auto_backend' => true,
+                    'check_interval_seconds' => 3600,
+                    'manifest_url' => 'https://github.com/hazhanhasani/Trade/releases/download/trade-latest/latest.json',
+                ],
             ];
 
             $configPhp = "<?php\n\ndeclare(strict_types=1);\n\nreturn " . var_export($config, true) . ";\n";
@@ -133,12 +139,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </head><body><div class="wrap"><div class="card">
 <h1>نصب سریع Trade</h1>
 <div class="info">دامنه اصلی: <b>https://rado-taxi.sbs</b></div>
-<div class="warn">دارایی پایه سرمایه را TON یا GRAM انتخاب کن. سیستم Market ID را از API بیت‌پین دریافت می‌کند و برای GRAM هیچ بازار فرضی هاردکد نمی‌شود.</div>
+<div class="warn">دارایی پایه سرمایه اولیه فقط TON یا GRAM است؛ پیش‌فرض TON. سیستم بازار واقعی را از API بیت‌پین پیدا می‌کند. آپدیت Backend هم بعد از نصب به‌صورت خودکار از GitHub انجام می‌شود.</div>
 <p>بررسی پیش‌نیازها:</p>
 <?php foreach ($requirements as $name => $ok): ?><div class="req"><?= $ok ? '✅' : '❌' ?> <?= htmlspecialchars($name) ?></div><?php endforeach; ?>
 <?php foreach ($errors as $error): ?><div class="err"><?= htmlspecialchars($error) ?></div><?php endforeach; ?>
 <?php if ($success): ?>
-<div class="ok"><strong>نصب با موفقیت انجام شد.</strong><p>دارایی پایه سرمایه: <b><?= htmlspecialchars($capitalAsset) ?></b></p><p>توکن اتصال اپ فقط همین یک‌بار نمایش داده می‌شود:</p><div class="token"><?= htmlspecialchars((string)$apiToken) ?></div><p>پنل مدیریت: <b>https://rado-taxi.sbs/admin/</b></p></div>
+<div class="ok"><strong>نصب با موفقیت انجام شد.</strong><p>دارایی پایه سرمایه: <b><?= htmlspecialchars($capitalAsset) ?></b></p><p>آپدیت خودکار Backend: <b>فعال</b></p><p>توکن اتصال اپ فقط همین یک‌بار نمایش داده می‌شود:</p><div class="token"><?= htmlspecialchars((string)$apiToken) ?></div><p>پنل مدیریت: <b>https://rado-taxi.sbs/admin/</b></p></div>
 <?php else: ?>
 <form method="post" autocomplete="off"><div class="grid">
 <div><label>DB Host</label><input name="db_host" value="localhost" required></div>
@@ -148,7 +154,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <div class="full"><label>DB Password</label><input type="password" name="db_pass"></div>
 <div><label>Admin username</label><input name="admin_user" value="admin" required></div>
 <div><label>Admin password (حداقل ۱۲ کاراکتر)</label><input type="password" name="admin_pass" minlength="12" required></div>
-<div class="full"><label>دارایی پایه سرمایه اولیه</label><select name="capital_asset" required><option value="TON"<?= $capitalAsset === 'TON' ? ' selected' : '' ?>>TON</option><option value="GRAM"<?= $capitalAsset === 'GRAM' ? ' selected' : '' ?>>GRAM</option></select></div>
+<div class="full"><label>دارایی پایه سرمایه اولیه</label><select name="capital_asset" required><option value="TON"<?= $capitalAsset === 'TON' ? ' selected' : '' ?>>TON (پیش‌فرض)</option><option value="GRAM"<?= $capitalAsset === 'GRAM' ? ' selected' : '' ?>>GRAM</option></select></div>
 <div class="full"><label>Bitpin API Key</label><input name="bitpin_key" autocomplete="off"></div>
 <div class="full"><label>Bitpin Secret Key</label><input type="password" name="bitpin_secret" autocomplete="new-password"></div>
 <div><label>حداکثر ارزش هر سفارش (۰ = بدون سقف)</label><input type="number" min="0" step="any" name="max_order_value" value="0"></div>
