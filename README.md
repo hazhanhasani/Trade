@@ -8,7 +8,7 @@ Implemented:
 
 - cPanel web installer at `/install/`
 - primary backend URL: `https://rado-taxi.sbs`
-- Persian RTL admin panel at `/admin/`
+- Persian RTL live-management panel at `/admin/`
 - MySQL/MariaDB schema
 - AES-256-GCM encryption for Bitpin API credentials and access/refresh tokens
 - Bitpin authentication and token refresh
@@ -21,7 +21,7 @@ Implemented:
 - cPanel Cron heartbeat/run history
 - Android Jetpack Compose client using `https://rado-taxi.sbs` by default
 - Android Live order form and Kill Switch control
-- GitHub Actions PHP syntax gate and Android debug APK build
+- GitHub Actions PHP syntax gate, Android debug APK build, and cPanel ZIP packaging
 
 ## Requirements
 
@@ -36,12 +36,12 @@ Implemented:
 
 ### Android build
 
-The project uses Android Gradle Plugin 9.4.0, Gradle 9.6.0, JDK 17, compileSdk 37, targetSdk 36, and Compose BOM 2026.08.00. `android.newDsl=false` is currently used for Kotlin plugin compatibility with AGP 9.x.
+The project uses Android Gradle Plugin 9.4.0, Gradle 9.6.0, JDK 17, compileSdk 37, targetSdk 36, Compose BOM 2026.08.00, and AGP 9 built-in Kotlin support.
 
 ## Quick cPanel installation for rado-taxi.sbs
 
-1. Upload the `backend` directory to the hosting account.
-2. Set the document root for `rado-taxi.sbs` to `backend/public`.
+1. Upload/extract `Trade-cPanel.zip` to the hosting account.
+2. Set the document root for `rado-taxi.sbs` to the extracted `backend/public` directory.
 3. Enable a valid HTTPS certificate for `rado-taxi.sbs`.
 4. Open `https://rado-taxi.sbs/install/`.
 5. Enter database/admin details plus Bitpin API Key and Secret.
@@ -95,20 +95,6 @@ Private endpoints require:
 Authorization: Bearer <app-api-token>
 ```
 
-Example live order body:
-
-```json
-{
-  "market": 5,
-  "amount1": 3,
-  "price": 50000,
-  "mode": "limit",
-  "type": "buy"
-}
-```
-
-`market` is the numeric Bitpin market ID returned by the market API.
-
 ## Security boundaries
 
 - Never commit or embed the real Bitpin API Key/Secret in GitHub or Android.
@@ -121,18 +107,18 @@ Example live order body:
 
 ## Automated trading
 
-The live execution layer is now available. Automated trading logic should call the same guarded `OrderService` rather than communicating with Bitpin directly. Strategy rules are intentionally separated from exchange execution so indicators and strategies can be changed without weakening API-key security or the risk controls.
+The live execution layer is available. Automated strategy logic must call the guarded `OrderService` rather than communicating with Bitpin directly. Strategy rules remain separate from exchange execution so they can be changed without weakening API-key security or server-side limits.
 
 ## Repository layout
 
 ```text
 backend/
-  public/                 API, installer, admin panel
+  public/                 API, installer, live admin panel
   src/Exchange/           Bitpin adapter
   src/Trading/            guarded live order service
   database/schema.sql     MySQL schema
   cron/tick.php           cPanel scheduled entrypoint
   storage/                runtime configuration (not committed)
 android/                   Android Jetpack Compose app
-.github/workflows/         PHP lint + Android build
+.github/workflows/         PHP lint + Android build + cPanel package
 ```
