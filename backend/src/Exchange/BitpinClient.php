@@ -39,15 +39,19 @@ final class BitpinClient
         if ($this->apiKey === '' || $this->secretKey === '') {
             throw new \RuntimeException('Bitpin API credentials are not configured.');
         }
+
         $response = $this->request('POST', $this->endpoints['authenticate'], [
             'api_key' => $this->apiKey,
             'secret_key' => $this->secretKey,
         ], false);
-        $this->accessToken = $response['access'] ?? null;
-        $this->refreshToken = $response['refresh'] ?? null;
+
+        $this->accessToken = isset($response['access']) ? (string) $response['access'] : null;
+        $this->refreshToken = isset($response['refresh']) ? (string) $response['refresh'] : null;
+
         if (!$this->accessToken || !$this->refreshToken) {
             throw new \RuntimeException('Bitpin authentication response did not include access/refresh tokens.');
         }
+
         return $response;
     }
 
@@ -56,11 +60,39 @@ final class BitpinClient
         if (!$this->refreshToken) {
             return $this->authenticate();
         }
-        $response = $this->request('POST', $this->endpoints['refresh'], ['refresh' => $this->refreshToken], false);
-        $this->accessToken = $response['access'] ?? null;
-        if (!$this->accessToken) {
-            throw new \RuntimeException('Bitpin token refresh did not return an access token.');
+
+        try {
+            $response = $this->request(
+                'POST',
+                $this->endpoints['refresh'],
+                ['refresh' => $this->refreshToken],
+                false
+            );
+        } catch (BitpinHttpException $e) {
+            // Refresh tokens can expire or be revoked while the API key/secret
+            // is still valid. In that situation a full authentication is the
+            // correct recovery path instead of leaving the client stuck at 401.
+            if (in_array($e->statusCode, [400, 401, 403], true)) {
+                $this->accessToken = null;
+                $this->refreshToken = null;
+                return $this->authenticate();
+            }
+            throw $e;
         }
+
+        $this->accessToken = isset($response['access']) ? (string) $response['access'] : null;
+        if (isset($response['refresh']) && (string) $response['refresh'] !== '') {
+            $this->refreshToken = (string) $response['refresh'];
+        }
+
+        if (!$this->accessToken) {
+            // A malformed/partial refresh response should not permanently wedge
+            // the client. Fall back to a clean API-key authentication.
+            $this->accessToken = null;
+            $this->refreshToken = null;
+            return $this->authenticate();
+        }
+
         return $response;
     }
 
@@ -130,12 +162,14 @@ final class BitpinClient
         if (!$this->accessToken) {
             $this->authenticate();
         }
+
         try {
             return $this->request($method, $endpoint, $data, true);
         } catch (BitpinHttpException $e) {
             if ($e->statusCode !== 401) {
                 throw $e;
             }
+
             $this->refreshAccessToken();
             return $this->request($method, $endpoint, $data, true);
         }
@@ -158,6 +192,7 @@ final class BitpinClient
         if ($auth && $this->accessToken) {
             $headers[] = 'Authorization: Bearer ' . $this->accessToken;
         }
+
         $options = [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_CONNECTTIMEOUT => min(5, $this->timeout),
@@ -168,6 +203,7 @@ final class BitpinClient
             CURLOPT_MAXREDIRS => 0,
             CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
         ];
+
         if ($method !== 'GET' && $data !== []) {
             $options[CURLOPT_POSTFIELDS] = json_encode($data, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
             $options[CURLOPT_HTTPHEADER][] = 'Content-Type: application/json';
@@ -182,13 +218,16 @@ final class BitpinClient
         if ($body === false) {
             throw new \RuntimeException('Bitpin network error: ' . $error);
         }
+
         $decoded = json_decode($body, true);
         if (!is_array($decoded)) {
             $decoded = ['raw' => substr($body, 0, 2000)];
         }
+
         if ($status < 200 || $status >= 300) {
             throw new BitpinHttpException($status, $decoded);
         }
+
         return $decoded;
     }
 }
@@ -197,6 +236,45 @@ final class BitpinHttpException extends \RuntimeException
 {
     public function __construct(public readonly int $statusCode, public readonly array $response)
     {
-        parent::__construct('Bitpin HTTP ' . $statusCode);
+        $detail = self::safeDetail($response);
+        $message = 'Bitpin HTTP ' . $statusCode;
+
+        if ($detail !== '') {
+            $message .= ' — ' . $detail;
+        } elseif ($statusCode === 401) {
+            $message .= ' — authentication rejected; token or API credentials/IP permission may be invalid.';
+        } elseif ($statusCode === 403) {
+            $message .= ' — access denied; check API permissions and allowed IP.';
+        }
+
+        parent::__construct($message);
+    }
+
+    private static function safeDetail(array $response): string
+    {
+        foreach (['detail', 'message', 'error', 'non_field_errors'] as $key) {
+            if (!array_key_exists($key, $response)) {
+                continue;
+            }
+
+            $value = $response[$key];
+            if (is_array($value)) {
+                $value = implode(' ', array_map(
+                    static fn (mixed $item): string => is_scalar($item) ? (string) $item : '',
+                    $value
+                ));
+            }
+
+            if (!is_scalar($value)) {
+                continue;
+            }
+
+            $text = trim(preg_replace('/\s+/', ' ', (string) $value) ?? '');
+            if ($text !== '') {
+                return mb_substr($text, 0, 180);
+            }
+        }
+
+        return '';
     }
 }
