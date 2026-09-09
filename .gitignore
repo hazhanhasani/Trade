@@ -1,0 +1,21 @@
+# Runtime / secrets
+backend/storage/config.php
+backend/storage/install.lock
+backend/storage/*.log
+backend/storage/cache/*
+!backend/storage/.gitignore
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Android
+android/.gradle/
+android/local.properties
+android/**/build/
+
+# Misc
+*.tmp
+*.bak
