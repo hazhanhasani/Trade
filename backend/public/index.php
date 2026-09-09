@@ -8,6 +8,7 @@ use Trade\Config;
 use Trade\Database;
 use Trade\Security\AppAccess;
 use Trade\Trading\OrderService;
+use Trade\Updater;
 
 header('Content-Type: application/json; charset=utf-8');
 header('X-Content-Type-Options: nosniff');
@@ -66,12 +67,26 @@ try {
             'ok' => $db,
             'service' => 'Trade',
             'mode' => (bool) Config::get('trading.enabled', false) ? 'live' : 'live_disabled',
-            'capital_asset' => (string) Config::get('trading.capital_asset', 'TON'),
-            'version' => '0.5.0',
+            'capital_asset' => strtoupper((string) Config::get('trading.capital_asset', 'TON')),
+            'version' => Updater::currentVersion(),
             'app_url' => (string) Config::get('app.url', 'https://rado-taxi.sbs'),
             'database' => $db ? 'ok' : 'error',
+            'update_state' => Updater::state(),
             'time_utc' => gmdate(DATE_ATOM),
         ], $db ? 200 : 503);
+    }
+
+    if ($method === 'GET' && $path === '/api/update') {
+        try {
+            respond(['ok' => true, 'data' => Updater::appUpdateInfo()]);
+        } catch (Throwable $e) {
+            respond([
+                'ok' => false,
+                'error' => 'update_check_failed',
+                'message' => $e->getMessage(),
+                'backend_version' => Updater::currentVersion(),
+            ], 503);
+        }
     }
 
     if ($method === 'POST' && $path === '/api/pair') {
@@ -89,6 +104,10 @@ try {
         ]]);
     }
 
+    if (is_file(dirname(__DIR__) . '/storage/maintenance.lock')) {
+        respond(['ok' => false, 'error' => 'maintenance', 'message' => 'Trade is updating. Try again shortly.'], 503);
+    }
+
     requireAppToken();
     $service = new OrderService();
 
@@ -98,11 +117,13 @@ try {
         $kill = (string) ($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn() ?: '0');
         respond(['ok' => true, 'data' => [
             'mode' => (bool) Config::get('trading.enabled', false) ? 'live' : 'live_disabled',
-            'capital_asset' => (string) Config::get('trading.capital_asset', 'TON'),
+            'capital_asset' => strtoupper((string) Config::get('trading.capital_asset', 'TON')),
             'kill_switch' => $kill === '1',
             'credentials_configured' => (bool) $pdo->query("SELECT EXISTS(SELECT 1 FROM exchange_credentials WHERE exchange_name='bitpin')")->fetchColumn(),
             'orders_logged' => (int) $pdo->query('SELECT COUNT(*) FROM orders')->fetchColumn(),
             'active_app_tokens' => AppAccess::activeCount($pdo),
+            'backend_version' => Updater::currentVersion(),
+            'update_state' => Updater::state(),
             'last_run' => $lastRun,
         ]]);
     }
