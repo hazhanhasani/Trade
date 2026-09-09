@@ -107,7 +107,7 @@ private fun DashboardScreen(prefs: TradePreferences, onDisconnect: () -> Unit) {
                 if (!response.ok) throw IllegalStateException("HTTP ${response.code}: ${response.body}")
                 val root = JSONObject(response.body)
                 val exchange = root.optJSONObject("data")?.optJSONObject("exchange")
-                val id = exchange?.optString("id", exchange.optString("order_id", "")) ?: ""
+                val id = if (exchange != null) exchange.optString("id").ifBlank { exchange.optString("order_id") } else ""
                 message = if (id.isNotBlank()) "سفارش واقعی ثبت شد. ID: $id" else "سفارش واقعی ثبت شد."
                 refresh()
             } catch (e: Exception) { error = e.message ?: "ثبت سفارش ناموفق بود" }
@@ -161,7 +161,6 @@ private fun DashboardScreen(prefs: TradePreferences, onDisconnect: () -> Unit) {
                 OutlinedTextField(marketId, { marketId = it }, label = { Text("Bitpin Market ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(amount, { amount = it }, label = { Text("Amount 1") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(price, { price = it }, label = { Text("Price") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(selected = side == "buy", onClick = { side = "buy" }, label = { Text("Buy") })
                     FilterChip(selected = side == "sell", onClick = { side = "sell" }, label = { Text("Sell") })
@@ -170,7 +169,6 @@ private fun DashboardScreen(prefs: TradePreferences, onDisconnect: () -> Unit) {
                     FilterChip(selected = orderMode == "limit", onClick = { orderMode = "limit" }, label = { Text("Limit") })
                     FilterChip(selected = orderMode == "market", onClick = { orderMode = "market" }, label = { Text("Market") })
                 }
-
                 Button(
                     onClick = { submitOrder() },
                     enabled = !loading && connected && mode == "live" && !killSwitch,
