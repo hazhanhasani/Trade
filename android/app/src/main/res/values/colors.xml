@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="trade_icon_background">#061B4A</color>
+    <color name="trade_primary">#0B63F6</color>
+    <color name="trade_cyan">#19C7FF</color>
+    <color name="trade_green">#20D9A6</color>
+</resources>
