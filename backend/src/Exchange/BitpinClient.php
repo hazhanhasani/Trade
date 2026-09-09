@@ -13,6 +13,7 @@ final class BitpinClient
     private ?string $refreshToken;
     private int $timeout;
     private array $endpoints;
+    private ?string $sourceIp;
 
     public function __construct(array $config)
     {
@@ -22,6 +23,10 @@ final class BitpinClient
         $this->accessToken = $config['access_token'] ?? null;
         $this->refreshToken = $config['refresh_token'] ?? null;
         $this->timeout = max(3, min(30, (int) ($config['timeout'] ?? 12)));
+        $sourceIp = trim((string) ($config['source_ip'] ?? ''));
+        $this->sourceIp = filter_var($sourceIp, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 | FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)
+            ? $sourceIp
+            : null;
         $this->endpoints = array_merge([
             'authenticate' => '/usr/authenticate/',
             'refresh' => '/usr/refresh_token/',
@@ -143,6 +148,11 @@ final class BitpinClient
         return ['access' => $this->accessToken, 'refresh' => $this->refreshToken];
     }
 
+    public function sourceIp(): ?string
+    {
+        return $this->sourceIp;
+    }
+
     private function safeSymbol(string $symbol): string
     {
         $symbol = strtoupper(trim($symbol));
@@ -178,9 +188,40 @@ final class BitpinClient
             $url .= '?' . http_build_query($data);
         }
 
+        $result = $this->curlRequest($method, $url, $data, $auth, $this->sourceIp);
+
+        // Some shared hosts expose a public address in their panel but do not
+        // actually assign that address to the PHP namespace. In that case libcurl
+        // returns CURLE_INTERFACE_FAILED (45). Falling back keeps public market
+        // data and diagnostics working instead of breaking every request.
+        if ($result['body'] === false && $this->sourceIp !== null && (int) $result['errno'] === CURLE_INTERFACE_FAILED) {
+            $result = $this->curlRequest($method, $url, $data, $auth, null);
+        }
+
+        if ($result['body'] === false) {
+            $suffix = $this->sourceIp !== null ? ' (source IP ' . $this->sourceIp . ')' : '';
+            throw new \RuntimeException('Bitpin network error' . $suffix . ': ' . $result['error']);
+        }
+
+        $body = (string) $result['body'];
+        $status = (int) $result['status'];
+        $decoded = json_decode($body, true);
+        if (!is_array($decoded)) {
+            $decoded = ['raw' => substr($body, 0, 2000)];
+        }
+
+        if ($status < 200 || $status >= 300) {
+            throw new BitpinHttpException($status, $decoded, $this->sourceIp);
+        }
+
+        return $decoded;
+    }
+
+    private function curlRequest(string $method, string $url, array $data, bool $auth, ?string $sourceIp): array
+    {
         $ch = curl_init($url);
         if ($ch === false) {
-            throw new \RuntimeException('Unable to initialize cURL.');
+            return ['body' => false, 'error' => 'Unable to initialize cURL.', 'errno' => CURLE_FAILED_INIT, 'status' => 0];
         }
 
         $headers = ['Accept: application/json', 'User-Agent: Trade/1.0-live'];
@@ -198,12 +239,13 @@ final class BitpinClient
             CURLOPT_MAXREDIRS => 0,
             CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
             CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
-            // Shared-hosting environments can inject HTTPS_PROXY/all_proxy at
-            // process level. Bitpin whitelists the real source IP, so force a
-            // direct socket and bypass every environment proxy for API calls.
             CURLOPT_PROXY => '',
             CURLOPT_NOPROXY => '*',
         ];
+
+        if ($sourceIp !== null) {
+            $options[CURLOPT_INTERFACE] = $sourceIp;
+        }
 
         if ($method !== 'GET' && $data !== []) {
             $options[CURLOPT_POSTFIELDS] = json_encode($data, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
@@ -213,29 +255,17 @@ final class BitpinClient
         curl_setopt_array($ch, $options);
         $body = curl_exec($ch);
         $error = curl_error($ch);
+        $errno = curl_errno($ch);
         $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
         curl_close($ch);
 
-        if ($body === false) {
-            throw new \RuntimeException('Bitpin network error: ' . $error);
-        }
-
-        $decoded = json_decode($body, true);
-        if (!is_array($decoded)) {
-            $decoded = ['raw' => substr($body, 0, 2000)];
-        }
-
-        if ($status < 200 || $status >= 300) {
-            throw new BitpinHttpException($status, $decoded);
-        }
-
-        return $decoded;
+        return ['body' => $body, 'error' => $error, 'errno' => $errno, 'status' => $status];
     }
 }
 
 final class BitpinHttpException extends \RuntimeException
 {
-    public function __construct(public readonly int $statusCode, public readonly array $response)
+    public function __construct(public readonly int $statusCode, public readonly array $response, public readonly ?string $sourceIp = null)
     {
         $detail = self::safeDetail($response);
         $message = 'Bitpin HTTP ' . $statusCode;
@@ -246,6 +276,10 @@ final class BitpinHttpException extends \RuntimeException
             $message .= ' — authentication rejected; token or API credentials/IP permission may be invalid.';
         } elseif ($statusCode === 403) {
             $message .= ' — access denied; check API permissions and allowed IP.';
+        }
+
+        if ($sourceIp !== null) {
+            $message .= ' [bound source: ' . $sourceIp . ']';
         }
 
         parent::__construct($message);
