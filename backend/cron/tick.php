@@ -7,6 +7,8 @@ require dirname(__DIR__) . '/bootstrap.php';
 use Trade\Config;
 use Trade\Database;
 use Trade\Trading\AutoTraderEngine;
+use Trade\Trading\NobitexAutoTraderEngine;
+use Trade\Trading\NobitexSchema;
 use Trade\Updater;
 
 if (!Config::installed()) {
@@ -15,77 +17,69 @@ if (!Config::installed()) {
 }
 
 $pdo = Database::connection();
+NobitexSchema::ensure();
 $runId = bin2hex(random_bytes(12));
 $stmt = $pdo->prepare("INSERT INTO bot_runs (run_id,status,started_at) VALUES (:id,'running',UTC_TIMESTAMP())");
 $stmt->execute([':id' => $runId]);
-
 $update = Updater::autoUpdateIfDue();
 
-// Never continue a live-trading cycle in the same PHP process that just
-// replaced backend code. The next one-minute Cron run starts a clean process.
+$baseSummary = [
+    'run_id' => $runId,
+    'asset' => 'GRAM',
+    'legacy_alias' => 'TON',
+    'execution_mode' => 'live_only',
+    'update' => $update,
+    'backend_version' => Updater::currentVersion(),
+    'time_utc' => gmdate(DATE_ATOM),
+];
+
+// Do not execute live orders in the PHP process that just replaced backend files.
 if (($update['status'] ?? '') === 'updated') {
-    $summary = [
-        'run_id' => $runId,
-        'asset' => 'GRAM',
-        'legacy_alias' => 'TON',
-        'execution_mode' => 'live_only',
-        'autotrade' => [
-            'status' => 'deferred',
-            'reason' => 'backend_updated_restart_next_tick',
+    $summary = $baseSummary + [
+        'exchanges' => [
+            'bitpin' => ['status'=>'deferred','reason'=>'backend_updated_restart_next_tick'],
+            'nobitex' => ['status'=>'deferred','reason'=>'backend_updated_restart_next_tick'],
         ],
-        'update' => $update,
-        'backend_version' => Updater::currentVersion(),
-        'time_utc' => gmdate(DATE_ATOM),
     ];
     $stmt = $pdo->prepare("UPDATE bot_runs SET status='success',summary_json=:summary,finished_at=UTC_TIMESTAMP() WHERE run_id=:id");
-    $stmt->execute([
-        ':summary' => json_encode($summary, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
-        ':id' => $runId,
-    ]);
-    echo json_encode($summary, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . PHP_EOL;
+    $stmt->execute([':summary'=>json_encode($summary,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE),':id'=>$runId]);
+    echo json_encode($summary,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE) . PHP_EOL;
     exit(0);
 }
 
-try {
-    $autotrade = (new AutoTraderEngine())->run();
+$results = [];
+$enabledCount = 0;
+$failedCount = 0;
 
-    $summary = [
-        'run_id' => $runId,
-        'asset' => 'GRAM',
-        'legacy_alias' => 'TON',
-        'execution_mode' => 'live_only',
-        'autotrade' => $autotrade,
-        'kill_switch' => (string) ($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn() ?: '0') === '1',
-        'update' => $update,
-        'backend_version' => Updater::currentVersion(),
-        'time_utc' => gmdate(DATE_ATOM),
-    ];
+$runExchange = static function (string $exchange, callable $runner) use (&$results, &$enabledCount, &$failedCount): void {
+    if (!NobitexSchema::botEnabled($exchange)) {
+        $results[$exchange] = ['status'=>'disabled','exchange'=>$exchange,'asset'=>'GRAM'];
+        return;
+    }
+    $enabledCount++;
+    try {
+        $results[$exchange] = $runner();
+    } catch (Throwable $e) {
+        $failedCount++;
+        $results[$exchange] = ['status'=>'failed','exchange'=>$exchange,'error'=>$e->getMessage()];
+    }
+};
 
-    $stmt = $pdo->prepare("UPDATE bot_runs SET status='success',summary_json=:summary,finished_at=UTC_TIMESTAMP() WHERE run_id=:id");
-    $stmt->execute([
-        ':summary' => json_encode($summary, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
-        ':id' => $runId,
-    ]);
-    echo json_encode($summary, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . PHP_EOL;
-} catch (Throwable $e) {
-    $error = [
-        'run_id' => $runId,
-        'asset' => 'GRAM',
-        'execution_mode' => 'live_only',
-        'autotrade' => [
-            'status' => 'failed',
-            'error' => $e->getMessage(),
-        ],
-        'update' => $update,
-        'backend_version' => Updater::currentVersion(),
-        'error' => $e->getMessage(),
-        'time_utc' => gmdate(DATE_ATOM),
-    ];
-    $stmt = $pdo->prepare("UPDATE bot_runs SET status='failed',summary_json=:summary,finished_at=UTC_TIMESTAMP() WHERE run_id=:id");
-    $stmt->execute([
-        ':summary' => json_encode($error, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-        ':id' => $runId,
-    ]);
-    fwrite(STDERR, json_encode($error, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . PHP_EOL);
-    exit(1);
-}
+$runExchange('bitpin', static fn(): array => (new AutoTraderEngine())->run());
+$runExchange('nobitex', static fn(): array => (new NobitexAutoTraderEngine())->run());
+
+$overall = $failedCount === 0 ? 'success' : (($enabledCount > $failedCount) ? 'partial' : 'failed');
+$summary = $baseSummary + [
+    'exchanges' => $results,
+    'kill_switch' => (string) ($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn() ?: '0') === '1',
+];
+
+$stmt = $pdo->prepare("UPDATE bot_runs SET status=:status,summary_json=:summary,finished_at=UTC_TIMESTAMP() WHERE run_id=:id");
+$stmt->execute([
+    ':status'=>$overall,
+    ':summary'=>json_encode($summary,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),
+    ':id'=>$runId,
+]);
+
+echo json_encode($summary,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR) . PHP_EOL;
+exit($overall === 'failed' ? 1 : 0);
