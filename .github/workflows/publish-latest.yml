@@ -76,6 +76,7 @@ jobs:
             echo "ready=true" >> "$GITHUB_OUTPUT"
           else
             echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Permanent Android signing is not configured. Backend publishing will continue, but no new Android APK will be published."
           fi
 
       - name: Build permanently signed Android APK
@@ -88,10 +89,34 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         shell: bash
         run: |
-          echo "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/trade-release.jks"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/trade-release.jks"
+          test -s "$RUNNER_TEMP/trade-release.jks"
+          keytool -list \
+            -keystore "$RUNNER_TEMP/trade-release.jks" \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            -alias "$ANDROID_KEY_ALIAS" >/dev/null
           export ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/trade-release.jks"
           ./gradlew :app:assembleRelease --no-daemon
           cp app/build/outputs/apk/release/app-release.apk ../dist/Trade.apk
+
+      - name: Verify Android signature
+        id: apk_signature
+        if: steps.signing.outputs.ready == 'true'
+        shell: bash
+        run: |
+          APK="$GITHUB_WORKSPACE/dist/Trade.apk"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner was not found in the Android SDK."
+            exit 1
+          fi
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee "$RUNNER_TEMP/apksigner.txt"
+          CERT_SHA=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/apksigner.txt" | head -n1 | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
+          if [ -z "$CERT_SHA" ]; then
+            echo "::error::Unable to read signer certificate fingerprint."
+            exit 1
+          fi
+          echo "cert_sha256=$CERT_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Build update manifest
         env:
@@ -99,6 +124,7 @@ jobs:
           ANDROID_VERSION_NAME: ${{ steps.versions.outputs.android_name }}
           ANDROID_VERSION_CODE: ${{ steps.versions.outputs.android_code }}
           ANDROID_READY: ${{ steps.signing.outputs.ready }}
+          ANDROID_CERT_SHA256: ${{ steps.apk_signature.outputs.cert_sha256 }}
         shell: bash
         run: |
           BACKEND_SHA=$(sha256sum dist/Trade-cPanel.zip | awk '{print $1}')
@@ -106,10 +132,13 @@ jobs:
             ANDROID_SHA=$(sha256sum dist/Trade.apk | awk '{print $1}')
             ANDROID_AVAILABLE=true
             ANDROID_URL='https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade.apk'
+            SIGNING_STATUS='permanent'
           else
             ANDROID_SHA=''
             ANDROID_AVAILABLE=false
             ANDROID_URL=''
+            ANDROID_CERT_SHA256=''
+            SIGNING_STATUS='missing'
           fi
           jq -n \
             --arg backendVersion "$BACKEND_VERSION" \
@@ -119,8 +148,10 @@ jobs:
             --arg androidSha "$ANDROID_SHA" \
             --argjson androidAvailable "$ANDROID_AVAILABLE" \
             --arg androidUrl "$ANDROID_URL" \
+            --arg signingStatus "$SIGNING_STATUS" \
+            --arg signingCertSha256 "$ANDROID_CERT_SHA256" \
             --arg publishedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{schema:1,published_at:$publishedAt,backend:{version:$backendVersion,url:"https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade-cPanel.zip",sha256:$backendSha},android:{available:$androidAvailable,version_code:$androidCode,version_name:$androidVersion,url:$androidUrl,sha256:$androidSha}}' \
+            '{schema:1,published_at:$publishedAt,backend:{version:$backendVersion,url:"https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade-cPanel.zip",sha256:$backendSha},android:{available:$androidAvailable,version_code:$androidCode,version_name:$androidVersion,url:$androidUrl,sha256:$androidSha,signing:{status:$signingStatus,cert_sha256:$signingCertSha256}}}' \
             > dist/latest.json
 
       - name: Publish stable release assets
@@ -141,7 +172,7 @@ jobs:
           if [ -f dist/Trade.apk ]; then
             gh release upload trade-latest dist/Trade.apk --clobber
           else
-            gh release delete-asset trade-latest Trade.apk --yes >/dev/null 2>&1 || true
+            echo "No newly signed APK was produced; preserving any previously published Trade.apk asset."
           fi
 
       - uses: actions/upload-artifact@v4
