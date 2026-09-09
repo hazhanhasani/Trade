@@ -2,4 +2,4 @@
 
 declare(strict_types=1);
 
-return '0.6.1';
+return '1.0.0';
