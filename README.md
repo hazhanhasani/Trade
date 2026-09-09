@@ -2,11 +2,11 @@
 
 Trade is a production-oriented Bitpin trading backend for cPanel/shared hosting with a companion Android app for `https://rado-taxi.sbs`.
 
-## Current release — v1.0.1
+## Current release — backend v1.0.2 / Android v1.0.1
 
 ### Production trading
 
-Trade now includes a live automatic trading engine. The production path does not use paper trading.
+Trade includes a live automatic trading engine. The production path does not use paper trading.
 
 Implemented:
 
@@ -26,11 +26,13 @@ Implemented:
 - Persian RTL admin panel at `/admin/`
 - trading control dashboard at `/admin/bot/`
 - Update Center at `/admin/update/`
+- Repair Center at `/admin/repair.php`
 - AES-256-GCM encryption for Bitpin credentials and application tokens
 - secure one-time Android pairing
 - automatic cPanel self-update with SHA-256 verification, backup, maintenance lock, health validation and rollback
 - stable GitHub update channel at release tag `trade-latest`
 - Android automatic update check with SHA-256 verification
+- permanent Android release signing guard: installable APKs are never produced with an ephemeral CI debug certificate
 
 > Automatic trading can lose money. Risk controls reduce operational risk but cannot guarantee profit or prevent every market loss.
 
@@ -57,7 +59,7 @@ Implemented:
 - compileSdk 37
 - targetSdk 36
 - Jetpack Compose
-- permanent signing secrets for production APK releases
+- one permanent signing key for every production APK release
 
 ## First installation
 
@@ -78,7 +80,7 @@ The main cron performs updater checks and the live trading cycle. Trading occurs
 
 ## Existing installations
 
-The trading schema is ensured automatically by the production trading bootstrap, so existing installations can receive the update without reinstalling the application. Runtime configuration in `storage/config.php` is preserved by the updater.
+The trading schema is ensured automatically by the production trading bootstrap, so existing installations can receive backend updates without reinstalling the application. Runtime configuration in `storage/config.php` is preserved by the updater.
 
 After updating, review `/admin/bot/` before enabling live execution and confirm the risk profile and limits are appropriate for the account.
 
@@ -104,6 +106,7 @@ The production execution path includes:
 - `/admin/` — main control center
 - `/admin/bot/` — automatic trading controls, state, positions and signals
 - `/admin/update/` — update and deployment status
+- `/admin/repair.php` — Bitpin authentication and Cron diagnostics
 
 ## API
 
@@ -131,16 +134,27 @@ The Android app defaults to `https://rado-taxi.sbs`. Bitpin API credentials are 
 
 ## Permanent Android signing
 
-Production updates must use the same signing key. Never commit a keystore to this public repository.
+Android updates are accepted only when the new APK uses the same application ID and signing certificate as the installed application and has a compatible version code. Production builds therefore use one permanent signing key for the lifetime of the app.
 
-GitHub Actions expects:
+Never commit a keystore or its password to this public repository.
+
+GitHub Actions expects these repository secrets:
 
 - `ANDROID_KEYSTORE_BASE64`
 - `ANDROID_KEYSTORE_PASSWORD`
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEY_PASSWORD`
 
-If all four secrets are configured, the release workflow creates `Trade.apk`. Otherwise the standalone Android workflow can only produce a debug APK and `Trade.apk` is not published to the stable release channel.
+When all four secrets are configured, the workflows build and verify a permanently signed release APK. The signer certificate SHA-256 fingerprint is written into `latest.json`.
+
+When permanent signing is missing:
+
+- normal Android push/manual builds fail instead of producing an installable APK with a temporary debug certificate
+- pull requests may compile a debug build only for CI validation; that build is not uploaded as an installable release artifact
+- `Publish Latest` still publishes backend updates but does not publish a new Android APK
+- an already-published signed `Trade.apk` is preserved instead of being deleted
+
+If a previously installed build was signed by a temporary CI/debug key and that private key no longer exists, Android cannot migrate it to a new signing certificate. In that specific case one final uninstall/reinstall is required. After installing the first APK signed with the permanent key, later updates can install normally without deleting the app.
 
 ## Stable update channel
 
@@ -164,8 +178,8 @@ The backend verifies the update package checksum before replacing files and can 
 
 - `php-lint.yml` — PHP syntax quality gate
 - `cpanel-package.yml` — validates PHP and creates `Trade-cPanel.zip`
-- `android-build.yml` — builds a signed release APK when signing secrets exist, otherwise a debug APK
-- `publish-latest.yml` — validates PHP, packages the backend, builds the signed Android release when possible, creates `latest.json`, and updates the stable `trade-latest` release
+- `android-build.yml` — requires permanent signing for installable APK artifacts and verifies the final APK certificate
+- `publish-latest.yml` — validates PHP, packages the backend, builds/verifies the permanently signed Android release when signing is configured, creates `latest.json`, and updates the stable release
 
 ## Repository layout
 
@@ -178,6 +192,7 @@ backend/
     admin/
       bot/
       update/
+      repair.php
     install/
   src/
     Exchange/BitpinClient.php
