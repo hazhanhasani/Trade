@@ -1,5 +1,6 @@
 package ir.trade.app.ui
 
+import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,6 +26,7 @@ fun TradeEntry(pairingUri: String?, onPairingHandled: () -> Unit) {
     var pairing by remember(pairingUri) { mutableStateOf(!pairingUri.isNullOrBlank()) }
     var error by remember(pairingUri) { mutableStateOf("") }
     var paired by remember(pairingUri) { mutableStateOf(false) }
+    var manualSetup by remember { mutableStateOf(false) }
 
     LaunchedEffect(pairingUri) {
         if (pairingUri.isNullOrBlank()) return@LaunchedEffect
@@ -61,7 +63,7 @@ fun TradeEntry(pairingUri: String?, onPairingHandled: () -> Unit) {
     }
 
     when {
-        paired -> TradeApp()
+        paired || prefs.isConfigured() || manualSetup -> TradeApp()
         pairing -> PairingStatusCard("در حال اتصال امن به پنل…", null)
         error.isNotBlank() -> PairingStatusCard(
             title = "اتصال خودکار انجام نشد",
@@ -71,13 +73,68 @@ fun TradeEntry(pairingUri: String?, onPairingHandled: () -> Unit) {
                 onPairingHandled()
             },
         )
-        else -> TradeApp()
+        else -> SmartSetupScreen(
+            onOpenAdmin = {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("$TRUSTED_SERVER/admin/")))
+            },
+            onManualSetup = { manualSetup = true },
+        )
+    }
+}
+
+@Composable
+private fun SmartSetupScreen(onOpenAdmin: () -> Unit, onManualSetup: () -> Unit) {
+    val colors = lightColorScheme(primary = androidx.compose.ui.graphics.Color(0xFF0B63F6))
+    MaterialTheme(colorScheme = colors) {
+        Surface(modifier = Modifier.fillMaxSize(), color = androidx.compose.ui.graphics.Color(0xFFF5F7FB)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+                    .padding(20.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(24.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(22.dp),
+                        verticalArrangement = Arrangement.spacedBy(13.dp),
+                    ) {
+                        Text("Trade", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold)
+                        Text("اتصال اپ بدون واردکردن توکن")
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = androidx.compose.ui.graphics.Color(0xFFEEF5FF)),
+                            shape = RoundedCornerShape(16.dp),
+                        ) {
+                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text("روش پیشنهادی", fontWeight = FontWeight.Bold)
+                                Text("۱) پنل مدیریت را باز کن.\n۲) در «اتصال خودکار اپ» یک کد بساز.\n۳) همان‌جا «اتصال خودکار به اپ» را بزن.\nتوکن جدید خودکار و رمزگذاری‌شده روی گوشی ذخیره می‌شود.")
+                            }
+                        }
+                        Button(onClick = onOpenAdmin, modifier = Modifier.fillMaxWidth()) {
+                            Text("باز کردن پنل مدیریت")
+                        }
+                        OutlinedButton(onClick = onManualSetup, modifier = Modifier.fillMaxWidth()) {
+                            Text("ورود دستی توکن — فقط برای مواقع اضطراری")
+                        }
+                        Text(
+                            "API Key و Secret بیت‌پین وارد گوشی نمی‌شوند و روی سرور باقی می‌مانند.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
 @Composable
 private fun PairingStatusCard(title: String, error: String?, action: (() -> Unit)? = null) {
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+    Surface(modifier = Modifier.fillMaxSize(), color = androidx.compose.ui.graphics.Color(0xFFF5F7FB)) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -103,7 +160,7 @@ private fun PairingStatusCard(title: String, error: String?, action: (() -> Unit
                         Text(error, color = MaterialTheme.colorScheme.error)
                         if (action != null) {
                             OutlinedButton(onClick = action, modifier = Modifier.fillMaxWidth()) {
-                                Text("بازگشت به صفحه اتصال")
+                                Text("بازگشت به اتصال هوشمند")
                             }
                         }
                     }
