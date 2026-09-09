@@ -41,7 +41,7 @@ final class AppAccess
     public static function bootstrapLegacy(PDO $pdo): void
     {
         self::ensureSchema($pdo);
-        $count = (int) $pdo->query('SELECT COUNT(*) FROM app_tokens WHERE revoked_at IS NULL')->fetchColumn();
+        $count = (int) $pdo->query('SELECT COUNT(*) FROM app_tokens')->fetchColumn();
         if ($count > 0) {
             return;
         }
@@ -78,7 +78,7 @@ final class AppAccess
     public static function issueToken(PDO $pdo, string $label, ?int $adminId = null): array
     {
         self::ensureSchema($pdo);
-        $label = trim($label) !== '' ? mb_substr(trim($label), 0, 120) : 'Android app';
+        $label = trim($label) !== '' ? substr(trim($label), 0, 120) : 'Android app';
         $token = self::base64Url(random_bytes(32));
         $stmt = $pdo->prepare('INSERT INTO app_tokens (label,token_hash,created_by_admin_id,created_at) VALUES (:label,:hash,:admin,UTC_TIMESTAMP())');
         $stmt->execute([
