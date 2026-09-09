@@ -17,11 +17,15 @@ if (!Config::installed()) {
 session_name('trade_admin');
 session_set_cookie_params(['httponly'=>true,'secure'=>true,'samesite'=>'Strict','path'=>'/admin']);
 session_start();
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
 if (!isset($_SESSION['admin_id'])) { header('Location: /admin/'); exit; }
 if (!isset($_SESSION['csrf'])) $_SESSION['csrf'] = bin2hex(random_bytes(24));
 
 $pdo = Database::connection();
-$message=''; $error=''; $bitpinStatus='نامشخص'; $bitpinOk=false;
+$message='';
+$error=isset($_GET['csrf_refresh']) ? 'فرم امنیتی قدیمی بود و برای جلوگیری از اجرای درخواست نامعتبر تازه‌سازی شد. هیچ تغییری انجام نشد؛ لطفاً دکمه موردنظر را دوباره بزن.' : '';
+$bitpinStatus='نامشخص'; $bitpinOk=false;
 function h(mixed $v): string { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 function testBitpinConnection(): array { $s=new OrderService(); $c=$s->client(); $c->authenticate(); $s->syncTokens($c); $w=$c->wallets(); $s->syncTokens($c); return $w; }
 function detectEgressIp(): ?string {
@@ -33,7 +37,13 @@ function detectEgressIp(): ?string {
 }
 
 if($_SERVER['REQUEST_METHOD']==='POST'){
-    if(!hash_equals((string)$_SESSION['csrf'],(string)($_POST['csrf']??''))){http_response_code(403);exit('CSRF');}
+    $sessionCsrf=(string)($_SESSION['csrf']??'');
+    $postedCsrf=(string)($_POST['csrf']??'');
+    if($sessionCsrf===''||$postedCsrf===''||!hash_equals($sessionCsrf,$postedCsrf)){
+        $_SESSION['csrf']=bin2hex(random_bytes(24));
+        header('Location: /admin/repair.php?csrf_refresh=1',true,303);
+        exit;
+    }
     $action=(string)($_POST['action']??'');
     try{
         if($action==='test_current'){testBitpinConnection();$message='اتصال Bitpin با ورود مجدد کامل موفق بود و Wallet API پاسخ داد.';}
