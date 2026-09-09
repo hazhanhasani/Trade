@@ -36,36 +36,19 @@ function requireAppToken(): void
         respond(['ok' => false, 'error' => 'unauthorized'], 401);
     }
     $expectedHash = (string) Config::require('app.api_token_hash');
-    $actualHash = hash('sha256', trim($m[1]));
-    if (!hash_equals($expectedHash, $actualHash)) {
+    if (!hash_equals($expectedHash, hash('sha256', trim($m[1])))) {
         respond(['ok' => false, 'error' => 'unauthorized'], 401);
     }
 }
 
-function jsonBody(): array
-{
-    $raw = file_get_contents('php://input');
-    if ($raw === false || trim($raw) === '') {
-        return [];
-    }
-    $data = json_decode($raw, true, 64, JSON_THROW_ON_ERROR);
-    if (!is_array($data)) {
-        throw new InvalidArgumentException('JSON object expected.');
-    }
-    return $data;
-}
-
 if ($method === 'GET' && $path === '/api/health') {
     $db = true;
-    try {
-        Database::connection()->query('SELECT 1');
-    } catch (Throwable) {
-        $db = false;
-    }
+    try { Database::connection()->query('SELECT 1'); } catch (Throwable) { $db = false; }
     respond([
         'ok' => $db,
         'service' => 'Trade',
-        'version' => '0.1.0',
+        'mode' => 'read_only',
+        'version' => '0.2.0',
         'database' => $db ? 'ok' : 'error',
         'time_utc' => gmdate(DATE_ATOM),
     ], $db ? 200 : 503);
@@ -73,6 +56,17 @@ if ($method === 'GET' && $path === '/api/health') {
 
 requireAppToken();
 $service = new OrderService();
+
+if ($method === 'GET' && $path === '/api/status') {
+    $pdo = Database::connection();
+    $lastRun = $pdo->query('SELECT run_id,status,started_at,finished_at FROM bot_runs ORDER BY id DESC LIMIT 1')->fetch() ?: null;
+    respond(['ok' => true, 'data' => [
+        'mode' => 'read_only',
+        'credentials_configured' => (bool) $pdo->query("SELECT EXISTS(SELECT 1 FROM exchange_credentials WHERE exchange_name='bitpin')")->fetchColumn(),
+        'orders_logged' => (int) $pdo->query('SELECT COUNT(*) FROM orders')->fetchColumn(),
+        'last_run' => $lastRun,
+    ]]);
+}
 
 if ($method === 'GET' && $path === '/api/markets') {
     $client = $service->client();
@@ -91,22 +85,6 @@ if ($method === 'GET' && $path === '/api/orders') {
     $data = $client->orders($_GET);
     $service->syncTokens($client);
     respond(['ok' => true, 'data' => $data]);
-}
-
-if ($method === 'POST' && $path === '/api/orders') {
-    respond(['ok' => true, 'data' => $service->create(jsonBody(), 'android_or_api')], 201);
-}
-
-if ($method === 'DELETE' && preg_match('#^/api/orders/([^/]+)$#', $path, $m)) {
-    respond(['ok' => true, 'data' => $service->cancel($m[1])]);
-}
-
-if ($method === 'POST' && $path === '/api/kill-switch') {
-    $body = jsonBody();
-    $enabled = filter_var($body['enabled'] ?? true, FILTER_VALIDATE_BOOL);
-    $stmt = Database::connection()->prepare("INSERT INTO settings (key_name,value_text,updated_at) VALUES ('kill_switch',:v,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE value_text=VALUES(value_text),updated_at=UTC_TIMESTAMP()");
-    $stmt->execute([':v' => $enabled ? '1' : '0']);
-    respond(['ok' => true, 'kill_switch' => $enabled]);
 }
 
 respond(['ok' => false, 'error' => 'not_found'], 404);
