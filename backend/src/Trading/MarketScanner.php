@@ -9,7 +9,11 @@ use Trade\Exchange\BitpinClient;
 final class MarketScanner
 {
     private const CANONICAL_ASSET = 'GRAM';
-    private const ASSET_ALIASES = ['GRAM', 'TON'];
+    private const ASSET_ALIASES = ['GRAM', 'TON', 'TONCOIN'];
+    private const MAX_MARKET_PAGES = 100;
+
+    private int $lastScannedRecords = 0;
+    private int $lastScannedPages = 0;
 
     public function snapshot(BitpinClient $client, string $preferredQuote = 'USDT'): array
     {
@@ -21,7 +25,13 @@ final class MarketScanner
         $markets = $this->loadMarkets($client);
         $market = $this->chooseMarket($markets, $preferredQuote);
         if ($market === null) {
-            throw new \RuntimeException('No tradable GRAM/TON market was found on Bitpin.');
+            $near = $this->nearbyMarketCodes($markets);
+            $suffix = $near === [] ? '' : ' Similar codes: ' . implode(', ', $near) . '.';
+            throw new \RuntimeException(
+                'No tradable GRAM/TON market was found on Bitpin after scanning '
+                . $this->lastScannedRecords . ' records across ' . $this->lastScannedPages . ' page(s).'
+                . $suffix
+            );
         }
 
         if ($market['price'] <= 0) {
@@ -63,6 +73,10 @@ final class MarketScanner
             'base_precision' => $market['base_precision'],
             'prices' => $prices,
             'orderbook_imbalance' => $this->orderBookImbalance($book),
+            'market_scan' => [
+                'records' => $this->lastScannedRecords,
+                'pages' => $this->lastScannedPages,
+            ],
             'observed_at' => gmdate(DATE_ATOM),
         ];
     }
@@ -70,42 +84,89 @@ final class MarketScanner
     private function loadMarkets(BitpinClient $client): array
     {
         $all = [];
-        for ($page = 1; $page <= 20; $page++) {
+        $seen = [];
+        $rawLoaded = 0;
+        $page = 1;
+
+        while ($page <= self::MAX_MARKET_PAGES) {
             $response = $client->markets(['page' => $page]);
             $records = $this->records($response);
-            foreach ($records as $record) {
-                $normalized = $this->normalizeMarket($record);
-                if ($normalized !== null) {
-                    $all[] = $normalized;
-                }
-            }
-            if (array_is_list($response) || empty($response['next'])) {
+            $this->lastScannedPages = $page;
+
+            if ($records === []) {
                 break;
             }
+
+            $rawLoaded += count($records);
+
+            foreach ($records as $record) {
+                $normalized = $this->normalizeMarket($record);
+                if ($normalized === null) {
+                    continue;
+                }
+
+                $dedupeKey = (string) $normalized['id'] . ':' . $normalized['symbol'];
+                if (isset($seen[$dedupeKey])) {
+                    continue;
+                }
+                $seen[$dedupeKey] = true;
+                $all[] = $normalized;
+            }
+
+            if (array_is_list($response)) {
+                break;
+            }
+
+            $next = $response['next'] ?? null;
+            if (is_string($next) && trim($next) !== '') {
+                $page++;
+                continue;
+            }
+
+            $reportedCount = (int) ($response['count'] ?? 0);
+            if ($reportedCount > 0 && $rawLoaded < $reportedCount) {
+                $page++;
+                continue;
+            }
+
+            break;
         }
+
+        $this->lastScannedRecords = $rawLoaded;
         return $all;
     }
 
     private function chooseMarket(array $markets, string $preferredQuote): ?array
     {
-        $candidates = array_values(array_filter($markets, static function (array $market): bool {
-            return in_array($market['base'], self::ASSET_ALIASES, true) && $market['tradable'];
+        $candidates = array_values(array_filter($markets, function (array $market): bool {
+            return $market['tradable'] && $this->isTargetAsset(
+                (string) $market['base'],
+                (string) ($market['base_title'] ?? ''),
+                (string) ($market['base_title_fa'] ?? '')
+            );
         }));
+
         if ($candidates === []) {
             return null;
         }
 
-        usort($candidates, static function (array $a, array $b) use ($preferredQuote): int {
-            $rank = static function (array $market) use ($preferredQuote): int {
-                $quote = $market['quote'];
-                if ($market['base'] === 'GRAM' && $quote === $preferredQuote) return 0;
-                if ($market['base'] === 'TON' && $quote === $preferredQuote) return 1;
-                if ($market['base'] === 'GRAM' && $quote === 'USDT') return 2;
-                if ($market['base'] === 'TON' && $quote === 'USDT') return 3;
-                if ($market['base'] === 'GRAM' && $quote === 'IRT') return 4;
-                if ($market['base'] === 'TON' && $quote === 'IRT') return 5;
-                return 10;
+        usort($candidates, function (array $a, array $b) use ($preferredQuote): int {
+            $rank = function (array $market) use ($preferredQuote): int {
+                $base = strtoupper((string) $market['base']);
+                $quote = strtoupper((string) $market['quote']);
+                $assetRank = match ($base) {
+                    'GRAM' => 0,
+                    'TON' => 1,
+                    'TONCOIN' => 2,
+                    default => 3,
+                };
+
+                if ($quote === $preferredQuote) return $assetRank;
+                if ($quote === 'USDT') return 10 + $assetRank;
+                if ($quote === 'IRT') return 20 + $assetRank;
+                return 30 + $assetRank;
             };
+
             return $rank($a) <=> $rank($b);
         });
 
@@ -115,35 +176,136 @@ final class MarketScanner
     private function normalizeMarket(array $row): ?array
     {
         $id = (int) ($row['id'] ?? $row['market_id'] ?? 0);
-        $base = strtoupper((string) ($row['base'] ?? $row['currency1']['code'] ?? $row['base_currency']['code'] ?? ''));
-        $quote = strtoupper((string) ($row['quote'] ?? $row['currency2']['code'] ?? $row['quote_currency']['code'] ?? ''));
-        $symbol = strtoupper((string) ($row['symbol'] ?? $row['code'] ?? (($base && $quote) ? $base . '_' . $quote : '')));
+
+        $currency1 = is_array($row['currency1'] ?? null) ? $row['currency1'] : [];
+        $currency2 = is_array($row['currency2'] ?? null) ? $row['currency2'] : [];
+        $baseCurrency = is_array($row['base_currency'] ?? null) ? $row['base_currency'] : [];
+        $quoteCurrency = is_array($row['quote_currency'] ?? null) ? $row['quote_currency'] : [];
+
+        $base = strtoupper(trim((string) ($row['base'] ?? $currency1['code'] ?? $baseCurrency['code'] ?? '')));
+        $quote = strtoupper(trim((string) ($row['quote'] ?? $currency2['code'] ?? $quoteCurrency['code'] ?? '')));
+
+        $rawSymbol = strtoupper(trim((string) ($row['symbol'] ?? $row['code'] ?? '')));
+        [$parsedBase, $parsedQuote] = $this->parseSymbol($rawSymbol);
+        if ($base === '') {
+            $base = $parsedBase;
+        }
+        if ($quote === '') {
+            $quote = $parsedQuote;
+        }
+
+        $symbol = $rawSymbol !== '' ? $rawSymbol : (($base !== '' && $quote !== '') ? $base . '_' . $quote : '');
         if ($id <= 0 || $base === '' || $quote === '' || $symbol === '') {
             return null;
         }
 
         $price = $this->number($row['price'] ?? $row['price_info']['price'] ?? $row['order_book_info']['price'] ?? $row['last_price'] ?? 0);
-        $change = $this->number($row['change_percent'] ?? $row['daily_change_percent'] ?? $row['price_info']['change'] ?? $row['order_book_info']['change'] ?? 0);
-        $precision = (int) ($row['base_amount_precision'] ?? $row['currency1']['decimal_amount'] ?? $row['base_currency']['decimal_amount'] ?? 8);
+        $change = $this->number(
+            $row['change_percent']
+            ?? $row['daily_change_percent']
+            ?? $row['daily_change_price']
+            ?? $row['price_info']['change']
+            ?? $row['order_book_info']['change']
+            ?? 0
+        );
+        $precision = (int) ($row['base_amount_precision'] ?? $currency1['decimal_amount'] ?? $baseCurrency['decimal_amount'] ?? 8);
+
+        $tradable = true;
+        if (array_key_exists('tradable', $row)) {
+            $tradable = (bool) $row['tradable'];
+        } elseif (array_key_exists('tradable', $currency1)) {
+            $tradable = (bool) $currency1['tradable'];
+        }
 
         return [
             'id' => $id,
             'base' => $base,
             'quote' => $quote,
             'symbol' => $symbol,
-            'tradable' => !array_key_exists('tradable', $row) || (bool) $row['tradable'],
+            'tradable' => $tradable,
             'price' => $price,
             'change_percent' => $change,
             'base_precision' => max(0, min(18, $precision)),
+            'base_title' => (string) ($row['base_title'] ?? $currency1['title'] ?? $baseCurrency['title'] ?? ''),
+            'base_title_fa' => (string) ($currency1['title_fa'] ?? $baseCurrency['title_fa'] ?? ''),
         ];
+    }
+
+    private function parseSymbol(string $symbol): array
+    {
+        if ($symbol === '') {
+            return ['', ''];
+        }
+
+        $normalized = str_replace(['-', '/'], '_', $symbol);
+        $parts = array_values(array_filter(explode('_', $normalized), static fn (string $part): bool => $part !== ''));
+        if (count($parts) >= 2) {
+            return [$parts[0], $parts[count($parts) - 1]];
+        }
+
+        foreach (['USDT', 'IRT', 'USDC', 'BTC', 'ETH'] as $quote) {
+            if (str_ends_with($symbol, $quote) && strlen($symbol) > strlen($quote)) {
+                return [substr($symbol, 0, -strlen($quote)), $quote];
+            }
+        }
+
+        return ['', ''];
+    }
+
+    private function isTargetAsset(string $code, string $title = '', string $titleFa = ''): bool
+    {
+        $code = strtoupper(preg_replace('/[^A-Z0-9]/', '', $code) ?? '');
+        if (in_array($code, self::ASSET_ALIASES, true)) {
+            return true;
+        }
+
+        $name = strtoupper(trim($title));
+        if ($name !== '' && (
+            str_contains($name, 'TONCOIN')
+            || str_contains($name, 'THE OPEN NETWORK')
+            || preg_match('/\bGRAM\b/', $name) === 1
+        )) {
+            return true;
+        }
+
+        $fa = trim($titleFa);
+        return $fa !== '' && (
+            str_contains($fa, 'تون کوین')
+            || str_contains($fa, 'تون‌کوین')
+            || str_contains($fa, 'گرام')
+        );
+    }
+
+    private function nearbyMarketCodes(array $markets): array
+    {
+        $codes = [];
+        foreach ($markets as $market) {
+            $haystack = strtoupper(
+                (string) ($market['symbol'] ?? '') . ' '
+                . (string) ($market['base'] ?? '') . ' '
+                . (string) ($market['base_title'] ?? '')
+            );
+            if (
+                str_contains($haystack, 'TON')
+                || str_contains($haystack, 'GRAM')
+                || str_contains($haystack, 'OPEN NETWORK')
+            ) {
+                $codes[] = (string) ($market['symbol'] ?? '');
+            }
+            if (count($codes) >= 8) {
+                break;
+            }
+        }
+
+        return array_values(array_unique(array_filter($codes)));
     }
 
     private function tickerPrice(array $response, string $symbol): float
     {
         foreach ($this->records($response) as $row) {
-            $code = strtoupper((string) ($row['symbol'] ?? $row['code'] ?? ''));
+            $code = strtoupper((string) ($row['symbol'] ?? $row['code'] ?? $row['market']['code'] ?? ''));
             if ($code !== $symbol) continue;
-            $price = $this->number($row['price'] ?? $row['last_price'] ?? 0);
+            $price = $this->number($row['price'] ?? $row['last_price'] ?? $row['price_info']['price'] ?? 0);
             if ($price > 0) return $price;
         }
         return 0.0;
@@ -196,11 +358,24 @@ final class MarketScanner
     private function records(array $response): array
     {
         if (array_is_list($response)) return array_values(array_filter($response, 'is_array'));
-        foreach (['results', 'data', 'items'] as $key) {
-            if (isset($response[$key]) && is_array($response[$key]) && array_is_list($response[$key])) {
-                return array_values(array_filter($response[$key], 'is_array'));
+
+        foreach (['results', 'data', 'items', 'markets'] as $key) {
+            if (!isset($response[$key]) || !is_array($response[$key])) {
+                continue;
+            }
+
+            $value = $response[$key];
+            if (array_is_list($value)) {
+                return array_values(array_filter($value, 'is_array'));
+            }
+
+            foreach (['results', 'data', 'items'] as $nestedKey) {
+                if (isset($value[$nestedKey]) && is_array($value[$nestedKey]) && array_is_list($value[$nestedKey])) {
+                    return array_values(array_filter($value[$nestedKey], 'is_array'));
+                }
             }
         }
+
         return [];
     }
 
