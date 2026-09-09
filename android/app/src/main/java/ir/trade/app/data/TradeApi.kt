@@ -10,6 +10,7 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
     data class Response(val code: Int, val body: String) { val ok: Boolean get() = code in 200..299 }
 
     suspend fun health(): Response = request("GET", "/api/health", authenticated = false)
+    suspend fun updateInfo(): Response = request("GET", "/api/update", authenticated = false)
     suspend fun pair(code: String): Response = request(
         "POST",
         "/api/pair",
@@ -34,8 +35,8 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
         val connection = (URL(baseUrl.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = 8_000
-            readTimeout = 15_000
-            instanceFollowRedirects = false
+            readTimeout = 20_000
+            instanceFollowRedirects = true
             setRequestProperty("Accept", "application/json")
             if (authenticated) setRequestProperty("Authorization", "Bearer $apiToken")
             if (body != null) {
