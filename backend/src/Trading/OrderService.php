@@ -28,6 +28,7 @@ final class OrderService
             'refresh_token' => $row['refresh_token_enc'] ? Crypto::decrypt((string) $row['refresh_token_enc'], $key) : null,
             'timeout' => (int) Config::get('bitpin.timeout', 12),
             'endpoints' => Config::get('bitpin.endpoints', []),
+            'source_ip' => $this->bitpinSourceIp(),
         ]);
     }
 
@@ -196,6 +197,46 @@ final class OrderService
         if (!$this->liveEnabled()) {
             throw new \RuntimeException('Live trading is disabled.');
         }
+    }
+
+    private function bitpinSourceIp(): ?string
+    {
+        $configured = trim((string) Config::get('bitpin.source_ip', ''));
+        if ($this->validPublicIpv4($configured)) {
+            return $configured;
+        }
+
+        // This production deployment is hosted on rado-taxi.sbs. ShetabanHost's
+        // account panel/support identifies 185.130.50.38 as the fixed server IPv4.
+        // Binding the socket to it prevents destination-specific/shared-host routes
+        // from silently selecting a different local source address before NAT.
+        $appHost = strtolower((string) parse_url((string) Config::get('app.url', ''), PHP_URL_HOST));
+        if ($appHost === 'rado-taxi.sbs' || $appHost === 'www.rado-taxi.sbs') {
+            return '185.130.50.38';
+        }
+
+        $serverAddr = trim((string) ($_SERVER['SERVER_ADDR'] ?? ''));
+        if ($this->validPublicIpv4($serverAddr)) {
+            return $serverAddr;
+        }
+
+        if ($appHost !== '') {
+            $resolved = gethostbyname($appHost);
+            if ($this->validPublicIpv4($resolved)) {
+                return $resolved;
+            }
+        }
+
+        return null;
+    }
+
+    private function validPublicIpv4(string $ip): bool
+    {
+        return $ip !== '' && filter_var(
+            $ip,
+            FILTER_VALIDATE_IP,
+            FILTER_FLAG_IPV4 | FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE
+        ) !== false;
     }
 
     private function positive(mixed $value, string $field): float
