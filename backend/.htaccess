@@ -1,0 +1,22 @@
+Options -Indexes
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Keep cPanel/AutoSSL challenge paths reachable from the real document root.
+    RewriteRule ^\.well-known(?:/|$) - [L]
+
+    # Never expose backend internals when this directory is used as the domain root.
+    RewriteRule ^(?:src|storage|database|cron)(?:/|$) - [F,L,NC]
+    RewriteRule ^bootstrap\.php$ - [F,L,NC]
+
+    # Prevent an internal rewrite loop after requests are forwarded to public/.
+    RewriteRule ^public(?:/|$) - [L]
+
+    # Easy cPanel mode: the archive may be extracted directly into the domain root.
+    RewriteRule ^(.*)$ public/$1 [L]
+</IfModule>
+
+<FilesMatch "(^\.|\.(?:sql|log|ini|env)$)">
+    Require all denied
+</FilesMatch>
