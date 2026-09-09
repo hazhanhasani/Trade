@@ -39,19 +39,19 @@ jobs:
         run: |
           if [[ -n "$KS_B64" && -n "$KS_PASS" && -n "$KEY_ALIAS" && -n "$KEY_PASS" ]]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Permanent Android signing is configured."
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Permanent Android signing is not configured. Running compile validation only; no installable APK will be uploaded."
+            {
+              echo "### Android signing"
+              echo "Permanent signing secrets are not configured."
+              echo "The source will still be compiled so CI can pass/fail on real code errors, but no ephemeral APK is published."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Refuse installable builds without permanent signing
-        if: github.event_name != 'pull_request' && steps.signing.outputs.enabled != 'true'
-        shell: bash
-        run: |
-          echo "::error::Permanent Android signing is not configured. Refusing to create an installable APK with an ephemeral debug certificate because future updates would require uninstalling the previous app. Configure ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD."
-          exit 1
-
-      - name: Compile-check pull requests without signing
-        if: github.event_name == 'pull_request' && steps.signing.outputs.enabled != 'true'
+      - name: Compile-check when signing is unavailable
+        if: steps.signing.outputs.enabled != 'true'
         run: gradle :app:assembleDebug --stacktrace
 
       - name: Restore permanent keystore
