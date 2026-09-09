@@ -14,6 +14,7 @@ if (is_file($lock)) {
 $errors = [];
 $success = false;
 $apiToken = null;
+$capitalAsset = 'TON';
 $requirements = [
     'PHP >= 8.2' => PHP_VERSION_ID >= 80200,
     'PDO MySQL' => extension_loaded('pdo_mysql'),
@@ -34,12 +35,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $adminPass = (string) ($_POST['admin_pass'] ?? '');
     $bitpinKey = trim((string) ($_POST['bitpin_key'] ?? ''));
     $bitpinSecret = trim((string) ($_POST['bitpin_secret'] ?? ''));
+    $capitalAsset = strtoupper(trim((string) ($_POST['capital_asset'] ?? 'TON')));
     $maxOrderValue = max(0, (float) ($_POST['max_order_value'] ?? 0));
     $maxOrdersPerHour = max(1, min(100, (int) ($_POST['max_orders_per_hour'] ?? 10)));
     $liveTrading = isset($_POST['live_trading']);
 
     if ($dbName === '' || $dbUser === '') $errors[] = 'Database name and user are required.';
     if (strlen($adminPass) < 12) $errors[] = 'Admin password must be at least 12 characters.';
+    if (!in_array($capitalAsset, ['TON', 'GRAM'], true)) $errors[] = 'Capital asset must be TON or GRAM.';
     if (($bitpinKey === '') xor ($bitpinSecret === '')) $errors[] = 'Provide both Bitpin API key and secret, or leave both empty.';
     if ($liveTrading && ($bitpinKey === '' || $bitpinSecret === '')) $errors[] = 'Live trading requires Bitpin API credentials.';
 
@@ -86,6 +89,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ],
                 'trading' => [
                     'enabled' => $liveTrading,
+                    'capital_asset' => $capitalAsset,
                     'max_order_value' => $maxOrderValue,
                     'max_orders_per_hour' => $maxOrdersPerHour,
                 ],
@@ -125,16 +129,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <html lang="fa" dir="rtl"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>نصب Trade</title>
-<style>body{font-family:Tahoma,Arial,sans-serif;background:#f4f7fb;color:#172033;margin:0}.wrap{max-width:760px;margin:40px auto;padding:20px}.card{background:#fff;border:1px solid #e4e9f2;border-radius:20px;padding:24px;box-shadow:0 12px 35px rgba(31,44,70,.08)}h1{margin-top:0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.full{grid-column:1/-1}label{display:block;font-size:13px;margin:8px 0 5px}input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #ccd5e3;border-radius:10px}button{width:100%;padding:13px;border:0;border-radius:12px;background:#1769ff;color:#fff;font-weight:700;margin-top:18px}.ok{background:#ecfff2;border:1px solid #bce8c9;padding:14px;border-radius:12px}.info{background:#eef5ff;border:1px solid #cfe0ff;padding:12px;border-radius:12px;margin:12px 0}.warn{background:#fff8e7;border:1px solid #f2d17e;padding:12px;border-radius:12px;margin:12px 0}.err{background:#fff1f1;border:1px solid #ffc7c7;padding:12px;border-radius:12px;margin-bottom:10px}.req{font-size:13px;margin:5px 0}.token{direction:ltr;word-break:break-all;background:#f2f5fa;padding:12px;border-radius:10px}@media(max-width:650px){.grid{grid-template-columns:1fr}.wrap{margin:10px auto;padding:12px}}</style>
+<style>body{font-family:Tahoma,Arial,sans-serif;background:#f4f7fb;color:#172033;margin:0}.wrap{max-width:760px;margin:40px auto;padding:20px}.card{background:#fff;border:1px solid #e4e9f2;border-radius:20px;padding:24px;box-shadow:0 12px 35px rgba(31,44,70,.08)}h1{margin-top:0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.full{grid-column:1/-1}label{display:block;font-size:13px;margin:8px 0 5px}input,select{width:100%;box-sizing:border-box;padding:12px;border:1px solid #ccd5e3;border-radius:10px;background:#fff}button{width:100%;padding:13px;border:0;border-radius:12px;background:#1769ff;color:#fff;font-weight:700;margin-top:18px}.ok{background:#ecfff2;border:1px solid #bce8c9;padding:14px;border-radius:12px}.info{background:#eef5ff;border:1px solid #cfe0ff;padding:12px;border-radius:12px;margin:12px 0}.warn{background:#fff8e7;border:1px solid #f2d17e;padding:12px;border-radius:12px;margin:12px 0}.err{background:#fff1f1;border:1px solid #ffc7c7;padding:12px;border-radius:12px;margin-bottom:10px}.req{font-size:13px;margin:5px 0}.token{direction:ltr;word-break:break-all;background:#f2f5fa;padding:12px;border-radius:10px}@media(max-width:650px){.grid{grid-template-columns:1fr}.wrap{margin:10px auto;padding:12px}}</style>
 </head><body><div class="wrap"><div class="card">
 <h1>نصب سریع Trade</h1>
 <div class="info">دامنه اصلی: <b>https://rado-taxi.sbs</b></div>
-<div class="warn">Live Trading در این نسخه پشتیبانی می‌شود. API Secret فقط روی سرور ذخیره و با AES-256-GCM رمزگذاری می‌شود.</div>
+<div class="warn">دارایی پایه سرمایه را TON یا GRAM انتخاب کن. سیستم Market ID را از API بیت‌پین دریافت می‌کند و برای GRAM هیچ بازار فرضی هاردکد نمی‌شود.</div>
 <p>بررسی پیش‌نیازها:</p>
 <?php foreach ($requirements as $name => $ok): ?><div class="req"><?= $ok ? '✅' : '❌' ?> <?= htmlspecialchars($name) ?></div><?php endforeach; ?>
 <?php foreach ($errors as $error): ?><div class="err"><?= htmlspecialchars($error) ?></div><?php endforeach; ?>
 <?php if ($success): ?>
-<div class="ok"><strong>نصب با موفقیت انجام شد.</strong><p>توکن اتصال اپ فقط همین یک‌بار نمایش داده می‌شود:</p><div class="token"><?= htmlspecialchars((string)$apiToken) ?></div><p>پنل مدیریت: <b>https://rado-taxi.sbs/admin/</b></p></div>
+<div class="ok"><strong>نصب با موفقیت انجام شد.</strong><p>دارایی پایه سرمایه: <b><?= htmlspecialchars($capitalAsset) ?></b></p><p>توکن اتصال اپ فقط همین یک‌بار نمایش داده می‌شود:</p><div class="token"><?= htmlspecialchars((string)$apiToken) ?></div><p>پنل مدیریت: <b>https://rado-taxi.sbs/admin/</b></p></div>
 <?php else: ?>
 <form method="post" autocomplete="off"><div class="grid">
 <div><label>DB Host</label><input name="db_host" value="localhost" required></div>
@@ -144,6 +148,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <div class="full"><label>DB Password</label><input type="password" name="db_pass"></div>
 <div><label>Admin username</label><input name="admin_user" value="admin" required></div>
 <div><label>Admin password (حداقل ۱۲ کاراکتر)</label><input type="password" name="admin_pass" minlength="12" required></div>
+<div class="full"><label>دارایی پایه سرمایه اولیه</label><select name="capital_asset" required><option value="TON"<?= $capitalAsset === 'TON' ? ' selected' : '' ?>>TON</option><option value="GRAM"<?= $capitalAsset === 'GRAM' ? ' selected' : '' ?>>GRAM</option></select></div>
 <div class="full"><label>Bitpin API Key</label><input name="bitpin_key" autocomplete="off"></div>
 <div class="full"><label>Bitpin Secret Key</label><input type="password" name="bitpin_secret" autocomplete="new-password"></div>
 <div><label>حداکثر ارزش هر سفارش (۰ = بدون سقف)</label><input type="number" min="0" step="any" name="max_order_value" value="0"></div>
