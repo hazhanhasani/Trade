@@ -6,6 +6,7 @@ require dirname(__DIR__) . '/bootstrap.php';
 
 use Trade\Config;
 use Trade\Database;
+use Trade\Security\AppAccess;
 use Trade\Trading\OrderService;
 
 header('Content-Type: application/json; charset=utf-8');
@@ -41,25 +42,51 @@ function jsonBody(): array
 function requireAppToken(): void
 {
     $header = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
-    if (!preg_match('/^Bearer\s+(.+)$/i', $header, $m)) respond(['ok' => false, 'error' => 'unauthorized'], 401);
-    $expectedHash = (string) Config::require('app.api_token_hash');
-    if (!hash_equals($expectedHash, hash('sha256', trim($m[1])))) respond(['ok' => false, 'error' => 'unauthorized'], 401);
+    if (!preg_match('/^Bearer\s+(.+)$/i', $header, $m)) {
+        respond(['ok' => false, 'error' => 'unauthorized'], 401);
+    }
+
+    $pdo = Database::connection();
+    if (!AppAccess::validate($pdo, trim($m[1]))) {
+        respond(['ok' => false, 'error' => 'unauthorized'], 401);
+    }
 }
 
 try {
     if ($method === 'GET' && $path === '/api/health') {
         $db = true;
-        try { Database::connection()->query('SELECT 1'); } catch (Throwable) { $db = false; }
+        try {
+            $pdo = Database::connection();
+            $pdo->query('SELECT 1');
+            AppAccess::bootstrapLegacy($pdo);
+        } catch (Throwable) {
+            $db = false;
+        }
         respond([
             'ok' => $db,
             'service' => 'Trade',
             'mode' => (bool) Config::get('trading.enabled', false) ? 'live' : 'live_disabled',
             'capital_asset' => (string) Config::get('trading.capital_asset', 'TON'),
-            'version' => '0.3.1',
+            'version' => '0.5.0',
             'app_url' => (string) Config::get('app.url', 'https://rado-taxi.sbs'),
             'database' => $db ? 'ok' : 'error',
             'time_utc' => gmdate(DATE_ATOM),
         ], $db ? 200 : 503);
+    }
+
+    if ($method === 'POST' && $path === '/api/pair') {
+        $body = jsonBody();
+        $code = trim((string) ($body['code'] ?? ''));
+        if ($code === '') {
+            throw new InvalidArgumentException('کد اتصال لازم است.');
+        }
+        $paired = AppAccess::consumePairing(Database::connection(), $code);
+        respond(['ok' => true, 'data' => [
+            'token' => $paired['token'],
+            'token_id' => $paired['token_id'],
+            'label' => $paired['label'],
+            'server_url' => (string) Config::get('app.url', 'https://rado-taxi.sbs'),
+        ]]);
     }
 
     requireAppToken();
@@ -75,6 +102,7 @@ try {
             'kill_switch' => $kill === '1',
             'credentials_configured' => (bool) $pdo->query("SELECT EXISTS(SELECT 1 FROM exchange_credentials WHERE exchange_name='bitpin')")->fetchColumn(),
             'orders_logged' => (int) $pdo->query('SELECT COUNT(*) FROM orders')->fetchColumn(),
+            'active_app_tokens' => AppAccess::activeCount($pdo),
             'last_run' => $lastRun,
         ]]);
     }
