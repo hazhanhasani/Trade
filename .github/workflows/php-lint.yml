@@ -1,5 +1,6 @@
 name: PHP Quality Gate
 on:
+  workflow_dispatch:
   push:
     paths: ['backend/**', '.github/workflows/php-lint.yml']
   pull_request:
