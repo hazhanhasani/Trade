@@ -6,6 +6,7 @@ require dirname(__DIR__) . '/bootstrap.php';
 
 use Trade\Config;
 use Trade\Database;
+use Trade\Trading\AutoTraderEngine;
 use Trade\Updater;
 
 if (!Config::installed()) {
@@ -20,27 +21,38 @@ $stmt->execute([':id' => $runId]);
 
 try {
     $update = Updater::autoUpdateIfDue();
+    $autotrade = (new AutoTraderEngine())->run();
 
     $summary = [
         'run_id' => $runId,
-        'strategies_enabled' => (int) $pdo->query('SELECT COUNT(*) FROM strategy_rules WHERE enabled=1')->fetchColumn(),
-        'queued_signals' => (int) $pdo->query('SELECT COUNT(*) FROM signals WHERE consumed_at IS NULL')->fetchColumn(),
-        'kill_switch' => (string) ($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn() ?: '0'),
-        'capital_asset' => strtoupper((string) Config::get('trading.capital_asset', 'TON')),
+        'asset' => 'GRAM',
+        'legacy_alias' => 'TON',
+        'execution_mode' => 'live_only',
+        'autotrade' => $autotrade,
+        'kill_switch' => (string) ($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn() ?: '0') === '1',
         'update' => $update,
+        'time_utc' => gmdate(DATE_ATOM),
     ];
 
-    $stmt = $pdo->prepare("UPDATE bot_runs SET status='ok',summary_json=:summary,finished_at=UTC_TIMESTAMP() WHERE run_id=:id");
+    $stmt = $pdo->prepare("UPDATE bot_runs SET status='success',summary_json=:summary,finished_at=UTC_TIMESTAMP() WHERE run_id=:id");
     $stmt->execute([
         ':summary' => json_encode($summary, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
         ':id' => $runId,
     ]);
-    echo json_encode($summary, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . PHP_EOL;
+    echo json_encode($summary, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . PHP_EOL;
 } catch (Throwable $e) {
+    $error = [
+        'run_id' => $runId,
+        'asset' => 'GRAM',
+        'execution_mode' => 'live_only',
+        'error' => $e->getMessage(),
+        'time_utc' => gmdate(DATE_ATOM),
+    ];
     $stmt = $pdo->prepare("UPDATE bot_runs SET status='failed',summary_json=:summary,finished_at=UTC_TIMESTAMP() WHERE run_id=:id");
     $stmt->execute([
-        ':summary' => json_encode(['error' => $e->getMessage()], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE),
+        ':summary' => json_encode($error, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
         ':id' => $runId,
     ]);
-    throw $e;
+    fwrite(STDERR, json_encode($error, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . PHP_EOL);
+    exit(1);
 }
