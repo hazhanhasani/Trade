@@ -1,0 +1,151 @@
+name: Publish Latest
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'android/**'
+      - '.github/workflows/publish-latest.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: trade-publish-latest
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Read versions
+        id: versions
+        shell: bash
+        run: |
+          BACKEND_VERSION=$(php -r "echo require 'backend/version.php';")
+          ANDROID_VERSION_NAME=$(grep -m1 'versionName = ' android/app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          ANDROID_VERSION_CODE=$(grep -m1 'versionCode = ' android/app/build.gradle.kts | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+          echo "backend=$BACKEND_VERSION" >> "$GITHUB_OUTPUT"
+          echo "android_name=$ANDROID_VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "android_code=$ANDROID_VERSION_CODE" >> "$GITHUB_OUTPUT"
+
+      - name: Validate PHP
+        run: find backend -type f -name '*.php' -print0 | xargs -0 -n1 php -l
+
+      - name: Package cPanel backend
+        shell: bash
+        run: |
+          rm -rf dist
+          mkdir -p dist/backend
+          cp -a backend/. dist/backend/
+          rm -f dist/backend/storage/config.php \
+                dist/backend/storage/install.lock \
+                dist/backend/storage/*.log \
+                dist/backend/storage/update-state.json \
+                dist/backend/storage/maintenance.lock
+          rm -rf dist/backend/storage/backups dist/backend/storage/updates
+          (
+            cd dist/backend
+            zip -qr ../Trade-cPanel.zip .
+          )
+          rm -rf dist/backend
+
+      - name: Detect permanent signing
+        id: signing
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build permanently signed Android APK
+        if: steps.signing.outputs.ready == 'true'
+        working-directory: android
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          echo "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/trade-release.jks"
+          export ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/trade-release.jks"
+          ./gradlew :app:assembleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk ../dist/Trade.apk
+
+      - name: Build update manifest
+        env:
+          BACKEND_VERSION: ${{ steps.versions.outputs.backend }}
+          ANDROID_VERSION_NAME: ${{ steps.versions.outputs.android_name }}
+          ANDROID_VERSION_CODE: ${{ steps.versions.outputs.android_code }}
+          ANDROID_READY: ${{ steps.signing.outputs.ready }}
+        shell: bash
+        run: |
+          BACKEND_SHA=$(sha256sum dist/Trade-cPanel.zip | awk '{print $1}')
+          if [ "$ANDROID_READY" = "true" ] && [ -f dist/Trade.apk ]; then
+            ANDROID_SHA=$(sha256sum dist/Trade.apk | awk '{print $1}')
+            ANDROID_AVAILABLE=true
+            ANDROID_URL='https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade.apk'
+          else
+            ANDROID_SHA=''
+            ANDROID_AVAILABLE=false
+            ANDROID_URL=''
+          fi
+          jq -n \
+            --arg backendVersion "$BACKEND_VERSION" \
+            --arg backendSha "$BACKEND_SHA" \
+            --arg androidVersion "$ANDROID_VERSION_NAME" \
+            --argjson androidCode "$ANDROID_VERSION_CODE" \
+            --arg androidSha "$ANDROID_SHA" \
+            --argjson androidAvailable "$ANDROID_AVAILABLE" \
+            --arg androidUrl "$ANDROID_URL" \
+            --arg publishedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{schema:1,published_at:$publishedAt,backend:{version:$backendVersion,url:"https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade-cPanel.zip",sha256:$backendSha},android:{available:$androidAvailable,version_code:$androidCode,version_name:$androidVersion,url:$androidUrl,sha256:$androidSha}}' \
+            > dist/latest.json
+
+      - name: Publish stable release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git tag -f trade-latest "$GITHUB_SHA"
+          git push origin refs/tags/trade-latest --force
+          if gh release view trade-latest >/dev/null 2>&1; then
+            gh release edit trade-latest --title "Trade Latest" --notes "Automatically published stable update channel." --target "$GITHUB_SHA"
+          else
+            gh release create trade-latest --title "Trade Latest" --notes "Automatically published stable update channel." --target "$GITHUB_SHA"
+          fi
+          gh release upload trade-latest dist/Trade-cPanel.zip dist/latest.json --clobber
+          if [ -f dist/Trade.apk ]; then
+            gh release upload trade-latest dist/Trade.apk --clobber
+          else
+            gh release delete-asset trade-latest Trade.apk --yes >/dev/null 2>&1 || true
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Trade-latest-manifest
+          path: dist/latest.json
+          if-no-files-found: error
