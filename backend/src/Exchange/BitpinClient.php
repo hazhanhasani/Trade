@@ -69,9 +69,6 @@ final class BitpinClient
                 false
             );
         } catch (BitpinHttpException $e) {
-            // Refresh tokens can expire or be revoked while the API key/secret
-            // is still valid. In that situation a full authentication is the
-            // correct recovery path instead of leaving the client stuck at 401.
             if (in_array($e->statusCode, [400, 401, 403], true)) {
                 $this->accessToken = null;
                 $this->refreshToken = null;
@@ -86,8 +83,6 @@ final class BitpinClient
         }
 
         if (!$this->accessToken) {
-            // A malformed/partial refresh response should not permanently wedge
-            // the client. Fall back to a clean API-key authentication.
             $this->accessToken = null;
             $this->refreshToken = null;
             return $this->authenticate();
@@ -202,6 +197,12 @@ final class BitpinClient
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_MAXREDIRS => 0,
             CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
+            CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
+            // Shared-hosting environments can inject HTTPS_PROXY/all_proxy at
+            // process level. Bitpin whitelists the real source IP, so force a
+            // direct socket and bypass every environment proxy for API calls.
+            CURLOPT_PROXY => '',
+            CURLOPT_NOPROXY => '*',
         ];
 
         if ($method !== 'GET' && $data !== []) {
