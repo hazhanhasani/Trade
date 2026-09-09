@@ -11,6 +11,7 @@ use ZipArchive;
 final class Updater
 {
     private const DEFAULT_MANIFEST_URL = 'https://github.com/hazhanhasani/Trade/releases/download/trade-latest/latest.json';
+    private const DEFAULT_CHECK_INTERVAL = 300;
 
     public static function currentVersion(): string
     {
@@ -20,6 +21,20 @@ final class Updater
         }
         $version = require $file;
         return is_string($version) && $version !== '' ? $version : '0.0.0';
+    }
+
+    public static function effectiveCheckInterval(): int
+    {
+        $configured = (int) Config::get('updates.check_interval_seconds', self::DEFAULT_CHECK_INTERVAL);
+
+        // Older installers wrote 3600 as their default. Treat that exact legacy
+        // value as the new five-minute production default without touching the
+        // user's protected storage/config.php during an update.
+        if ($configured <= 0 || $configured === 3600) {
+            return self::DEFAULT_CHECK_INTERVAL;
+        }
+
+        return max(300, min(86400, $configured));
     }
 
     public static function manifest(): array
@@ -66,16 +81,34 @@ final class Updater
     public static function autoUpdateIfDue(): array
     {
         if (!(bool) Config::get('updates.auto_backend', true)) {
-            return ['status' => 'disabled', 'version' => self::currentVersion()];
+            return [
+                'status' => 'disabled',
+                'current_version' => self::currentVersion(),
+                'checked_at' => gmdate(DATE_ATOM),
+            ];
         }
 
-        $interval = max(300, (int) Config::get('updates.check_interval_seconds', 3600));
+        $interval = self::effectiveCheckInterval();
         $state = self::state();
         $lastChecked = isset($state['checked_at']) ? strtotime((string) $state['checked_at']) : false;
         if ($lastChecked !== false && time() - $lastChecked < $interval) {
-            return $state + ['status' => $state['status'] ?? 'not_due'];
+            return $state + [
+                'status' => $state['status'] ?? 'not_due',
+                'next_check_in_seconds' => max(0, $interval - (time() - $lastChecked)),
+                'check_interval_seconds' => $interval,
+            ];
         }
 
+        return self::checkAndInstall(false);
+    }
+
+    public static function updateNow(): array
+    {
+        return self::checkAndInstall(true);
+    }
+
+    private static function checkAndInstall(bool $manual): array
+    {
         try {
             $check = self::check();
             if (!$check['update_available']) {
@@ -83,17 +116,26 @@ final class Updater
                     'status' => 'up_to_date',
                     'current_version' => $check['current_version'],
                     'latest_version' => $check['latest_version'],
+                    'check_interval_seconds' => self::effectiveCheckInterval(),
+                    'manual' => $manual,
                     'checked_at' => gmdate(DATE_ATOM),
                 ];
                 self::writeState($state);
                 return $state;
             }
 
-            return self::install($check['manifest']);
+            return self::install($check['manifest'], $manual);
         } catch (Throwable $e) {
+            $existing = self::state();
+            if (($existing['status'] ?? '') === 'update_failed') {
+                return $existing;
+            }
+
             $state = [
                 'status' => 'check_failed',
                 'current_version' => self::currentVersion(),
+                'check_interval_seconds' => self::effectiveCheckInterval(),
+                'manual' => $manual,
                 'message' => $e->getMessage(),
                 'checked_at' => gmdate(DATE_ATOM),
             ];
@@ -102,7 +144,7 @@ final class Updater
         }
     }
 
-    public static function install(array $manifest): array
+    public static function install(array $manifest, bool $manual = false): array
     {
         if (!class_exists(ZipArchive::class)) {
             throw new RuntimeException('PHP ZIP extension is required for automatic updates.');
@@ -112,16 +154,22 @@ final class Updater
         $remoteVersion = (string) ($backend['version'] ?? '');
         $url = (string) ($backend['url'] ?? '');
         $expectedSha = strtolower((string) ($backend['sha256'] ?? ''));
+        $previousVersion = self::currentVersion();
+
         if ($remoteVersion === '' || $url === '' || !preg_match('/^[a-f0-9]{64}$/', $expectedSha)) {
             throw new RuntimeException('Backend update metadata is incomplete.');
         }
-        if (!version_compare($remoteVersion, self::currentVersion(), '>')) {
-            return [
+        if (!version_compare($remoteVersion, $previousVersion, '>')) {
+            $state = [
                 'status' => 'up_to_date',
-                'current_version' => self::currentVersion(),
+                'current_version' => $previousVersion,
                 'latest_version' => $remoteVersion,
+                'check_interval_seconds' => self::effectiveCheckInterval(),
+                'manual' => $manual,
                 'checked_at' => gmdate(DATE_ATOM),
             ];
+            self::writeState($state);
+            return $state;
         }
 
         $storage = TRADE_ROOT . '/storage';
@@ -142,7 +190,7 @@ final class Updater
         $token = gmdate('YmdHis') . '-' . bin2hex(random_bytes(4));
         $zipPath = $updateDir . '/package-' . $token . '.zip';
         $stage = $updateDir . '/stage-' . $token;
-        $backup = $backupDir . '/backup-' . self::currentVersion() . '-' . $token . '.zip';
+        $backup = $backupDir . '/backup-' . $previousVersion . '-' . $token . '.zip';
         $originalFiles = [];
         $stagedFiles = [];
 
@@ -168,7 +216,10 @@ final class Updater
             self::createBackup($backup, $originalFiles);
             $stagedFiles = self::listCodeFiles($stage);
 
-            file_put_contents($storage . '/maintenance.lock', 'Updating to ' . $remoteVersion . "\n", LOCK_EX);
+            if (file_put_contents($storage . '/maintenance.lock', 'Updating to ' . $remoteVersion . "\n", LOCK_EX) === false) {
+                throw new RuntimeException('Cannot create maintenance lock.');
+            }
+
             self::overlay($stage, TRADE_ROOT);
 
             $installedVersion = require TRADE_ROOT . '/version.php';
@@ -181,8 +232,10 @@ final class Updater
             $state = [
                 'status' => 'updated',
                 'current_version' => $remoteVersion,
-                'previous_version' => self::currentVersion(),
+                'previous_version' => $previousVersion,
                 'latest_version' => $remoteVersion,
+                'check_interval_seconds' => self::effectiveCheckInterval(),
+                'manual' => $manual,
                 'backup' => basename($backup),
                 'checked_at' => gmdate(DATE_ATOM),
                 'updated_at' => gmdate(DATE_ATOM),
@@ -202,6 +255,8 @@ final class Updater
                 'status' => 'update_failed',
                 'current_version' => self::currentVersion(),
                 'target_version' => $remoteVersion,
+                'check_interval_seconds' => self::effectiveCheckInterval(),
+                'manual' => $manual,
                 'message' => $e->getMessage(),
                 'checked_at' => gmdate(DATE_ATOM),
             ];
@@ -210,8 +265,10 @@ final class Updater
         } finally {
             self::deleteTree($stage);
             @unlink($zipPath);
-            flock($lock, LOCK_UN);
-            fclose($lock);
+            if (is_resource($lock)) {
+                flock($lock, LOCK_UN);
+                fclose($lock);
+            }
         }
     }
 
@@ -219,16 +276,41 @@ final class Updater
     {
         $file = TRADE_ROOT . '/storage/update-state.json';
         if (!is_file($file)) {
-            return ['status' => 'never_checked', 'current_version' => self::currentVersion()];
+            return [
+                'status' => 'never_checked',
+                'current_version' => self::currentVersion(),
+                'check_interval_seconds' => self::effectiveCheckInterval(),
+            ];
         }
         $decoded = json_decode((string) file_get_contents($file), true);
-        return is_array($decoded) ? $decoded : ['status' => 'unknown', 'current_version' => self::currentVersion()];
+        return is_array($decoded) ? $decoded : [
+            'status' => 'unknown',
+            'current_version' => self::currentVersion(),
+            'check_interval_seconds' => self::effectiveCheckInterval(),
+        ];
+    }
+
+    public static function diagnostics(): array
+    {
+        $storage = TRADE_ROOT . '/storage';
+        return [
+            'current_version' => self::currentVersion(),
+            'auto_enabled' => (bool) Config::get('updates.auto_backend', true),
+            'check_interval_seconds' => self::effectiveCheckInterval(),
+            'curl_available' => extension_loaded('curl'),
+            'zip_available' => class_exists(ZipArchive::class),
+            'storage_writable' => is_dir($storage) && is_writable($storage),
+            'state' => self::state(),
+        ];
     }
 
     private static function writeState(array $state): void
     {
         $file = TRADE_ROOT . '/storage/update-state.json';
-        file_put_contents($file, json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . "\n", LOCK_EX);
+        $json = json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . "\n";
+        if (file_put_contents($file, $json, LOCK_EX) === false) {
+            throw new RuntimeException('Cannot write update state.');
+        }
         @chmod($file, 0600);
     }
 
@@ -243,7 +325,7 @@ final class Updater
             CURLOPT_CONNECTTIMEOUT => min(10, $timeout),
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_USERAGENT => 'Trade-Updater/' . self::currentVersion(),
-            CURLOPT_HTTPHEADER => ['Accept: application/json'],
+            CURLOPT_HTTPHEADER => ['Accept: application/json', 'Cache-Control: no-cache'],
         ]);
         $body = curl_exec($ch);
         $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
@@ -271,6 +353,7 @@ final class Updater
             CURLOPT_CONNECTTIMEOUT => 10,
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_USERAGENT => 'Trade-Updater/' . self::currentVersion(),
+            CURLOPT_HTTPHEADER => ['Cache-Control: no-cache'],
         ]);
         $ok = curl_exec($ch);
         $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
