@@ -11,6 +11,29 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at DATETIME NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS app_tokens (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    label VARCHAR(120) NOT NULL,
+    token_hash CHAR(64) NOT NULL UNIQUE,
+    created_by_admin_id BIGINT UNSIGNED NULL,
+    last_used_at DATETIME NULL,
+    revoked_at DATETIME NULL,
+    created_at DATETIME NOT NULL,
+    INDEX idx_app_token_active (revoked_at, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS app_pairings (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    token_id BIGINT UNSIGNED NOT NULL,
+    pairing_code_hash CHAR(64) NOT NULL UNIQUE,
+    token_enc LONGTEXT NOT NULL,
+    expires_at DATETIME NOT NULL,
+    used_at DATETIME NULL,
+    created_at DATETIME NOT NULL,
+    INDEX idx_pairing_expiry (used_at, expires_at),
+    CONSTRAINT fk_pairing_token FOREIGN KEY (token_id) REFERENCES app_tokens(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS exchange_credentials (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     exchange_name VARCHAR(50) NOT NULL UNIQUE,
