@@ -92,43 +92,29 @@ final class MarketScanner
             $response = $client->markets(['page' => $page]);
             $records = $this->records($response);
             $this->lastScannedPages = $page;
-
-            if ($records === []) {
-                break;
-            }
+            if ($records === []) break;
 
             $rawLoaded += count($records);
-
             foreach ($records as $record) {
                 $normalized = $this->normalizeMarket($record);
-                if ($normalized === null) {
-                    continue;
-                }
-
-                $dedupeKey = (string) $normalized['id'] . ':' . $normalized['symbol'];
-                if (isset($seen[$dedupeKey])) {
-                    continue;
-                }
+                if ($normalized === null) continue;
+                $dedupeKey = $normalized['symbol'];
+                if (isset($seen[$dedupeKey])) continue;
                 $seen[$dedupeKey] = true;
                 $all[] = $normalized;
             }
 
-            if (array_is_list($response)) {
-                break;
-            }
-
+            if (array_is_list($response)) break;
             $next = $response['next'] ?? null;
             if (is_string($next) && trim($next) !== '') {
                 $page++;
                 continue;
             }
-
             $reportedCount = (int) ($response['count'] ?? 0);
             if ($reportedCount > 0 && $rawLoaded < $reportedCount) {
                 $page++;
                 continue;
             }
-
             break;
         }
 
@@ -145,10 +131,7 @@ final class MarketScanner
                 (string) ($market['base_title_fa'] ?? '')
             );
         }));
-
-        if ($candidates === []) {
-            return null;
-        }
+        if ($candidates === []) return null;
 
         usort($candidates, function (array $a, array $b) use ($preferredQuote): int {
             $rank = function (array $market) use ($preferredQuote): int {
@@ -160,23 +143,19 @@ final class MarketScanner
                     'TONCOIN' => 2,
                     default => 3,
                 };
-
                 if ($quote === $preferredQuote) return $assetRank;
                 if ($quote === 'USDT') return 10 + $assetRank;
                 if ($quote === 'IRT') return 20 + $assetRank;
                 return 30 + $assetRank;
             };
-
             return $rank($a) <=> $rank($b);
         });
-
         return $candidates[0];
     }
 
     private function normalizeMarket(array $row): ?array
     {
-        $id = (int) ($row['id'] ?? $row['market_id'] ?? 0);
-
+        $id = max(0, (int) ($row['id'] ?? $row['market_id'] ?? 0));
         $currency1 = is_array($row['currency1'] ?? null) ? $row['currency1'] : [];
         $currency2 = is_array($row['currency2'] ?? null) ? $row['currency2'] : [];
         $baseCurrency = is_array($row['base_currency'] ?? null) ? $row['base_currency'] : [];
@@ -184,38 +163,22 @@ final class MarketScanner
 
         $base = strtoupper(trim((string) ($row['base'] ?? $currency1['code'] ?? $baseCurrency['code'] ?? '')));
         $quote = strtoupper(trim((string) ($row['quote'] ?? $currency2['code'] ?? $quoteCurrency['code'] ?? '')));
-
         $rawSymbol = strtoupper(trim((string) ($row['symbol'] ?? $row['code'] ?? '')));
         [$parsedBase, $parsedQuote] = $this->parseSymbol($rawSymbol);
-        if ($base === '') {
-            $base = $parsedBase;
-        }
-        if ($quote === '') {
-            $quote = $parsedQuote;
-        }
+        if ($base === '') $base = $parsedBase;
+        if ($quote === '') $quote = $parsedQuote;
 
         $symbol = $rawSymbol !== '' ? $rawSymbol : (($base !== '' && $quote !== '') ? $base . '_' . $quote : '');
-        if ($id <= 0 || $base === '' || $quote === '' || $symbol === '') {
-            return null;
-        }
+        if ($base === '' || $quote === '' || $symbol === '') return null;
+        if ($id <= 0) $id = $this->stableMarketId($symbol);
 
         $price = $this->number($row['price'] ?? $row['price_info']['price'] ?? $row['order_book_info']['price'] ?? $row['last_price'] ?? 0);
-        $change = $this->number(
-            $row['change_percent']
-            ?? $row['daily_change_percent']
-            ?? $row['daily_change_price']
-            ?? $row['price_info']['change']
-            ?? $row['order_book_info']['change']
-            ?? 0
-        );
+        $change = $this->number($row['change_percent'] ?? $row['daily_change_percent'] ?? $row['price_info']['change'] ?? $row['order_book_info']['change'] ?? 0);
         $precision = (int) ($row['base_amount_precision'] ?? $currency1['decimal_amount'] ?? $baseCurrency['decimal_amount'] ?? 8);
 
         $tradable = true;
-        if (array_key_exists('tradable', $row)) {
-            $tradable = (bool) $row['tradable'];
-        } elseif (array_key_exists('tradable', $currency1)) {
-            $tradable = (bool) $currency1['tradable'];
-        }
+        if (array_key_exists('tradable', $row)) $tradable = (bool) $row['tradable'];
+        elseif (array_key_exists('tradable', $currency1)) $tradable = (bool) $currency1['tradable'];
 
         return [
             'id' => $id,
@@ -226,89 +189,70 @@ final class MarketScanner
             'price' => $price,
             'change_percent' => $change,
             'base_precision' => max(0, min(18, $precision)),
-            'base_title' => (string) ($row['base_title'] ?? $currency1['title'] ?? $baseCurrency['title'] ?? ''),
+            'base_title' => (string) ($row['name'] ?? $row['base_title'] ?? $currency1['title'] ?? $baseCurrency['title'] ?? ''),
             'base_title_fa' => (string) ($currency1['title_fa'] ?? $baseCurrency['title_fa'] ?? ''),
         ];
     }
 
     private function parseSymbol(string $symbol): array
     {
-        if ($symbol === '') {
-            return ['', ''];
-        }
-
+        if ($symbol === '') return ['', ''];
         $normalized = str_replace(['-', '/'], '_', $symbol);
         $parts = array_values(array_filter(explode('_', $normalized), static fn (string $part): bool => $part !== ''));
-        if (count($parts) >= 2) {
-            return [$parts[0], $parts[count($parts) - 1]];
-        }
-
+        if (count($parts) >= 2) return [$parts[0], $parts[count($parts) - 1]];
         foreach (['USDT', 'IRT', 'USDC', 'BTC', 'ETH'] as $quote) {
             if (str_ends_with($symbol, $quote) && strlen($symbol) > strlen($quote)) {
                 return [substr($symbol, 0, -strlen($quote)), $quote];
             }
         }
-
         return ['', ''];
     }
 
     private function isTargetAsset(string $code, string $title = '', string $titleFa = ''): bool
     {
         $code = strtoupper(preg_replace('/[^A-Z0-9]/', '', $code) ?? '');
-        if (in_array($code, self::ASSET_ALIASES, true)) {
-            return true;
-        }
-
+        if (in_array($code, self::ASSET_ALIASES, true)) return true;
         $name = strtoupper(trim($title));
-        if ($name !== '' && (
-            str_contains($name, 'TONCOIN')
-            || str_contains($name, 'THE OPEN NETWORK')
-            || preg_match('/\bGRAM\b/', $name) === 1
-        )) {
-            return true;
-        }
-
+        if ($name !== '' && (str_contains($name, 'TONCOIN') || str_contains($name, 'THE OPEN NETWORK') || preg_match('/\bGRAM\b/', $name) === 1)) return true;
         $fa = trim($titleFa);
-        return $fa !== '' && (
-            str_contains($fa, 'تون کوین')
-            || str_contains($fa, 'تون‌کوین')
-            || str_contains($fa, 'گرام')
-        );
+        return $fa !== '' && (str_contains($fa, 'تون کوین') || str_contains($fa, 'تون‌کوین') || str_contains($fa, 'گرام'));
     }
 
     private function nearbyMarketCodes(array $markets): array
     {
         $codes = [];
         foreach ($markets as $market) {
-            $haystack = strtoupper(
-                (string) ($market['symbol'] ?? '') . ' '
-                . (string) ($market['base'] ?? '') . ' '
-                . (string) ($market['base_title'] ?? '')
-            );
-            if (
-                str_contains($haystack, 'TON')
-                || str_contains($haystack, 'GRAM')
-                || str_contains($haystack, 'OPEN NETWORK')
-            ) {
+            $haystack = strtoupper((string)($market['symbol'] ?? '') . ' ' . (string)($market['base'] ?? '') . ' ' . (string)($market['base_title'] ?? ''));
+            if (str_contains($haystack, 'TON') || str_contains($haystack, 'GRAM') || str_contains($haystack, 'OPEN NETWORK')) {
                 $codes[] = (string) ($market['symbol'] ?? '');
             }
-            if (count($codes) >= 8) {
-                break;
-            }
+            if (count($codes) >= 12) break;
         }
-
         return array_values(array_unique(array_filter($codes)));
     }
 
     private function tickerPrice(array $response, string $symbol): float
     {
+        $needle = $this->symbolKey($symbol);
         foreach ($this->records($response) as $row) {
             $code = strtoupper((string) ($row['symbol'] ?? $row['code'] ?? $row['market']['code'] ?? ''));
-            if ($code !== $symbol) continue;
+            if ($this->symbolKey($code) !== $needle) continue;
             $price = $this->number($row['price'] ?? $row['last_price'] ?? $row['price_info']['price'] ?? 0);
             if ($price > 0) return $price;
         }
         return 0.0;
+    }
+
+    private function symbolKey(string $symbol): string
+    {
+        return strtoupper(preg_replace('/[^A-Z0-9]/', '', $symbol) ?? '');
+    }
+
+    private function stableMarketId(string $symbol): int
+    {
+        $unsigned = sprintf('%u', crc32($this->symbolKey($symbol)));
+        $id = (int) $unsigned;
+        return $id > 0 ? $id : 1;
     }
 
     private function priceSeries(array $trades): array
@@ -321,14 +265,10 @@ final class MarketScanner
             $series[] = ['time' => $time, 'price' => $price];
         }
         if ($series === []) return [];
-
         $hasTimes = count(array_filter($series, static fn(array $x): bool => $x['time'] > 0)) >= 2;
-        if ($hasTimes) {
-            usort($series, static fn(array $a, array $b): int => $a['time'] <=> $b['time']);
-        } else {
-            $series = array_reverse($series);
-        }
-        return array_values(array_map(static fn(array $x): float => (float) $x['price'], array_slice($series, -120)));
+        if ($hasTimes) usort($series, static fn(array $a, array $b): int => $a['time'] <=> $b['time']);
+        else $series = array_reverse($series);
+        return array_values(array_map(static fn(array $x): float => (float)$x['price'], array_slice($series, -120)));
     }
 
     private function orderBookImbalance(array $book): float
@@ -346,11 +286,8 @@ final class MarketScanner
     {
         $sum = 0.0;
         foreach (array_slice($levels, 0, 20) as $level) {
-            if (is_array($level) && array_is_list($level)) {
-                $sum += $this->number($level[1] ?? 0);
-            } elseif (is_array($level)) {
-                $sum += $this->number($level['amount'] ?? $level['volume'] ?? $level['size'] ?? 0);
-            }
+            if (is_array($level) && array_is_list($level)) $sum += $this->number($level[1] ?? 0);
+            elseif (is_array($level)) $sum += $this->number($level['amount'] ?? $level['volume'] ?? $level['size'] ?? 0);
         }
         return $sum;
     }
@@ -358,31 +295,23 @@ final class MarketScanner
     private function records(array $response): array
     {
         if (array_is_list($response)) return array_values(array_filter($response, 'is_array'));
-
         foreach (['results', 'data', 'items', 'markets'] as $key) {
-            if (!isset($response[$key]) || !is_array($response[$key])) {
-                continue;
-            }
-
+            if (!isset($response[$key]) || !is_array($response[$key])) continue;
             $value = $response[$key];
-            if (array_is_list($value)) {
-                return array_values(array_filter($value, 'is_array'));
-            }
-
+            if (array_is_list($value)) return array_values(array_filter($value, 'is_array'));
             foreach (['results', 'data', 'items'] as $nestedKey) {
                 if (isset($value[$nestedKey]) && is_array($value[$nestedKey]) && array_is_list($value[$nestedKey])) {
                     return array_values(array_filter($value[$nestedKey], 'is_array'));
                 }
             }
         }
-
         return [];
     }
 
     private function number(mixed $value): float
     {
         if (!is_numeric($value)) return 0.0;
-        $number = (float) $value;
+        $number = (float)$value;
         return is_finite($number) ? $number : 0.0;
     }
 }
