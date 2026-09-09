@@ -2,6 +2,7 @@ package ir.trade.app.data
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -9,6 +10,12 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
     data class Response(val code: Int, val body: String) { val ok: Boolean get() = code in 200..299 }
 
     suspend fun health(): Response = request("GET", "/api/health", authenticated = false)
+    suspend fun pair(code: String): Response = request(
+        "POST",
+        "/api/pair",
+        JSONObject().put("code", code).toString(),
+        authenticated = false,
+    )
     suspend fun status(): Response = request("GET", "/api/status")
     suspend fun markets(): Response = request("GET", "/api/markets")
     suspend fun wallets(): Response = request("GET", "/api/wallets")
