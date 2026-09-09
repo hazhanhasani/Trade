@@ -1,44 +1,147 @@
 # Trade
 
-Trade is a production-oriented Bitpin trading backend for cPanel/shared hosting with a companion Android app for `https://rado-taxi.sbs`.
+Trade is a production-oriented multi-exchange GRAM/TON trading backend for cPanel/shared hosting with a companion Android app for `https://rado-taxi.sbs`.
 
-## Current release — backend v1.0.2 / Android v1.0.1
+## Current release — backend v1.1.0 / Android v1.1.0
 
-### Production trading
-
-Trade includes a live automatic trading engine. The production path does not use paper trading.
-
-Implemented:
-
-- live Bitpin authentication, wallet, market, order and cancellation APIs
-- automatic GRAM market discovery, with TON retained as a compatibility alias
-- multi-factor signal engine using RSI, EMA/trend, momentum, volume and order-book context
-- automatic BUY/SELL/HOLD decisions
-- server-side risk profiles: `safe`, `balanced`, `aggressive`
-- maximum position/exposure checks
-- maximum order value and maximum orders-per-hour limits
-- stop-loss and take-profit management
-- daily loss protection and cooldown controls
-- order/position reconciliation against Bitpin
-- MySQL persistence for bot settings, signals, positions, runs, orders and audit logs
-- advisory lock to prevent overlapping cron trading runs
-- server-side Kill Switch
-- Persian RTL admin panel at `/admin/`
-- trading control dashboard at `/admin/bot/`
-- Update Center at `/admin/update/`
-- Repair Center at `/admin/repair.php`
-- AES-256-GCM encryption for Bitpin credentials and application tokens
-- secure one-time Android pairing
-- automatic cPanel self-update with SHA-256 verification, backup, maintenance lock, health validation and rollback
-- stable GitHub update channel at release tag `trade-latest`
-- Android automatic update check with SHA-256 verification
-- permanent Android release signing guard: installable APKs are never produced with an ephemeral CI debug certificate
+Trade now supports **Nobitex and Bitpin side by side**. Each exchange has independent bot and live-execution switches, while the global Kill Switch stops both exchanges.
 
 > Automatic trading can lose money. Risk controls reduce operational risk but cannot guarantee profit or prevent every market loss.
 
+## Exchanges
+
+### Nobitex
+
+Nobitex integration follows the current API-key flow documented by Nobitex:
+
+- signed API host: `https://apiv2.nobitex.ir`
+- public market-data host: `https://api.nobitex.ir`
+- Ed25519 request signing
+- `Nobitex-Key`, `Nobitex-Signature`, `Nobitex-Timestamp` headers
+- exact signature payload: timestamp + HTTP method + full path/query + raw request body
+- public order books and OHLC market data
+- wallet access
+- order list/status
+- Spot Market/Limit/Stop/OCO order support in the backend service
+- cancellation through the official order-status endpoint
+- independent Nobitex Bot and Live switches
+- encrypted Public Key / Private Key storage on the backend
+
+For this project create a Nobitex API key with **READ + TRADE** permissions. `WITHDRAW` is not required and should not be enabled for the trading bot.
+
+Nobitex API-key signing requires the PHP **Sodium** extension. The admin panel checks this automatically.
+
+### Bitpin
+
+Bitpin remains available and backward-compatible:
+
+- API authentication and token refresh
+- market/wallet/order APIs
+- GRAM/TON market discovery
+- live order submission/cancellation
+- independent Bitpin Bot switch
+- independent Bitpin Live switch
+- Repair Center for Bitpin authentication/network diagnostics
+
+The Bitpin bot can now be completely disabled while the Nobitex bot continues running.
+
 ## GRAM / TON compatibility
 
-`GRAM` is the primary asset symbol used by the trading engine. `TON` is retained as a legacy/compatibility alias so older configuration or exchange responses do not break the application. Market IDs are resolved dynamically from Bitpin; no GRAM market ID is hard-coded.
+`GRAM` is the canonical asset inside Trade. Exchange-facing adapters accept legacy/current exchange symbols such as `TON`, `TONCOIN` or `GRAM` where applicable. For example, Nobitex can expose the market as `TONUSDT` while Trade records the managed asset as `GRAM`.
+
+## Automatic trading architecture
+
+The production path is LIVE-only; there is no paper-trading execution path.
+
+```text
+cPanel Cron (every minute)
+        |
+        +--> Auto Updater
+        |
+        +--> Bitpin bot  ---- independent enable/live gates
+        |
+        +--> Nobitex bot ---- independent enable/live gates
+                 |
+                 +--> Market scanner
+                 +--> Signal engine
+                 +--> Risk manager
+                 +--> Order execution
+                 +--> Position reconciliation
+```
+
+One exchange failing no longer prevents the other exchange from running. Cron records `success`, `partial`, or `failed` with per-exchange details.
+
+## Risk and safety controls
+
+- global server-side Kill Switch
+- independent Bot ON/OFF per exchange
+- independent Live Execution ON/OFF per exchange
+- encrypted exchange credentials
+- maximum order value
+- maximum orders per hour
+- position sizing and maximum exposure
+- Safe / Balanced / Aggressive risk profiles
+- signal-score threshold
+- stop loss
+- take profit
+- daily realized-loss protection
+- entry cooldown
+- MySQL advisory locks against overlapping bot runs
+- order/position reconciliation
+- audit history
+- no exchange private keys embedded in Android
+
+## Admin panel
+
+- `/admin/` — main control center and health dashboard for both exchanges
+- `/admin/exchanges.php` — credentials and independent Bot/Live controls for Bitpin and Nobitex
+- `/admin/bot/` — both automatic-trading engines, risk settings, signals, positions and performance
+- `/admin/update/` — self-update status and manual update check
+- `/admin/repair.php` — Bitpin/Cron diagnostics
+
+The Nobitex setup page stores the key only after an authenticated Wallet API test succeeds.
+
+## Android app
+
+Android v1.1.0 adds:
+
+- Nobitex / Bitpin exchange selector
+- per-exchange Wallet, Market and Order views
+- manual live order routing to the selected exchange
+- per-exchange Bot ON/OFF control
+- per-exchange Live Execution control
+- global Kill Switch
+- backend version/status display
+- GRAM as the canonical asset with TON exchange compatibility
+
+Exchange Public/Private/API secrets remain on the backend. Android only stores its application-access token.
+
+## Backend API
+
+Public:
+
+- `GET /api/health`
+- `GET /api/update`
+- `POST /api/pair`
+
+Authenticated:
+
+- `GET /api/status`
+- `GET /api/exchanges`
+- `GET /api/markets?exchange=bitpin|nobitex`
+- `GET /api/wallets?exchange=bitpin|nobitex`
+- `GET /api/orders?exchange=bitpin|nobitex`
+- `POST /api/orders` with `exchange`
+- `DELETE /api/orders/{id}?exchange=bitpin|nobitex`
+- `POST /api/exchanges/{exchange}/bot`
+- `POST /api/exchanges/{exchange}/live`
+- `POST /api/exchanges/{exchange}/run`
+- `GET /api/bot`
+- `GET /api/bot/recent`
+- `POST /api/bot/settings`
+- `POST /api/kill-switch`
+
+Legacy Bitpin bot endpoints remain available so older Android builds do not immediately break.
 
 ## Requirements
 
@@ -48,10 +151,11 @@ Implemented:
 - PDO MySQL
 - cURL
 - OpenSSL
-- ZIP extension
-- JSON extension
+- ZIP
+- JSON
 - MySQL/MariaDB
-- HTTPS enabled
+- HTTPS
+- **PHP Sodium for Nobitex Ed25519 API-key signing**
 
 ### Android
 
@@ -59,160 +163,94 @@ Implemented:
 - compileSdk 37
 - targetSdk 36
 - Jetpack Compose
-- one permanent signing key for every production APK release
+- one permanent signing key for production APK updates
 
 ## First installation
 
-1. Extract `Trade-cPanel.zip` into the document root used by `rado-taxi.sbs`.
-2. Enable HTTPS.
-3. Open `https://rado-taxi.sbs/install/`.
-4. Enter database/admin details and Bitpin API credentials.
-5. Complete installation. New installations use GRAM as the primary trading asset.
-6. Add this cPanel Cron job and replace the path with the actual installation path:
+1. Extract `Trade-cPanel.zip` into the document root for `rado-taxi.sbs`.
+2. Open `/install/`.
+3. Configure database/admin credentials.
+4. Bitpin credentials are optional.
+5. Nobitex Public Key / Private Key are optional; if supplied, PHP Sodium must be enabled.
+6. Nobitex Bot and Live remain OFF after installation until explicitly enabled from `/admin/exchanges.php`.
+7. Configure `cron/tick.php` to run every minute.
 
-```bash
-* * * * * /usr/local/bin/php /home/CPANEL_USER/path/to/Trade/cron/tick.php >/dev/null 2>&1
+Existing installations do **not** need reinstalling. The backend creates the Nobitex trading tables/settings automatically and preserves `storage/config.php` during self-update.
+
+## Nobitex API key setup
+
+In Nobitex create an API key intended for the bot with:
+
+```text
+READ
+TRADE
 ```
 
-Use the PHP CLI path shown by cPanel if it differs.
+Do not enable withdrawal access for Trade. Copy the Public Key and Private Key once, then open:
 
-The main cron performs updater checks and the live trading cycle. Trading occurs only when all production guards allow it, including configured Bitpin credentials, enabled live trading, enabled bot state and a disabled Kill Switch.
+```text
+https://rado-taxi.sbs/admin/exchanges.php
+```
 
-## Existing installations
+Paste both values under Nobitex and select **test and save**. The backend validates the signed Wallet request before replacing stored credentials. After the test succeeds, Bot and Live can be enabled independently.
 
-The trading schema is ensured automatically by the production trading bootstrap, so existing installations can receive backend updates without reinstalling the application. Runtime configuration in `storage/config.php` is preserved by the updater.
+Nobitex production signatures are time-sensitive. Keep the cPanel/server clock synchronized; large UTC clock drift can cause authentication failure.
 
-After updating, review `/admin/bot/` before enabling live execution and confirm the risk profile and limits are appropriate for the account.
+## Auto Update
 
-## Safety controls
+The backend self-updater checks the stable GitHub channel approximately every five minutes, verifies SHA-256, backs up the current backend, enters maintenance mode, installs the update, validates health, and rolls back if validation fails.
 
-The production execution path includes:
+Stable release:
 
-- Kill Switch
-- live-trading configuration gate
-- bot enable/disable state
-- max order value
-- max orders per hour
-- max exposure/position sizing
-- daily loss limit
-- stop loss
-- take profit
-- cooldown between entries
-- duplicate/overlapping cron protection
-- local order/audit history
+```text
+https://github.com/hazhanhasani/Trade/releases/tag/trade-latest
+```
 
-## Admin pages
+Release assets:
 
-- `/admin/` — main control center
-- `/admin/bot/` — automatic trading controls, state, positions and signals
-- `/admin/update/` — update and deployment status
-- `/admin/repair.php` — Bitpin authentication and Cron diagnostics
-
-## API
-
-Public:
-
-- `GET /api/health`
-- `GET /api/update`
-- `POST /api/pair`
-
-Authenticated app API:
-
-- `GET /api/status`
-- `GET /api/markets`
-- `GET /api/wallets`
-- `GET /api/orders`
-- `POST /api/orders`
-- `DELETE /api/orders/{id}`
-- `POST /api/kill-switch`
-
-Bot control/status endpoints are exposed by the production backend where configured by the admin controller.
-
-## Android pairing
-
-The Android app defaults to `https://rado-taxi.sbs`. Bitpin API credentials are never embedded in the APK. Pairing issues an application token and Android stores it using platform-protected storage.
+- `Trade-cPanel.zip`
+- `latest.json`
+- `Trade.apk` only when permanent Android signing secrets are configured
 
 ## Permanent Android signing
 
-Android updates are accepted only when the new APK uses the same application ID and signing certificate as the installed application and has a compatible version code. Production builds therefore use one permanent signing key for the lifetime of the app.
-
-Never commit a keystore or its password to this public repository.
-
-GitHub Actions expects these repository secrets:
+Production Android updates require the same permanent signing certificate for every release. GitHub Actions expects:
 
 - `ANDROID_KEYSTORE_BASE64`
 - `ANDROID_KEYSTORE_PASSWORD`
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEY_PASSWORD`
 
-When all four secrets are configured, the workflows build and verify a permanently signed release APK. The signer certificate SHA-256 fingerprint is written into `latest.json`.
-
-When permanent signing is missing:
-
-- normal Android push/manual builds fail instead of producing an installable APK with a temporary debug certificate
-- pull requests may compile a debug build only for CI validation; that build is not uploaded as an installable release artifact
-- `Publish Latest` still publishes backend updates but does not publish a new Android APK
-- an already-published signed `Trade.apk` is preserved instead of being deleted
-
-If a previously installed build was signed by a temporary CI/debug key and that private key no longer exists, Android cannot migrate it to a new signing certificate. In that specific case one final uninstall/reinstall is required. After installing the first APK signed with the permanent key, later updates can install normally without deleting the app.
-
-## Stable update channel
-
-GitHub Actions publishes/updates the `trade-latest` release.
-
-Release assets:
-
-- `Trade-cPanel.zip`
-- `latest.json`
-- `Trade.apk` when permanent Android signing is available
-
-Manifest:
-
-```text
-https://github.com/hazhanhasani/Trade/releases/download/trade-latest/latest.json
-```
-
-The backend verifies the update package checksum before replacing files and can roll back when validation fails.
-
-## CI/CD
-
-- `php-lint.yml` — PHP syntax quality gate
-- `cpanel-package.yml` — validates PHP and creates `Trade-cPanel.zip`
-- `android-build.yml` — requires permanent signing for installable APK artifacts and verifies the final APK certificate
-- `publish-latest.yml` — validates PHP, packages the backend, builds/verifies the permanently signed Android release when signing is configured, creates `latest.json`, and updates the stable release
+The project refuses to publish an installable production APK with an ephemeral debug certificate. Without these secrets, Android can still be compiled in CI but a replacement production APK is not published.
 
 ## Repository layout
 
 ```text
 backend/
-  version.php
-  bootstrap.php
-  database/schema.sql
   public/
     admin/
+      exchanges.php
       bot/
       update/
       repair.php
     install/
   src/
-    Exchange/BitpinClient.php
+    Exchange/
+      BitpinClient.php
+      NobitexClient.php
     Trading/
       AutoTraderEngine.php
-      BotController.php
+      NobitexAutoTraderEngine.php
       MarketScanner.php
+      NobitexMarketScanner.php
       OrderService.php
+      NobitexOrderService.php
+      BotController.php
       RiskManager.php
-      Schema.php
       SignalEngine.php
-  cron/
-    tick.php
-    trading_tick.php
-  storage/
+      Schema.php
+      NobitexSchema.php
+  cron/tick.php
 android/
-  app/
 .github/workflows/
-  php-lint.yml
-  android-build.yml
-  cpanel-package.yml
-  publish-latest.yml
 ```
