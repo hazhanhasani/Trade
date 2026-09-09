@@ -43,6 +43,17 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Refuse installable builds without permanent signing
+        if: github.event_name != 'pull_request' && steps.signing.outputs.enabled != 'true'
+        shell: bash
+        run: |
+          echo "::error::Permanent Android signing is not configured. Refusing to create an installable APK with an ephemeral debug certificate because future updates would require uninstalling the previous app. Configure ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD."
+          exit 1
+
+      - name: Compile-check pull requests without signing
+        if: github.event_name == 'pull_request' && steps.signing.outputs.enabled != 'true'
+        run: gradle :app:assembleDebug --stacktrace
+
       - name: Restore permanent keystore
         if: steps.signing.outputs.enabled == 'true'
         shell: bash
@@ -50,6 +61,19 @@ jobs:
           KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
           printf '%s' "$KS_B64" | base64 --decode > "$RUNNER_TEMP/Trade-release.jks"
+          test -s "$RUNNER_TEMP/Trade-release.jks"
+
+      - name: Validate permanent keystore
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        env:
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          keytool -list \
+            -keystore "$RUNNER_TEMP/Trade-release.jks" \
+            -storepass "$KS_PASS" \
+            -alias "$KEY_ALIAS" >/dev/null
 
       - name: Build signed release APK
         if: steps.signing.outputs.enabled == 'true'
@@ -60,22 +84,22 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: gradle :app:assembleRelease --stacktrace
 
-      - name: Build debug APK when signing is not configured
-        if: steps.signing.outputs.enabled != 'true'
-        run: gradle :app:assembleDebug --stacktrace
+      - name: Verify APK signature
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          APK="$GITHUB_WORKSPACE/android/app/build/outputs/apk/release/app-release.apk"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n1)
+          if [[ -z "$APKSIGNER" ]]; then
+            echo "::error::apksigner was not found in the Android SDK."
+            exit 1
+          fi
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
 
-      - name: Upload signed release APK
+      - name: Upload permanently signed release APK
         if: steps.signing.outputs.enabled == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: Trade-release-signed
           path: android/app/build/outputs/apk/release/app-release.apk
-          if-no-files-found: error
-
-      - name: Upload debug APK
-        if: steps.signing.outputs.enabled != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: Trade-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
