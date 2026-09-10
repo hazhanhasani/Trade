@@ -50,6 +50,16 @@ final class RiskManager
             $score = max(58, $score);
         }
 
+        // Portfolio Intelligence v2 activates this multiplier only while the
+        // Nobitex orchestrator is running. The default/cleared value is 1.0, so
+        // Bitpin and ordinary settings/status reads are unchanged. Intelligence
+        // may reduce the next entry size after realized drawdown or persistent
+        // strategy underperformance, but it can never enlarge configured risk.
+        $intelligenceMultiplier = NobitexPortfolioIntelligence::runtimePositionMultiplier();
+        if ($intelligenceMultiplier < 0.9999) {
+            $position = max(0.25, $position * $intelligenceMultiplier);
+        }
+
         return [
             'risk_profile' => $profile,
             'position_percent' => $position,
