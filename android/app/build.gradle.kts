@@ -3,6 +3,19 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val backendVersionFile = rootProject.projectDir.parentFile.resolve("backend/version.php")
+require(backendVersionFile.isFile) { "backend/version.php is required for unified releases" }
+val backendVersionSource = backendVersionFile.readText()
+val versionMatch = Regex("return\\s+['\"]([0-9]+)\\.([0-9]+)\\.([0-9]+)['\"]\\s*;").find(backendVersionSource)
+    ?: error("backend/version.php must return a semantic version like 1.3.2")
+val unifiedVersion = versionMatch.groupValues.drop(1).joinToString(".")
+val unifiedMajor = versionMatch.groupValues[1].toInt()
+val unifiedMinor = versionMatch.groupValues[2].toInt()
+val unifiedPatch = versionMatch.groupValues[3].toInt()
+require(unifiedMinor in 0..999 && unifiedPatch in 0..999) { "Version minor/patch must be <= 999" }
+val unifiedVersionCode = unifiedMajor * 1_000_000 + unifiedMinor * 1_000 + unifiedPatch
+require(unifiedVersionCode in 1..2_100_000_000) { "Unified Android versionCode is outside the supported range" }
+
 val releaseKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
 val releaseStorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
 val releaseKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
@@ -23,8 +36,9 @@ android {
         applicationId = "ir.trade.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 11
-        versionName = "1.3.1"
+        versionCode = unifiedVersionCode
+        versionName = unifiedVersion
+        buildConfigField("String", "RELEASE_VERSION", "\"$unifiedVersion\"")
     }
 
     if (hasPermanentSigning) {
