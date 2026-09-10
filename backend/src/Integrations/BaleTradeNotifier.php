@@ -265,7 +265,7 @@ final class BaleTradeNotifier
                 'صرافی: نوبیتکس',
                 'بازار: ' . ($asset !== '' ? $asset : $symbol) . ' / ' . $displayUnit,
                 'مقدار: ' . self::formatNumber($amount, 8) . ($asset !== '' ? ' ' . $asset : ''),
-                'قیمت خرید: ' . self::formatQuote($price, $quote) . ' ' . $displayUnit,
+                'قیمت خرید: ' . self::formatPrice($price, $quote) . ' ' . $displayUnit,
                 'ارزش معامله: ' . self::formatQuote($value, $quote) . ' ' . $displayUnit,
             ];
             if ($strategy !== '') $lines[] = 'استراتژی: ' . $strategy;
@@ -273,7 +273,7 @@ final class BaleTradeNotifier
             if (isset($trade['tradable_net_edge_percent']) && is_numeric($trade['tradable_net_edge_percent'])) {
                 $lines[] = 'سود مورد انتظار پس از هزینه‌ها: ' . self::formatNumber((float)$trade['tradable_net_edge_percent'], 3) . '٪';
             }
-            $lines[] = 'زمان: ' . $time;
+            $lines[] = 'زمان ایران: ' . $time;
             return implode("\n", $lines);
         }
 
@@ -285,14 +285,14 @@ final class BaleTradeNotifier
             'صرافی: نوبیتکس',
             'بازار: ' . ($asset !== '' ? $asset : $symbol) . ' / ' . $displayUnit,
             'مقدار: ' . self::formatNumber($amount, 8) . ($asset !== '' ? ' ' . $asset : ''),
-            'قیمت خرید: ' . self::formatQuote($entry, $quote) . ' ' . $displayUnit,
-            'قیمت فروش: ' . self::formatQuote($price, $quote) . ' ' . $displayUnit,
+            'قیمت خرید: ' . self::formatPrice($entry, $quote) . ' ' . $displayUnit,
+            'قیمت فروش: ' . self::formatPrice($price, $quote) . ' ' . $displayUnit,
             'ارزش فروش: ' . self::formatQuote($value, $quote) . ' ' . $displayUnit,
             'سود/زیان: ' . ($pnl >= 0 ? '+' : '') . self::formatQuote($pnl, $quote) . ' ' . $displayUnit . ' (' . ($pnlPct >= 0 ? '+' : '') . self::formatNumber($pnlPct, 3) . '٪)',
         ];
         if ($reason !== '') $lines[] = 'دلیل خروج: ' . self::exitReasonFa($reason);
         if ($strategy !== '') $lines[] = 'استراتژی ورود: ' . $strategy;
-        $lines[] = 'زمان: ' . $time;
+        $lines[] = 'زمان ایران: ' . $time;
         return implode("\n", $lines);
     }
 
@@ -436,10 +436,28 @@ final class BaleTradeNotifier
         $stmt->execute([':key'=>$key,':value'=>$value]);
     }
 
+    /** Monetary totals/PnL: keep IRT output compact and in Toman. */
     private static function formatQuote(float $value, string $quote): string
     {
         if ($quote === 'IRT') $value /= 10.0;
         return number_format($value, $quote === 'IRT' ? 0 : 4, '.', ',');
+    }
+
+    /**
+     * Unit price needs adaptive precision. Rounding a 1.46 Toman token to
+     * "1 Toman" makes a confirmed trade message economically misleading.
+     */
+    private static function formatPrice(float $value, string $quote): string
+    {
+        if ($quote === 'IRT') {
+            $value /= 10.0;
+            $abs = abs($value);
+            $decimals = $abs >= 1000.0 ? 0 : ($abs >= 10.0 ? 2 : ($abs >= 1.0 ? 4 : ($abs >= 0.01 ? 6 : 8)));
+            return self::formatNumber($value, $decimals);
+        }
+        $abs = abs($value);
+        $decimals = $abs >= 1000.0 ? 4 : ($abs >= 1.0 ? 6 : 8);
+        return self::formatNumber($value, $decimals);
     }
 
     private static function formatNumber(float $value, int $decimals): string
@@ -488,16 +506,19 @@ final class BaleTradeNotifier
 
     private static function exitReasonFa(string $reason): string
     {
-        return match ($reason) {
+        $normalized = strtolower(trim(str_replace(['-', ' '], '_', $reason)));
+        return match ($normalized) {
             'stop_loss'=>'حد ضرر',
             'take_profit'=>'حد سود',
             'trailing_stop'=>'حد ضرر متحرک',
+            'trailing_profit_lock'=>'قفل سود متحرک / برگشت از اوج',
+            'profit_lock'=>'قفل سود',
             'profit_giveback'=>'قفل سود / برگشت از اوج',
             'stale_capital_release'=>'آزادسازی سرمایه راکد',
             'signal_reversal'=>'تغییر جهت سیگنال',
             'rotation'=>'تعویض با فرصت بهتر',
             'autotrade_exit'=>'خروج خودکار ربات',
-            default=>str_replace('_', ' ', $reason),
+            default=>str_replace('_', ' ', $normalized),
         };
     }
 }
