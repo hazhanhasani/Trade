@@ -22,6 +22,8 @@ final class ReleaseContract
         'trading.manual_orders',
         'trading.auto_trading',
         'trading.dynamic_position_sizing',
+        'trading.execution_quality_v5',
+        'trading.adaptive_exit_v2',
         'trading.multi_pending',
         'trading.pending_watchdog',
         'trading.kill_switch',
