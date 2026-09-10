@@ -39,7 +39,7 @@ try{
     if($method==='GET'&&$path==='/api/health'){
         $db=true;try{$pdo=Database::connection();$pdo->query('SELECT 1');AppAccess::bootstrapLegacy($pdo);}catch(Throwable){$db=false;}
         $bot=$db?(new BotController())->status():null;
-        respond(['ok'=>$db,'service'=>'Trade','execution_mode'=>'live_only','capital_asset'=>'GRAM','legacy_alias'=>'TON','version'=>Updater::currentVersion(),'app_url'=>(string)Config::get('app.url','https://rado-taxi.sbs'),'database'=>$db?'ok':'error','exchanges'=>$bot['exchanges']??[],'update_state'=>Updater::state(),'time_utc'=>gmdate(DATE_ATOM)],$db?200:503);
+        respond(['ok'=>$db,'service'=>'Trade','execution_mode'=>'live_only','capital_asset'=>'IRT/USDT','quote_priority'=>['IRT','USDT'],'version'=>Updater::currentVersion(),'app_url'=>(string)Config::get('app.url','https://rado-taxi.sbs'),'database'=>$db?'ok':'error','exchanges'=>$bot['exchanges']??[],'cron_health'=>$bot['cron_health']??null,'update_state'=>Updater::state(),'time_utc'=>gmdate(DATE_ATOM)],$db?200:503);
     }
     if($method==='GET'&&$path==='/api/update'){
         try{respond(['ok'=>true,'data'=>Updater::appUpdateInfo()]);}catch(Throwable $e){respond(['ok'=>false,'error'=>'update_check_failed','message'=>$e->getMessage(),'backend_version'=>Updater::currentVersion()],503);}
@@ -54,9 +54,9 @@ try{
     if($method==='GET'&&$path==='/api/status'){
         $pdo=Database::connection();$status=$controller->status();
         respond(['ok'=>true,'data'=>[
-            'mode'=>$status['exchanges']['bitpin']['live_execution_enabled']?'live':'live_disabled','execution_mode'=>'live_only','capital_asset'=>'GRAM','legacy_alias'=>'TON','kill_switch'=>$status['kill_switch'],
-            'credentials_configured'=>$status['exchanges']['bitpin']['credentials_configured'],'orders_logged'=>(int)$pdo->query('SELECT COUNT(*) FROM orders')->fetchColumn(),'active_app_tokens'=>AppAccess::activeCount($pdo),
-            'backend_version'=>Updater::currentVersion(),'update_state'=>Updater::state(),'last_run'=>$status['last_run'],'bot'=>$status,'exchanges'=>$status['exchanges'],
+            'mode'=>$status['exchanges']['nobitex']['live_execution_enabled']?'live':'live_disabled','execution_mode'=>'live_only','capital_asset'=>'IRT/USDT','quote_priority'=>['IRT','USDT'],'kill_switch'=>$status['kill_switch'],
+            'credentials_configured'=>$status['exchanges']['nobitex']['credentials_configured'],'orders_logged'=>(int)$pdo->query('SELECT COUNT(*) FROM orders')->fetchColumn(),'active_app_tokens'=>AppAccess::activeCount($pdo),
+            'backend_version'=>Updater::currentVersion(),'update_state'=>Updater::state(),'last_run'=>$status['last_run'],'cron_health'=>$status['cron_health'],'bot'=>$status,'exchanges'=>$status['exchanges'],
         ]]);
     }
     if($method==='GET'&&$path==='/api/exchanges')respond(['ok'=>true,'data'=>$controller->status()['exchanges']]);
