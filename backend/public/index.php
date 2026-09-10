@@ -15,6 +15,7 @@ use Trade\Trading\NobitexPerformanceAnalytics;
 use Trade\Trading\NobitexPortfolioValuation;
 use Trade\Trading\NobitexRotationMonitor;
 use Trade\Trading\NobitexSchema;
+use Trade\Trading\NobitexStrategyLearning;
 use Trade\Trading\OrderService;
 use Trade\Trading\TradeNotificationCenter;
 use Trade\Trading\TradingViewSignalService;
@@ -88,6 +89,7 @@ try{
     if($method==='GET'&&$path==='/api/bot')respond(['ok'=>true,'data'=>$controller->status()]);
     if($method==='GET'&&$path==='/api/bot/recent')respond(['ok'=>true,'data'=>$controller->recentData(isset($_GET['limit'])?(int)$_GET['limit']:25)]);
     if($method==='GET'&&$path==='/api/bot/rotation')respond(['ok'=>true,'data'=>(new NobitexRotationMonitor())->snapshot(isset($_GET['limit'])?(int)$_GET['limit']:20)]);
+    if($method==='GET'&&$path==='/api/bot/strategy-learning')respond(['ok'=>true,'data'=>(new NobitexStrategyLearning())->snapshot(null,isset($_GET['limit'])?(int)$_GET['limit']:240)]);
     if($method==='GET'&&$path==='/api/portfolio/global')respond(['ok'=>true,'data'=>globalPortfolioSnapshot()]);
     if($method==='GET'&&$path==='/api/analytics')respond(['ok'=>true,'data'=>(new NobitexPerformanceAnalytics())->snapshot(null,isset($_GET['days'])?(int)$_GET['days']:30)]);
     if($method==='GET'&&$path==='/api/notifications'){
