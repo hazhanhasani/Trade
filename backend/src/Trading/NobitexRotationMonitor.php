@@ -34,6 +34,10 @@ final class NobitexRotationMonitor
         $config = $this->config($pdo);
         $maxPositions = $this->intSetting($pdo, 'nobitex_max_positions', 5, 1, 20);
         $positions = $this->positions($pdo);
+        $openCount = count(array_filter(
+            $positions,
+            static fn(array $p): bool => (string)($p['status'] ?? '') === 'open'
+        ));
         $pendingCount = count(array_filter(
             $positions,
             static fn(array $p): bool => in_array((string)($p['status'] ?? ''), ['pending_open','pending_close'], true)
@@ -70,7 +74,7 @@ final class NobitexRotationMonitor
 
             if ((string)($position['status'] ?? '') !== 'open' || $edge === null || !($row['signal_fresh'] ?? false)) continue;
             $freshPositionSignals++;
-            $candidate = $this->positionView($row);
+            $candidate = $this->positionView($row, $now);
             if ($weakest === null || (float)$candidate['forward_edge_percent'] < (float)$weakest['forward_edge_percent']) {
                 $weakest = $candidate;
             }
@@ -133,12 +137,16 @@ final class NobitexRotationMonitor
             }
         }
 
-        $plan = (new NobitexPortfolioRotation())->plan($plannerPositions, $plannerCandidates, [
-            'min_advantage_percent'=>$config['min_advantage_percent'],
-            'min_hold_minutes'=>$config['min_hold_minutes'],
-            'max_rotation_loss_percent'=>$config['max_rotation_loss_percent'],
-            'friction_margin_percent'=>$config['friction_margin_percent'],
-        ], $now);
+        if ($openCount > 0 && $freshPositionSignals < $openCount) {
+            $plan = ['rotate'=>false,'reason'=>'position_signal_data_stale'];
+        } else {
+            $plan = (new NobitexPortfolioRotation())->plan($plannerPositions, $plannerCandidates, [
+                'min_advantage_percent'=>$config['min_advantage_percent'],
+                'min_hold_minutes'=>$config['min_hold_minutes'],
+                'max_rotation_loss_percent'=>$config['max_rotation_loss_percent'],
+                'friction_margin_percent'=>$config['friction_margin_percent'],
+            ], $now);
+        }
 
         $reason = (string)($plan['reason'] ?? 'rotation_preview_unavailable');
         $state = 'watching';
@@ -157,12 +165,12 @@ final class NobitexRotationMonitor
         } elseif ($cooldownRemaining > 0) {
             $state = 'cooldown';
             $reason = 'rotation_cooldown_active';
+        } elseif ($openCount > 0 && $freshPositionSignals < $openCount) {
+            $state = 'waiting_data';
+            $reason = 'position_signal_data_stale';
         } elseif (($plan['rotate'] ?? false) === true) {
             $state = 'ready';
             $reason = 'superior_opportunity_after_rotation_costs';
-        } elseif ($freshPositionSignals === 0 && count($positions) > 0) {
-            $state = 'waiting_data';
-            $reason = 'position_signal_data_stale';
         }
 
         return [
@@ -173,10 +181,12 @@ final class NobitexRotationMonitor
             'signal_ttl_seconds'=>self::SIGNAL_TTL_SECONDS,
             'portfolio'=>[
                 'active_positions'=>count($positions),
+                'open_positions'=>$openCount,
                 'max_positions'=>$maxPositions,
                 'portfolio_full'=>count($positions) >= $maxPositions,
                 'pending_orders'=>$pendingCount,
                 'fresh_position_signals'=>$freshPositionSignals,
+                'stale_position_signals'=>max(0, $openCount - $freshPositionSignals),
             ],
             'weakest_position'=>$weakest,
             'best_replacement'=>$bestCandidate,
@@ -279,7 +289,7 @@ final class NobitexRotationMonitor
         ];
     }
 
-    private function positionView(array $position): array
+    private function positionView(array $position, int $now): array
     {
         $openedAt = (string)($position['opened_at'] ?? '');
         $openedTs = $openedAt !== '' ? strtotime($openedAt . ' UTC') : false;
@@ -292,7 +302,7 @@ final class NobitexRotationMonitor
             'unrealized_net_pnl_percent'=>is_numeric($position['unrealized_net_pnl_percent'] ?? null) ? round((float)$position['unrealized_net_pnl_percent'], 4) : null,
             'estimated_exit_cost_percent'=>round(max(0.0, (float)($position['estimated_exit_cost_percent'] ?? 0.0)), 4),
             'opened_at'=>$openedAt !== '' ? $openedAt : null,
-            'hold_minutes'=>$openedTs === false ? null : max(0, (int)floor((time() - $openedTs) / 60)),
+            'hold_minutes'=>$openedTs === false ? null : max(0, (int)floor(($now - $openedTs) / 60)),
             'signal_at'=>$position['signal_at'] ?? null,
         ];
     }
