@@ -1,0 +1,68 @@
+//@version=6
+indicator("Trade MTF Confirm v1.0", overlay=true, max_labels_count=100)
+
+// Designed for a 1-minute chart. Higher-timeframe states use the last confirmed
+// HTF bar with lookahead_on + [1], avoiding future leakage/repainting.
+minVotes      = input.int(3, "Minimum confirmations", minval=2, maxval=4)
+heartbeatBars = input.int(2, "Webhook heartbeat bars", minval=1, maxval=10)
+rsiLow        = input.float(45.0, "Bull RSI floor", minval=20, maxval=60)
+rsiHigh       = input.float(72.0, "Bull RSI ceiling", minval=55, maxval=90)
+
+fBullConfirmed() =>
+    fast = ta.ema(close, 9)
+    slow = ta.ema(close, 21)
+    [macdLine, signalLine, hist] = ta.macd(close, 12, 26, 9)
+    rsi = ta.rsi(close, 14)
+    fast[1] > slow[1] and hist[1] > 0 and rsi[1] >= rsiLow and rsi[1] <= rsiHigh
+
+fBearConfirmed() =>
+    fast = ta.ema(close, 9)
+    slow = ta.ema(close, 21)
+    [macdLine, signalLine, hist] = ta.macd(close, 12, 26, 9)
+    rsi = ta.rsi(close, 14)
+    fast[1] < slow[1] and hist[1] < 0 and rsi[1] <= 55
+
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+[macdLocal, signalLocal, histLocal] = ta.macd(close, 12, 26, 9)
+rsiLocal = ta.rsi(close, 14)
+
+bull1 = barstate.isconfirmed and emaFast > emaSlow and histLocal > 0 and rsiLocal >= rsiLow and rsiLocal <= rsiHigh
+bear1 = barstate.isconfirmed and emaFast < emaSlow and histLocal < 0 and rsiLocal <= 55
+
+bull5  = request.security(syminfo.tickerid, "5",  fBullConfirmed(), lookahead=barmerge.lookahead_on)
+bear5  = request.security(syminfo.tickerid, "5",  fBearConfirmed(), lookahead=barmerge.lookahead_on)
+bull15 = request.security(syminfo.tickerid, "15", fBullConfirmed(), lookahead=barmerge.lookahead_on)
+bear15 = request.security(syminfo.tickerid, "15", fBearConfirmed(), lookahead=barmerge.lookahead_on)
+bull60 = request.security(syminfo.tickerid, "60", fBullConfirmed(), lookahead=barmerge.lookahead_on)
+bear60 = request.security(syminfo.tickerid, "60", fBearConfirmed(), lookahead=barmerge.lookahead_on)
+
+bullVotes = (bull1 ? 1 : 0) + (bull5 ? 1 : 0) + (bull15 ? 1 : 0) + (bull60 ? 1 : 0)
+bearVotes = (bear1 ? 1 : 0) + (bear5 ? 1 : 0) + (bear15 ? 1 : 0) + (bear60 ? 1 : 0)
+
+string action = bullVotes >= minVotes and bullVotes > bearVotes ? "buy" : bearVotes >= minVotes and bearVotes > bullVotes ? "sell" : "hold"
+confirmations = math.max(bullVotes, bearVotes)
+confidence = confirmations / 4.0 * 100.0
+
+plot(emaFast, "EMA 9", linewidth=1)
+plot(emaSlow, "EMA 21", linewidth=2)
+bgcolor(action == "buy" ? color.new(color.green, 91) : action == "sell" ? color.new(color.red, 91) : na)
+
+var string lastSentAction = "hold"
+var int lastSentBar = na
+shouldSend = barstate.isconfirmed and action != "hold" and (action != lastSentAction or na(lastSentBar) or bar_index - lastSentBar >= heartbeatBars)
+
+if shouldSend
+    asset = str.upper(syminfo.basecurrency)
+    quote = str.upper(syminfo.currency)
+    eventId = syminfo.tickerid + "-" + str.tostring(time_close) + "-" + action
+    message = "{\"version\":\"1\",\"event_id\":\"" + eventId + "\",\"action\":\"" + action + "\",\"symbol\":\"" + syminfo.tickerid + "\",\"asset\":\"" + asset + "\",\"quote\":\"" + quote + "\",\"provider\":\"" + syminfo.prefix + "\",\"timeframe\":\"" + timeframe.period + "\",\"confidence\":" + str.tostring(confidence) + ",\"confirmations\":" + str.tostring(confirmations) + ",\"price\":" + str.tostring(close) + ",\"signal_time\":" + str.tostring(time_close) + "}"
+    alert(message, alert.freq_once_per_bar_close)
+    lastSentAction := action
+    lastSentBar := bar_index
+
+if action == "hold"
+    lastSentAction := "hold"
+
+plotchar(bullVotes, "Bull confirmations", "", location=location.top, display=display.data_window)
+plotchar(bearVotes, "Bear confirmations", "", location=location.top, display=display.data_window)
