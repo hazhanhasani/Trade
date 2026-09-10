@@ -42,12 +42,21 @@ orderGuardAssert($stopMarketBound === null, 'Stop-market must fail closed becaus
 $ocoBound = NobitexOrderValueGuard::priceBound('oco', 100.0, ['stopPrice'=>105.0,'stopLimitPrice'=>110.0]);
 orderGuardAssert($ocoBound === 110.0, 'OCO guard must use the strongest price bound.');
 
+$exit = NobitexOrderValueGuard::reductionOnlyExitAssessment(10.0, 200.0, 1000.0);
+orderGuardAssert(($exit['allowed'] ?? false) === true, 'Automated reduction-only SELL must not be blocked by an entry-size cap.');
+orderGuardAssert(($exit['reason'] ?? '') === 'reduction_only_automated_exit_exempt', 'Reduction-only exit exemption reason mismatch.');
+orderGuardAssert(abs((float)($exit['order_value'] ?? 0.0) - 2000.0) < 0.000001, 'Reduction-only exit should still report its diagnostic order value.');
+
 $service = file_get_contents(dirname(__DIR__) . '/src/Trading/NobitexOrderService.php');
 orderGuardAssert(is_string($service), 'Unable to inspect NobitexOrderService source.');
 orderGuardAssert(str_contains($service, 'NobitexOrderValueGuard::amountFromInput($input)'), 'Order service is not using the canonical amount alias normalizer.');
 orderGuardAssert(str_contains($service, 'NobitexOrderValueGuard::priceBound($mode,$price,$input)'), 'Order service does not resolve the final guard price.');
 orderGuardAssert(str_contains($service, 'NobitexOrderValueGuard::assertWithinLimit($amount,$guardPrice,$maxOrderValue)'), 'Order service does not enforce max_order_value after price resolution.');
+orderGuardAssert(str_contains($service, 'NobitexOrderValueGuard::reductionOnlyExitAssessment($amount,$guardPrice,$maxOrderValue)'), 'Automated reduction-only SELL exemption is not wired into the order service.');
+orderGuardAssert(str_contains($service, "$reductionOnlyExit=\$side==='sell'&&str_starts_with(\$source,'autotrade_nobitex')"), 'Order service does not explicitly scope the cap exemption to automated SELLs.');
+orderGuardAssert(str_contains($service, "if(\$kill==='1'&&\$side==='buy')"), 'Kill switch must block new BUY entries without trapping SELL exits.');
+orderGuardAssert(!str_contains($service, "if(\$kill==='1') throw"), 'Unconditional kill-switch order blocking still exists.');
 orderGuardAssert(strpos($service, 'NobitexExecutionPlanner())->plan') < strpos($service, 'NobitexOrderValueGuard::assertWithinLimit'), 'max_order_value must be checked after the Execution Planner resolves the final price.');
 orderGuardAssert(!str_contains($service, "isset(\$order['amount1'])"), 'Legacy amount1-only max_order_value guard still exists.');
 
-echo "Nobitex order value guard regression tests passed.\n";
+echo "Nobitex order value guard + reduction-only exit regression tests passed.\n";
