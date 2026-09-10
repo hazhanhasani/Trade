@@ -6,6 +6,7 @@ require dirname(__DIR__) . '/bootstrap.php';
 
 use Trade\Config;
 use Trade\Database;
+use Trade\Integrations\BaleTradeNotifier;
 use Trade\Trading\AutoTraderEngine;
 use Trade\Trading\NobitexAutoTraderEngine;
 use Trade\Trading\NobitexSchema;
@@ -35,9 +36,7 @@ $writeHeartbeat = static function (array $payload) use ($heartbeatPath): void {
 };
 $writeHeartbeat($heartbeat);
 register_shutdown_function(static function () use (&$heartbeat, $writeHeartbeat): void {
-    if (($heartbeat['status'] ?? '') !== 'running') {
-        return;
-    }
+    if (($heartbeat['status'] ?? '') !== 'running') return;
     $last = error_get_last();
     $heartbeat['status'] = $last ? 'fatal' : 'terminated';
     $heartbeat['finished_at'] = gmdate(DATE_ATOM);
@@ -53,21 +52,10 @@ register_shutdown_function(static function () use (&$heartbeat, $writeHeartbeat)
 });
 
 $pdo = Database::connection();
-
-// Recovery invariant: updater MUST run before optional trading-schema migrations.
-// If a newly deployed migration is incompatible with a shared-hosting MariaDB,
-// cron can still download the next hotfix instead of being trapped on the broken
-// version forever. Never execute trading code in the PHP process that replaced
-// backend files because old classes may already be loaded in memory.
 $versionBeforeUpdate = Updater::currentVersion();
 $update = Updater::autoUpdateIfDue();
 $versionAfterUpdate = Updater::currentVersion();
 
-// Updater::autoUpdateIfDue() returns the persisted update state while the next
-// manifest check is not due. Historically that meant a previous `updated` state
-// was replayed on every minute tick for up to five minutes, so cron incorrectly
-// deferred trading again and again. Only defer when this PHP process actually
-// changed the installed backend version.
 $updatedThisProcess = ($update['status'] ?? '') === 'updated'
     && $versionAfterUpdate !== $versionBeforeUpdate
     && version_compare($versionAfterUpdate, $versionBeforeUpdate, '>');
@@ -144,17 +132,30 @@ try {
     $runExchange('bitpin', static fn(): array => (new AutoTraderEngine())->run());
     $runExchange('nobitex', static function (): array {
         $engine = new NobitexAutoTraderEngine();
-
-        // Older installs may still carry the former score-gated first-buy flag.
-        // The compatibility call now retires that flag and always lets this same
-        // cron cycle proceed into the score-free profit-first engine.
         $engine->runBootstrapIfPending();
         return $engine->run();
     });
 
+    // Bale delivery is intentionally isolated from trading success/failure.
+    // Confirmed trades are discovered from local positions/PnL, queued
+    // idempotently, and failed API deliveries are retried on later ticks.
+    $bale = ['status'=>'disabled'];
+    try {
+        $notifier = new BaleTradeNotifier();
+        $baleStatus = $notifier->status($pdo);
+        if (($baleStatus['enabled'] ?? false) && ($baleStatus['configured'] ?? false)) {
+            $sync = $notifier->syncConfirmedTrades(50, $pdo);
+            $delivery = $notifier->flushPending(10, $pdo);
+            $bale = ['status'=>'ok','sync'=>$sync,'delivery'=>$delivery];
+        }
+    } catch (Throwable $e) {
+        $bale = ['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];
+    }
+
     $overall = $failedCount === 0 ? 'success' : (($enabledCount > $failedCount) ? 'partial' : 'failed');
     $summary = $baseSummary + [
         'exchanges' => $results,
+        'bale_notifications' => $bale,
         'kill_switch' => (string) ($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn() ?: '0') === '1',
     ];
 
