@@ -150,6 +150,12 @@ final class NobitexSchema
         self::seedSetting($pdo,'nobitex_trailing_activation_net_percent','0.85');
         self::seedSetting($pdo,'nobitex_trailing_distance_percent','0.65');
         self::seedSetting($pdo,'nobitex_profit_lock_net_percent','0.15');
+        self::seedSetting($pdo,'nobitex_rotation_enabled','1');
+        self::seedSetting($pdo,'nobitex_rotation_min_advantage_percent','0.75');
+        self::seedSetting($pdo,'nobitex_rotation_min_hold_minutes','45');
+        self::seedSetting($pdo,'nobitex_rotation_cooldown_minutes','30');
+        self::seedSetting($pdo,'nobitex_rotation_max_loss_percent','0.75');
+        self::seedSetting($pdo,'nobitex_rotation_friction_margin_percent','0.15');
 
         if($previous==='1'&&self::isTargetProductionInstall()&&self::canArmExistingInstallation($pdo)){
             self::writeSetting($pdo,'nobitex_bootstrap_first_buy_pending','1');
