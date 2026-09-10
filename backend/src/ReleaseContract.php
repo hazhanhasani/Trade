@@ -14,7 +14,9 @@ final class ReleaseContract
      * incrementing API_CONTRACT.
      */
     public const CAPABILITIES = [
+        'api.capability_contract',
         'trading.live_only',
+        'trading.live_execution_controls',
         'trading.nobitex_spot',
         'trading.irt_usdt_markets',
         'trading.manual_orders',
