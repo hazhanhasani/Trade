@@ -62,13 +62,21 @@ jobs:
             'https://github.com/hazhanhasani/Trade/releases/download/trade-latest/latest.json' 2>/dev/null || true)
           PREVIOUS_VERSION=$(printf '%s' "$PREVIOUS_JSON" | jq -r '.release.version // .backend.version // empty' 2>/dev/null || true)
           PREVIOUS_CODE=$(printf '%s' "$PREVIOUS_JSON" | jq -r '.android.version_code // 0' 2>/dev/null || echo 0)
+          PREVIOUS_SOURCE_SHA=$(printf '%s' "$PREVIOUS_JSON" | jq -r '.release.source_commit // empty' 2>/dev/null || true)
 
           if [[ -n "$PREVIOUS_VERSION" ]]; then
             if [[ "$BACKEND_VERSION" == "$PREVIOUS_VERSION" ]]; then
-              PREVIOUS_SHA=$(git rev-list -n1 trade-latest 2>/dev/null || true)
-              if [[ "$PREVIOUS_SHA" != "$GITHUB_SHA" ]]; then
-                echo "::error::Code changed without a coordinated version bump. Update backend/version.php before publishing."
-                exit 1
+              if [[ -n "$PREVIOUS_SOURCE_SHA" ]]; then
+                if [[ "$PREVIOUS_SOURCE_SHA" != "$GITHUB_SHA" ]]; then
+                  echo "::error::Code changed without a coordinated version bump. Update backend/version.php before publishing."
+                  exit 1
+                fi
+              else
+                PREVIOUS_SHA=$(git rev-list -n1 trade-latest 2>/dev/null || true)
+                if [[ "$PREVIOUS_SHA" != "$GITHUB_SHA" ]]; then
+                  echo "::error::Code changed without a coordinated version bump. Update backend/version.php before publishing."
+                  exit 1
+                fi
               fi
             else
               if ! php -r "exit(version_compare('$BACKEND_VERSION', '$PREVIOUS_VERSION', '>') ? 0 : 1);"; then
@@ -268,6 +276,7 @@ jobs:
 
           jq -n \
             --arg releaseVersion "$RELEASE_VERSION" \
+            --arg sourceCommit "$GITHUB_SHA" \
             --arg backendSha "$BACKEND_SHA" \
             --argjson androidCode "$ANDROID_VERSION_CODE" \
             --arg androidSha "$ANDROID_SHA" \
@@ -277,10 +286,10 @@ jobs:
             --argjson apiContract "$API_CONTRACT" \
             --argjson capabilities "$CAPABILITIES" \
             --arg publishedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{schema:3,published_at:$publishedAt,release:{version:$releaseVersion,coordinated:true,api_contract:$apiContract,capabilities:$capabilities},backend:{version:$releaseVersion,api_contract:$apiContract,url:"https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade-cPanel.zip",sha256:$backendSha},android:{available:true,version_code:$androidCode,version_name:$releaseVersion,required_backend_version:$releaseVersion,required_api_contract:$apiContract,url:$androidUrl,sha256:$androidSha,signing:{status:"permanent",source:$signingSource,cert_sha256:$signingCertSha256}}}' \
+            '{schema:3,published_at:$publishedAt,release:{version:$releaseVersion,coordinated:true,source_commit:$sourceCommit,api_contract:$apiContract,capabilities:$capabilities},backend:{version:$releaseVersion,api_contract:$apiContract,url:"https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade-cPanel.zip",sha256:$backendSha},android:{available:true,version_code:$androidCode,version_name:$releaseVersion,required_backend_version:$releaseVersion,required_api_contract:$apiContract,url:$androidUrl,sha256:$androidSha,signing:{status:"permanent",source:$signingSource,cert_sha256:$signingCertSha256}}}' \
             > dist/latest.json
 
-          jq -e '.schema == 3 and .release.coordinated == true and .release.version == .backend.version and .backend.version == .android.version_name and .android.required_backend_version == .backend.version and .release.api_contract == .backend.api_contract and .android.required_api_contract == .release.api_contract and (.release.capabilities | index("api.capability_contract")) != null and (.release.capabilities | index("updates.coordinated_backend_android")) != null and .android.available == true' dist/latest.json >/dev/null
+          jq -e '.schema == 3 and .release.coordinated == true and (.release.source_commit|length) == 40 and .release.version == .backend.version and .backend.version == .android.version_name and .android.required_backend_version == .backend.version and .release.api_contract == .backend.api_contract and .android.required_api_contract == .release.api_contract and (.release.capabilities | index("api.capability_contract")) != null and (.release.capabilities | index("updates.coordinated_backend_android")) != null and .android.available == true' dist/latest.json >/dev/null
 
       - name: Publish stable release assets atomically
         env:
@@ -294,12 +303,48 @@ jobs:
 
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git tag -f trade-latest "$GITHUB_SHA"
+
+          PREVIOUS_TAG_SHA=$(git rev-list -n1 trade-latest 2>/dev/null || true)
+          if [[ -z "$PREVIOUS_TAG_SHA" ]]; then
+            echo "::error::Existing trade-latest tag is required for workflow-safe stable snapshots."
+            exit 1
+          fi
+
+          # GITHUB_TOKEN is an installation token without the GitHub App
+          # 'workflows' permission. A tag update that introduces workflow-file
+          # changes is therefore rejected even when contents:write is granted.
+          # Build a one-commit stable snapshot whose runtime tree is exactly the
+          # current source tree, while .github/workflows stays byte-for-byte at
+          # the previous stable tag. Runtime artifacts are unaffected because
+          # workflows are never packaged into Backend/APK assets.
+          git reset --mixed "$GITHUB_SHA"
+          git rm -r --cached --ignore-unmatch .github/workflows >/dev/null 2>&1 || true
+          if git cat-file -e "$PREVIOUS_TAG_SHA:.github/workflows" 2>/dev/null; then
+            git checkout "$PREVIOUS_TAG_SHA" -- .github/workflows
+          fi
+          RELEASE_TREE=$(git write-tree)
+          RELEASE_COMMIT=$(printf '%s\n' "Trade stable runtime snapshot ${GITHUB_SHA}" | git commit-tree "$RELEASE_TREE" -p "$PREVIOUS_TAG_SHA")
+
+          if git diff --name-only "$PREVIOUS_TAG_SHA" "$RELEASE_COMMIT" | grep -q '^\.github/workflows/'; then
+            echo "::error::Release snapshot unexpectedly changes workflow files."
+            exit 1
+          fi
+          if ! git diff --quiet "$GITHUB_SHA" "$RELEASE_COMMIT" -- . ':(exclude).github/workflows'; then
+            echo "::error::Release snapshot runtime tree differs from the source commit."
+            exit 1
+          fi
+
+          TMP_MANIFEST=$(mktemp)
+          jq --arg releaseCommit "$RELEASE_COMMIT" '.release.release_commit=$releaseCommit' dist/latest.json > "$TMP_MANIFEST"
+          mv "$TMP_MANIFEST" dist/latest.json
+          jq -e --arg source "$GITHUB_SHA" --arg release "$RELEASE_COMMIT" '.release.source_commit==$source and .release.release_commit==$release' dist/latest.json >/dev/null
+
+          git tag -f trade-latest "$RELEASE_COMMIT"
           git push origin refs/tags/trade-latest --force
           if gh release view trade-latest >/dev/null 2>&1; then
-            gh release edit trade-latest --title "Trade Latest" --notes "Coordinated Backend + Android stable release." --target "$GITHUB_SHA"
+            gh release edit trade-latest --title "Trade Latest" --notes "Coordinated Backend + Android stable release. Source: $GITHUB_SHA • Runtime snapshot: $RELEASE_COMMIT" --target "$RELEASE_COMMIT"
           else
-            gh release create trade-latest --title "Trade Latest" --notes "Coordinated Backend + Android stable release." --target "$GITHUB_SHA"
+            gh release create trade-latest --title "Trade Latest" --notes "Coordinated Backend + Android stable release. Source: $GITHUB_SHA • Runtime snapshot: $RELEASE_COMMIT" --target "$RELEASE_COMMIT"
           fi
           gh release upload trade-latest dist/Trade-cPanel.zip dist/Trade.apk dist/latest.json --clobber
 
