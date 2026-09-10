@@ -15,6 +15,7 @@ final class NobitexRuntimeModels
     public const DECISION = 'multi_strategy_regime_router_net_edge_v1';
     public const SELECTION = 'positive_calibrated_tradable_net_edge_after_costs_v1';
     public const EXECUTION = 'execution_quality_v2';
+    public const EXECUTION_LEARNING = NobitexExecutionLearning::MODEL;
     public const GLOBAL_PORTFOLIO = 'global_quote_normalization_v2_toman_display';
     public const ROTATION = 'guarded_opportunity_replacement_v1';
     public const FALLBACK = 'smart_candidate_fallback_v1';
