@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 require dirname(__DIR__) . '/bootstrap.php';
 
+use Trade\ReleaseContract;
 use Trade\Trading\NobitexRuntimeModels;
 
 function telemetryAssert(bool $condition, string $message): void
@@ -21,6 +22,8 @@ telemetryAssert(NobitexRuntimeModels::EDGE_CALIBRATION === 'adaptive_edge_calibr
 telemetryAssert(NobitexRuntimeModels::EXECUTION_LEARNING === 'execution_learning_v1', 'Execution Learning model mismatch.');
 telemetryAssert(NobitexRuntimeModels::ADAPTIVE_EXECUTION === 'adaptive_execution_policy_v1', 'Adaptive Execution Policy model mismatch.');
 telemetryAssert(NobitexRuntimeModels::ORDER_VALUE_GUARD === 'resolved_order_value_guard_v2', 'Order value guard model mismatch.');
+telemetryAssert(in_array('trading.execution_learning_v1', ReleaseContract::CAPABILITIES, true), 'Release contract is missing Execution Learning capability.');
+telemetryAssert(in_array('trading.adaptive_execution_policy_v1', ReleaseContract::CAPABILITIES, true), 'Release contract is missing Adaptive Execution capability.');
 
 $signal = file_get_contents(dirname(__DIR__) . '/src/Trading/NobitexInternalSignalEngine.php');
 $engine = file_get_contents(dirname(__DIR__) . '/src/Trading/NobitexAutoTraderEngine.php');
