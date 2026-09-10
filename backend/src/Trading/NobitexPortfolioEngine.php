@@ -35,6 +35,7 @@ final class NobitexPortfolioEngine
             return $this->runLocked($pdo);
         } finally {
             NobitexStrategyLearning::clearRuntime();
+            NobitexExecutionLearning::clearRuntime();
             try { $pdo->query("SELECT RELEASE_LOCK('trade_nobitex_portfolio_v1')"); } catch (\Throwable) {}
         }
     }
@@ -53,6 +54,7 @@ final class NobitexPortfolioEngine
             return $this->bootstrapLocked($pdo);
         } finally {
             NobitexStrategyLearning::clearRuntime();
+            NobitexExecutionLearning::clearRuntime();
             try { $pdo->query("SELECT RELEASE_LOCK('trade_nobitex_portfolio_v1')"); } catch (\Throwable) {}
         }
     }
@@ -537,10 +539,12 @@ final class NobitexPortfolioEngine
         $quote = $dst === 'RLS' ? 'IRT' : $dst;
         if ($asset === '' || !in_array($quote, ['IRT','USDT'], true)) throw new \RuntimeException('Recovered Nobitex order has unknown market.');
         $symbol = $asset . $quote;
+        $requested = NobitexOrderFill::requestedAmount($remote, 0.0);
+        if ($requested <= 0.0) throw new \RuntimeException('Recovered Nobitex order has no requested amount.');
         $price = $this->fillPrice($remote, 0.0);
-        if ($price <= 0) throw new \RuntimeException('Recovered Nobitex order has no usable price.');
+        if ($price <= 0.0) $price = $this->number($remote['price'] ?? 0.0);
+        if ($price <= 0) throw new \RuntimeException('Recovered Nobitex order has no usable reference price.');
         $market = ['symbol'=>$symbol,'asset'=>$asset,'quote_asset'=>$quote,'price'=>$price];
-        $requested = $this->number($remote['amount'] ?? 0);
         $result = $this->insertRecoveredPosition($pdo, $market, $remote, $requested, $price, $identifier, $settings);
         $this->event($pdo, 'warning', 'nobitex.first_buy.recovered', $result);
         return $result;
@@ -707,25 +711,17 @@ final class NobitexPortfolioEngine
 
     private function fillPrice(array $order, float $fallback): float
     {
-        foreach (['averagePrice','average_price','price'] as $key) {
-            $v = $this->number($order[$key] ?? 0);
-            if ($v > 0) return $v;
-        }
-        return $fallback;
+        return NobitexOrderFill::averagePrice($order, $fallback);
     }
 
     private function fillAmount(array $order, float $fallback): float
     {
-        foreach (['matchedAmount','matched_amount','filledAmount','amount'] as $key) {
-            $v = $this->number($order[$key] ?? 0);
-            if ($v > 0) return $v;
-        }
-        return $fallback;
+        return NobitexOrderFill::matchedAmount($order, $fallback);
     }
 
     private function isDone(array $order): bool
     {
-        return in_array(strtolower(trim((string) ($order['status'] ?? ''))), ['done','completed','filled'], true);
+        return NobitexOrderFill::isDone($order);
     }
 
     private function exchangeId(array $order): ?string
@@ -736,7 +732,7 @@ final class NobitexPortfolioEngine
 
     private function looksLikeOrder(array $order): bool
     {
-        return trim((string) ($order['id'] ?? $order['clientOrderId'] ?? '')) !== '' && strtolower((string) ($order['status'] ?? '')) !== 'failed';
+        return trim((string) ($order['id'] ?? $order['clientOrderId'] ?? '')) !== '' && NobitexOrderFill::status($order) !== 'failed';
     }
 
     private function floorAmount(float $amount, int $precision): float
