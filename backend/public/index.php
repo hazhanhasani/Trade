@@ -6,6 +6,7 @@ require dirname(__DIR__) . '/bootstrap.php';
 
 use Trade\Config;
 use Trade\Database;
+use Trade\ReleaseContract;
 use Trade\Security\AppAccess;
 use Trade\Trading\BotController;
 use Trade\Trading\NobitexAutoTraderEngine;
@@ -64,10 +65,10 @@ try{
         $db=true;try{$pdo=Database::connection();$pdo->query('SELECT 1');AppAccess::bootstrapLegacy($pdo);}catch(Throwable){$db=false;}
         $bot=$db?(new BotController())->status():null;
         $tv=$db?(new TradingViewSignalService())->publicStatus():null;
-        respond(['ok'=>$db,'service'=>'Trade','execution_mode'=>'live_only','capital_asset'=>'IRT/USDT','quote_priority'=>['IRT','USDT'],'version'=>Updater::currentVersion(),'app_url'=>(string)Config::get('app.url','https://rado-taxi.sbs'),'database'=>$db?'ok':'error','exchanges'=>$bot['exchanges']??[],'tradingview'=>$tv,'cron_health'=>$bot['cron_health']??null,'update_state'=>Updater::state(),'time_utc'=>gmdate(DATE_ATOM)],$db?200:503);
+        respond(['ok'=>$db,'service'=>'Trade','execution_mode'=>'live_only','capital_asset'=>'IRT/USDT','quote_priority'=>['IRT','USDT'],'version'=>Updater::currentVersion(),'api_contract'=>ReleaseContract::API_CONTRACT,'capabilities'=>ReleaseContract::CAPABILITIES,'app_url'=>(string)Config::get('app.url','https://rado-taxi.sbs'),'database'=>$db?'ok':'error','exchanges'=>$bot['exchanges']??[],'tradingview'=>$tv,'cron_health'=>$bot['cron_health']??null,'update_state'=>Updater::state(),'time_utc'=>gmdate(DATE_ATOM)],$db?200:503);
     }
     if($method==='GET'&&$path==='/api/update'){
-        try{respond(['ok'=>true,'data'=>Updater::appUpdateInfo()]);}catch(Throwable $e){respond(['ok'=>false,'error'=>'update_check_failed','message'=>$e->getMessage(),'backend_version'=>Updater::currentVersion()],503);}
+        try{$data=Updater::appUpdateInfo();$data['api_contract']=ReleaseContract::API_CONTRACT;$data['capabilities']=ReleaseContract::CAPABILITIES;respond(['ok'=>true,'data'=>$data]);}catch(Throwable $e){respond(['ok'=>false,'error'=>'update_check_failed','message'=>$e->getMessage(),'backend_version'=>Updater::currentVersion(),'api_contract'=>ReleaseContract::API_CONTRACT,'capabilities'=>ReleaseContract::CAPABILITIES],503);}
     }
     if($method==='POST'&&$path==='/api/pair'){
         $body=jsonBody();$code=trim((string)($body['code']??''));if($code==='')throw new InvalidArgumentException('کد اتصال لازم است.');$paired=AppAccess::consumePairing(Database::connection(),$code);respond(['ok'=>true,'data'=>['token'=>$paired['token'],'token_id'=>$paired['token_id'],'label'=>$paired['label'],'server_url'=>(string)Config::get('app.url','https://rado-taxi.sbs')]]);
@@ -81,7 +82,7 @@ try{
         respond(['ok'=>true,'data'=>[
             'mode'=>$status['exchanges']['nobitex']['live_execution_enabled']?'live':'live_disabled','execution_mode'=>'live_only','capital_asset'=>'IRT/USDT','quote_priority'=>['IRT','USDT'],'kill_switch'=>$status['kill_switch'],
             'credentials_configured'=>$status['exchanges']['nobitex']['credentials_configured'],'orders_logged'=>(int)$pdo->query('SELECT COUNT(*) FROM orders')->fetchColumn(),'active_app_tokens'=>AppAccess::activeCount($pdo),
-            'backend_version'=>Updater::currentVersion(),'update_state'=>Updater::state(),'last_run'=>$status['last_run'],'cron_health'=>$status['cron_health'],'tradingview'=>$status['tradingview']??(new TradingViewSignalService())->publicStatus(),'bot'=>$status,'exchanges'=>$status['exchanges'],
+            'backend_version'=>Updater::currentVersion(),'api_contract'=>ReleaseContract::API_CONTRACT,'capabilities'=>ReleaseContract::CAPABILITIES,'update_state'=>Updater::state(),'last_run'=>$status['last_run'],'cron_health'=>$status['cron_health'],'tradingview'=>$status['tradingview']??(new TradingViewSignalService())->publicStatus(),'bot'=>$status,'exchanges'=>$status['exchanges'],
         ]]);
     }
     if($method==='GET'&&$path==='/api/exchanges')respond(['ok'=>true,'data'=>$controller->status()['exchanges']]);
