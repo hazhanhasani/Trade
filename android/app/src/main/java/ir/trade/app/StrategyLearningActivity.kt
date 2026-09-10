@@ -27,7 +27,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -100,6 +99,25 @@ private data class LearningUi(
     val generatedAt: String = "—",
 )
 
+private data class CalibrationProfileUi(
+    val strategy: String,
+    val regime: String,
+    val trades: Int,
+    val predictedEdge: Double?,
+    val realizedReturn: Double,
+    val captureRatio: Double?,
+    val penalty: Double,
+    val ready: Boolean,
+)
+
+private data class CalibrationUi(
+    val penalizedProfiles: Int = 0,
+    val maxPenalty: Double = 0.0,
+    val minimumTrades: Int = 8,
+    val toleratedBias: Double = 0.10,
+    val profiles: List<CalibrationProfileUi> = emptyList(),
+)
+
 @Composable
 private fun StrategyLearningDashboard() {
     MaterialTheme(
@@ -116,6 +134,7 @@ private fun StrategyLearningDashboard() {
         val prefs = remember { TradePreferences(context) }
         val api = remember(prefs.serverUrl(), prefs.apiToken()) { TradeApi(prefs.serverUrl(), prefs.apiToken()) }
         var ui by remember { mutableStateOf(LearningUi()) }
+        var calibration by remember { mutableStateOf(CalibrationUi()) }
         var error by remember { mutableStateOf("") }
         var loading by remember { mutableStateOf(false) }
         var refreshKey by remember { mutableIntStateOf(0) }
@@ -130,9 +149,14 @@ private fun StrategyLearningDashboard() {
             try {
                 val status = api.status()
                 if (!status.ok) throw IllegalStateException(learningHttpError(status))
-                val response = api.strategyLearning(240)
-                if (!response.ok) throw IllegalStateException(learningHttpError(response))
-                ui = parseLearning(JSONObject(response.body).optJSONObject("data") ?: JSONObject())
+
+                val learningResponse = api.strategyLearning(240)
+                if (!learningResponse.ok) throw IllegalStateException(learningHttpError(learningResponse))
+                ui = parseLearning(JSONObject(learningResponse.body).optJSONObject("data") ?: JSONObject())
+
+                val calibrationResponse = api.edgeCalibration()
+                if (!calibrationResponse.ok) throw IllegalStateException(learningHttpError(calibrationResponse))
+                calibration = parseCalibration(JSONObject(calibrationResponse.body).optJSONObject("data") ?: JSONObject())
             } catch (e: Exception) {
                 error = e.message ?: "دریافت وضعیت یادگیری ناموفق بود."
             } finally {
@@ -157,7 +181,7 @@ private fun StrategyLearningDashboard() {
                 item {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("یادگیری استراتژی‌ها", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
+                            Text("یادگیری و کالیبراسیون", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
                             Text("Trend • Breakout • Mean Reversion", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
                         }
                         TextButton(onClick = { refreshKey++ }, enabled = !loading) { Text(if (loading) "…" else "بروزرسانی") }
@@ -194,7 +218,7 @@ private fun StrategyLearningDashboard() {
                                 LearningBadge("Risk ↓ only", LearningGreen, LearningGreenSoft)
                             }
                             Text(
-                                "این سیستم هیچ‌وقت حجم تنظیم‌شده را بیشتر نمی‌کند. عملکرد ضعیف فقط همان استراتژی و همان نوع بازار را محتاط‌تر می‌کند.",
+                                "یادگیری حجم و کالیبراسیون Edge هر Strategy/Regime مستقل است. هیچ‌کدام اجازه افزایش ریسک یا آسان‌تر کردن شرط ورود را ندارند.",
                                 color = LearningMuted,
                                 style = MaterialTheme.typography.bodySmall,
                             )
@@ -208,7 +232,26 @@ private fun StrategyLearningDashboard() {
 
                     item {
                         Spacer(Modifier.height(2.dp))
-                        Text("یادگیری بر اساس نوع بازار", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+                        Text("Adaptive Edge Calibration", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+                        Text("پیش‌بینی قبل از ورود با بازده خالص واقعی مقایسه می‌شود.", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
+                    }
+                    item { CalibrationSummary(calibration) }
+                    if (calibration.profiles.isEmpty()) {
+                        item {
+                            LearningCard {
+                                Text("کالیبراسیون هنوز در Warm-up است", fontWeight = FontWeight.Bold)
+                                Text("بعد از ثبت داده کافی، خطای پایدار پیش‌بینی برای همان Strategy/Regime به Buffer ورود اضافه می‌شود.", color = LearningMuted)
+                            }
+                        }
+                    } else {
+                        items(calibration.profiles, key = { "cal:" + it.strategy + ":" + it.regime }) { profile ->
+                            CalibrationProfile(profile)
+                        }
+                    }
+
+                    item {
+                        Spacer(Modifier.height(2.dp))
+                        Text("یادگیری حجم بر اساس نوع بازار", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
                         Text("هر ترکیب استراتژی + وضعیت بازار مستقل یاد گرفته می‌شود.", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
                     }
 
@@ -266,6 +309,57 @@ private fun StrategyLearningSummary(item: LearningStrategyUi) {
             Text("پروفایل دارای داده: ${item.matureProfiles}", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
             Text("متوقف: ${item.blockedProfiles}", color = if (item.blockedProfiles > 0) LearningRed else LearningMuted, style = MaterialTheme.typography.bodySmall)
         }
+    }
+}
+
+@Composable
+private fun CalibrationSummary(item: CalibrationUi) {
+    val active = item.penalizedProfiles > 0
+    LearningCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("خطای پیش‌بینی → Buffer ورود", fontWeight = FontWeight.Black)
+                Text("حداقل ${item.minimumTrades} معامله • تلورانس ${two(item.toleratedBias)}٪", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
+            }
+            LearningBadge(
+                if (active) "${item.penalizedProfiles} فعال" else "خنثی",
+                if (active) LearningAmber else LearningGreen,
+                if (active) LearningAmberSoft else LearningGreenSoft,
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            LearningMetric("بیشترین Buffer", "+${three(item.maxPenalty)}٪", Modifier.weight(1f))
+            LearningMetric("سیاست", "Tighten only", Modifier.weight(1f))
+        }
+        Text("اگر Edge فعلی بعد از Buffer کالیبراسیون مثبت نماند، Candidate رد می‌شود و Smart Fallback فرصت بعدی را بررسی می‌کند.", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun CalibrationProfile(item: CalibrationProfileUi) {
+    val active = item.penalty > 0.00001
+    LearningCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(strategyFa(item.strategy), fontWeight = FontWeight.Black)
+                Text(regimeFa(item.regime), color = LearningMuted, style = MaterialTheme.typography.bodySmall)
+            }
+            LearningBadge(
+                when {
+                    active -> "+${three(item.penalty)}٪"
+                    item.ready -> "دقیق / خنثی"
+                    else -> "Warm-up"
+                },
+                if (active) LearningAmber else if (item.ready) LearningGreen else LearningPrimary,
+                if (active) LearningAmberSoft else if (item.ready) LearningGreenSoft else LearningPurpleSoft,
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            LearningMetric("Edge پیش‌بینی", item.predictedEdge?.let { "${three(it)}٪" } ?: "—", Modifier.weight(1f))
+            LearningMetric("بازده واقعی", "${three(item.realizedReturn)}٪", Modifier.weight(1f))
+            LearningMetric("تحقق Edge", item.captureRatio?.let { "${one(it * 100)}٪" } ?: "—", Modifier.weight(1f))
+        }
+        Text("${item.trades} معامله بسته‌شده • Buffer اضافه ورود +${three(item.penalty)}٪", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -378,6 +472,34 @@ private fun parseLearning(data: JSONObject): LearningUi {
     )
 }
 
+private fun parseCalibration(data: JSONObject): CalibrationUi {
+    val profiles = mutableListOf<CalibrationProfileUi>()
+    data.optJSONArray("profiles")?.let { rows ->
+        for (i in 0 until rows.length()) {
+            val row = rows.optJSONObject(i) ?: continue
+            val predicted = if (row.isNull("average_entry_edge_percent")) null else row.optDouble("average_entry_edge_percent")
+            val capture = if (row.isNull("edge_capture_ratio")) null else row.optDouble("edge_capture_ratio")
+            profiles += CalibrationProfileUi(
+                strategy = row.optString("strategy_key"),
+                regime = row.optString("regime"),
+                trades = row.optInt("trades"),
+                predictedEdge = predicted?.takeIf { it.isFinite() },
+                realizedReturn = row.optDouble("average_realized_return_percent", 0.0),
+                captureRatio = capture?.takeIf { it.isFinite() },
+                penalty = row.optDouble("calibration_penalty_percent", 0.0),
+                ready = row.optBoolean("calibration_ready"),
+            )
+        }
+    }
+    return CalibrationUi(
+        penalizedProfiles = data.optInt("penalized_profiles"),
+        maxPenalty = data.optDouble("maximum_active_penalty_percent", 0.0),
+        minimumTrades = data.optInt("minimum_calibration_trades", 8),
+        toleratedBias = data.optDouble("tolerated_prediction_bias_percent", 0.10),
+        profiles = profiles,
+    )
+}
+
 private fun strategyFa(key: String): String = when (key) {
     "trend_momentum_v1" -> "روند و مومنتوم"
     "breakout_v1" -> "شکست محدوده"
@@ -404,6 +526,8 @@ private fun regimeFa(key: String): String = when (key) {
 }
 
 private fun one(value: Double): String = if (value.isFinite()) String.format(java.util.Locale.US, "%.1f", value) else "—"
+private fun two(value: Double): String = if (value.isFinite()) String.format(java.util.Locale.US, "%.2f", value) else "—"
+private fun three(value: Double): String = if (value.isFinite()) String.format(java.util.Locale.US, "%.3f", value) else "—"
 
 private fun learningHttpError(response: TradeApi.Response): String {
     return try {
