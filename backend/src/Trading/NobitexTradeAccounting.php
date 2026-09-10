@@ -266,20 +266,12 @@ final class NobitexTradeAccounting
 
     private function matchedAmount(array $order): float
     {
-        foreach (['matchedAmount','matched_amount','filledAmount','amount'] as $key) {
-            $v = $this->num($order[$key] ?? 0);
-            if ($v > 0) return $v;
-        }
-        return 0.0;
+        return NobitexOrderFill::matchedAmount($order, 0.0);
     }
 
     private function fillPrice(array $order, float $fallback): float
     {
-        foreach (['averagePrice','average_price','price'] as $key) {
-            $v = $this->num($order[$key] ?? 0);
-            if ($v > 0) return $v;
-        }
-        return $fallback;
+        return NobitexOrderFill::averagePrice($order, $fallback);
     }
 
     private function takerRate(PDO $pdo, string $quote): float
