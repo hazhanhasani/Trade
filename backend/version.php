@@ -2,4 +2,4 @@
 
 declare(strict_types=1);
 
-return '1.2.11';
+return '1.2.12';
