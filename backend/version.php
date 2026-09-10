@@ -2,4 +2,4 @@
 
 declare(strict_types=1);
 
-return '1.3.19';
+return '1.3.20';
