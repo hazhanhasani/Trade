@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 require dirname(__DIR__) . '/bootstrap.php';
 
+use Trade\Trading\NobitexCandidateRejectedException;
 use Trade\Trading\NobitexPortfolioIntelligence;
 
 function intelAssert(bool $condition, string $message): void
@@ -44,4 +45,14 @@ intelAssert($inverse !== null && abs($inverse + 1.0) < 0.000001, 'inverse return
 $flat = NobitexPortfolioIntelligence::pearson([1.0, 1.0, 1.0], [2.0, 3.0, 4.0]);
 intelAssert($flat === null, 'flat series must not produce a misleading correlation');
 
-echo "Portfolio Intelligence v2 regression tests passed.\n";
+$rejection = new NobitexCandidateRejectedException(
+    'ETHIRT',
+    'portfolio_correlation_cluster_limit',
+    ['allowed'=>false,'correlation'=>['count'=>3]],
+);
+intelAssert($rejection->symbol() === 'ETHIRT', 'candidate rejection must retain the rejected symbol');
+intelAssert($rejection->reasonCode() === 'portfolio_correlation_cluster_limit', 'candidate rejection reason code mismatch');
+intelAssert(($rejection->assessment()['allowed'] ?? true) === false, 'candidate rejection assessment should be preserved for fallback diagnostics');
+intelAssert(str_contains($rejection->getMessage(), 'ETHIRT'), 'candidate rejection message should identify the rejected symbol');
+
+echo "Portfolio Intelligence v2 + Smart Candidate Fallback regression tests passed.\n";
