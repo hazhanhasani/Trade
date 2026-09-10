@@ -88,7 +88,7 @@ final class NobitexOrderService
 
     public function create(array $input, string $source = 'api'): array
     {
-        $this->assertAllowed($input);
+        $this->assertAllowed($input, $source);
         $symbol = strtoupper(preg_replace('/[^A-Z0-9]/', '', (string) ($input['symbol'] ?? $input['market_symbol'] ?? '')) ?? '');
         [$base, $quote] = $this->parseSymbol($symbol);
         if ($base === '' || $quote === '') throw new \InvalidArgumentException('Nobitex symbol must look like TONUSDT or TONIRT.');
@@ -173,7 +173,7 @@ final class NobitexOrderService
         return $this->firstOrder($response);
     }
 
-    private function assertAllowed(array $order): void
+    private function assertAllowed(array $order, string $source = 'api'): void
     {
         $this->assertEnabled();
         $pdo = Database::connection();
@@ -196,6 +196,33 @@ final class NobitexOrderService
             $used = (int) $stmt->fetchColumn();
             if ($used >= $maxBuyOrders) {
                 throw new \RuntimeException('Nobitex buy order safety limit reached.');
+            }
+
+            // Portfolio Intelligence is intentionally limited to automated BUYs.
+            // Manual/API orders keep their existing safety checks, while automated
+            // exits are never delayed by learning/correlation logic.
+            if (str_starts_with($source, 'autotrade_nobitex')) {
+                $symbol = strtoupper(preg_replace('/[^A-Z0-9]/', '', (string)($order['symbol'] ?? $order['market_symbol'] ?? '')) ?? '');
+                try {
+                    $assessment = (new NobitexPortfolioIntelligence())->assessAutomatedBuy($pdo, $symbol);
+                } catch (\Throwable $e) {
+                    $this->audit('nobitex.intelligence.guard_error', [
+                        'symbol'=>$symbol,
+                        'source'=>$source,
+                        'error'=>mb_substr($e->getMessage(), 0, 500),
+                    ]);
+                    throw new \RuntimeException('Portfolio intelligence unavailable; automated BUY blocked.');
+                }
+                if (!($assessment['allowed'] ?? false)) {
+                    $reason = (string)($assessment['reason'] ?? 'portfolio_intelligence_blocked');
+                    $this->audit('nobitex.intelligence.buy_blocked', [
+                        'symbol'=>$symbol,
+                        'source'=>$source,
+                        'reason'=>$reason,
+                        'assessment'=>$assessment,
+                    ]);
+                    throw new \RuntimeException('Portfolio intelligence blocked automated BUY: ' . $reason);
+                }
             }
         }
 
