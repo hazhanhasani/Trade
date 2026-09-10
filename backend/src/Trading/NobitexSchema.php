@@ -53,6 +53,19 @@ final class NobitexSchema
                 exit_exchange_order_id VARCHAR(190) NULL,
                 exit_price DECIMAL(36,18) NULL,
                 realized_pnl DECIMAL(36,18) NULL,
+                entry_fee_quote DECIMAL(36,18) NULL,
+                entry_fee_source VARCHAR(24) NULL,
+                estimated_exit_fee_quote DECIMAL(36,18) NULL,
+                total_fees_quote DECIMAL(36,18) NULL,
+                gross_realized_pnl DECIMAL(36,18) NULL,
+                net_realized_pnl DECIMAL(36,18) NULL,
+                mark_price DECIMAL(36,18) NULL,
+                peak_price DECIMAL(36,18) NULL,
+                trailing_stop DECIMAL(36,18) NULL,
+                unrealized_gross_pnl DECIMAL(36,18) NULL,
+                unrealized_net_pnl DECIMAL(36,18) NULL,
+                unrealized_net_pnl_percent DECIMAL(18,8) NULL,
+                highest_net_pnl_percent DECIMAL(18,8) NULL,
                 opened_at DATETIME NULL,
                 closed_at DATETIME NULL,
                 created_at DATETIME NOT NULL,
@@ -65,6 +78,13 @@ final class NobitexSchema
                 position_id BIGINT UNSIGNED NOT NULL,
                 pnl DECIMAL(36,18) NOT NULL,
                 pnl_percent DECIMAL(18,8) NOT NULL,
+                gross_pnl DECIMAL(36,18) NULL,
+                entry_fee_quote DECIMAL(36,18) NULL,
+                exit_fee_quote DECIMAL(36,18) NULL,
+                total_fees_quote DECIMAL(36,18) NULL,
+                net_pnl DECIMAL(36,18) NULL,
+                fee_source VARCHAR(24) NULL,
+                accounted_at DATETIME NULL,
                 quote_asset VARCHAR(20) NOT NULL,
                 entry_price DECIMAL(36,18) NOT NULL,
                 exit_price DECIMAL(36,18) NOT NULL,
@@ -85,6 +105,30 @@ final class NobitexSchema
         ];
         foreach($statements as$sql)$pdo->exec($sql);
 
+        // Existing installations are upgraded column-by-column so the update is
+        // safe on shared hosting and does not depend on ALTER ... IF NOT EXISTS.
+        self::ensureColumn($pdo,'nobitex_autotrade_positions','entry_fee_quote','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_positions','entry_fee_source','VARCHAR(24) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_positions','estimated_exit_fee_quote','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_positions','total_fees_quote','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_positions','gross_realized_pnl','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_positions','net_realized_pnl','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_positions','mark_price','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_positions','peak_price','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_positions','trailing_stop','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_positions','unrealized_gross_pnl','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_positions','unrealized_net_pnl','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_positions','unrealized_net_pnl_percent','DECIMAL(18,8) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_positions','highest_net_pnl_percent','DECIMAL(18,8) NULL');
+
+        self::ensureColumn($pdo,'nobitex_autotrade_pnl','gross_pnl','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_pnl','entry_fee_quote','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_pnl','exit_fee_quote','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_pnl','total_fees_quote','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_pnl','net_pnl','DECIMAL(36,18) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_pnl','fee_source','VARCHAR(24) NULL');
+        self::ensureColumn($pdo,'nobitex_autotrade_pnl','accounted_at','DATETIME NULL');
+
         $legacy=(bool)(Schema::settings($pdo)['enabled']??false);
         self::seedSetting($pdo,'autotrade_bitpin_enabled',$legacy?'1':'0');
         self::seedSetting($pdo,'autotrade_nobitex_enabled','0');
@@ -96,6 +140,12 @@ final class NobitexSchema
         self::seedSetting($pdo,'nobitex_portfolio_exposure_percent','60');
         self::seedSetting($pdo,'nobitex_analysis_interval_seconds','60');
         self::seedSetting($pdo,'nobitex_signal_source','internal_mtf_1m_5m_15m');
+        self::seedSetting($pdo,'nobitex_taker_fee_irt_percent','0.25');
+        self::seedSetting($pdo,'nobitex_taker_fee_usdt_percent','0.13');
+        self::seedSetting($pdo,'nobitex_trailing_enabled','1');
+        self::seedSetting($pdo,'nobitex_trailing_activation_net_percent','0.85');
+        self::seedSetting($pdo,'nobitex_trailing_distance_percent','0.65');
+        self::seedSetting($pdo,'nobitex_profit_lock_net_percent','0.15');
 
         // One-time migration for the already-authorized production installation.
         // It never arms on a fresh install and never enables Bot/Live by itself.
@@ -106,14 +156,14 @@ final class NobitexSchema
 
         // v3 makes TradingView optional-only. Execution decisions use Nobitex
         // market data and an internal 1m/5m/15m engine even if old TV settings exist.
-        if($previous!=='3'){
+        if($previous!=='3'&&$previous!=='4'){
             self::writeSetting($pdo,'tradingview_enabled','0');
             self::writeSetting($pdo,'nobitex_scan_limit','20');
             self::writeSetting($pdo,'nobitex_analysis_interval_seconds','60');
             self::writeSetting($pdo,'nobitex_signal_source','internal_mtf_1m_5m_15m');
         }
 
-        self::writeSetting($pdo,'nobitex_schema_version','3');
+        self::writeSetting($pdo,'nobitex_schema_version','4');
         self::$ensured=true;
     }
 
@@ -161,6 +211,15 @@ final class NobitexSchema
     private static function writeSetting(PDO $pdo,string $key,string $value):void
     {
         $stmt=$pdo->prepare("INSERT INTO settings (key_name,value_text,updated_at) VALUES (:key,:value,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE value_text=VALUES(value_text),updated_at=UTC_TIMESTAMP()");$stmt->execute([':key'=>$key,':value'=>$value]);
+    }
+
+    private static function ensureColumn(PDO $pdo,string $table,string $column,string $definition):void
+    {
+        if(!preg_match('/^[a-z0-9_]+$/i',$table)||!preg_match('/^[a-z0-9_]+$/i',$column))throw new \InvalidArgumentException('Invalid schema identifier.');
+        $stmt=$pdo->prepare("SHOW COLUMNS FROM `{$table}` LIKE :column");
+        $stmt->execute([':column'=>$column]);
+        if($stmt->fetch())return;
+        $pdo->exec("ALTER TABLE `{$table}` ADD COLUMN `{$column}` {$definition}");
     }
 
     private static function exchange(string $exchange):string
