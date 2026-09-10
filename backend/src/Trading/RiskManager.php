@@ -7,8 +7,10 @@ namespace Trade\Trading;
 final class RiskManager
 {
     private const STRATEGY_MIN_HOLD_SECONDS = 180;
-    private const STRATEGY_MIN_GROSS_PROFIT_PERCENT = 0.65;
-    private const STRATEGY_REVERSAL_LOSS_PERCENT = 0.75;
+    private const STRATEGY_MIN_NET_PROFIT_PERCENT = 0.15;
+    private const STRATEGY_REVERSAL_NET_LOSS_PERCENT = 0.75;
+    private const IRT_TAKER_FEE_PERCENT = 0.25;
+    private const USDT_TAKER_FEE_PERCENT = 0.13;
 
     public function normalizeSettings(array $settings): array
     {
@@ -109,12 +111,54 @@ final class RiskManager
         return $entry * (1.0 + ($percent / 100.0));
     }
 
+    /**
+     * Exit logic is evaluated on net economics, not the chart move alone.
+     *
+     * Spread/slippage are already reflected by real fill prices once an order is
+     * executed. Before exit, exchange fees are deducted from the projected PnL.
+     * If NobitexTradeAccounting has an actual entry fee or a live exit-fee mark,
+     * those values are used; otherwise conservative base-tier taker fees apply.
+     */
     public function exitReason(float $price, array $position, string $signalAction): ?string
     {
+        $entry = (float) ($position['entry_price'] ?? 0);
+        $amount = (float) ($position['amount'] ?? 0);
+        if ($entry <= 0 || $amount <= 0 || $price <= 0) return null;
+
         $stop = (float) ($position['stop_loss'] ?? 0);
         $take = (float) ($position['take_profit'] ?? 0);
+        $trail = (float) ($position['trailing_stop'] ?? 0);
+        $peak = (float) ($position['peak_price'] ?? 0);
+
+        // A hard price stop remains unconditional. Fees only make the loss worse,
+        // so there is never a reason to delay once this boundary is crossed.
         if ($stop > 0 && $price <= $stop) return 'stop_loss';
-        if ($take > 0 && $price >= $take) return 'take_profit';
+
+        // Once profit-lock is armed by the accounting engine, never let price
+        // fall through the ratcheting trailing floor without releasing the asset.
+        if ($trail > 0 && $peak > $entry && $price <= $trail) return 'trailing_profit_lock';
+
+        $entryNotional = $entry * $amount;
+        $grossPnl = ($price - $entry) * $amount;
+        $fallbackRate = strtoupper((string)($position['quote_asset'] ?? 'IRT')) === 'USDT'
+            ? self::USDT_TAKER_FEE_PERCENT / 100.0
+            : self::IRT_TAKER_FEE_PERCENT / 100.0;
+        $entryFee = isset($position['entry_fee_quote']) && is_numeric($position['entry_fee_quote'])
+            ? max(0.0, (float)$position['entry_fee_quote'])
+            : $entryNotional * $fallbackRate;
+        $exitFee = isset($position['estimated_exit_fee_quote']) && is_numeric($position['estimated_exit_fee_quote'])
+            ? max(0.0, (float)$position['estimated_exit_fee_quote'])
+            : ($price * $amount * $fallbackRate);
+        $netPnl = $grossPnl - $entryFee - $exitFee;
+        $costBasis = $entryNotional + $entryFee;
+        $netMovePercent = $costBasis > 0 ? ($netPnl / $costBasis) * 100.0 : 0.0;
+
+        // Treat configured SL/TP percentages as NET portfolio targets. This avoids
+        // displaying a nominal +6% win that becomes less after both trade fees.
+        $configuredStopPercent = $stop > 0 ? (($entry - $stop) / $entry) * 100.0 : 0.0;
+        $configuredTakePercent = $take > 0 ? (($take - $entry) / $entry) * 100.0 : 0.0;
+        if ($configuredStopPercent > 0 && $netMovePercent <= -$configuredStopPercent) return 'stop_loss_after_fees';
+        if ($configuredTakePercent > 0 && $netMovePercent >= $configuredTakePercent) return 'take_profit_after_fees';
 
         if ($signalAction !== 'sell') return null;
 
@@ -124,21 +168,16 @@ final class RiskManager
             if ($opened !== false && time() - $opened < self::STRATEGY_MIN_HOLD_SECONDS) return null;
         }
 
-        $entry = (float) ($position['entry_price'] ?? 0);
-        if ($entry <= 0) return 'strategy_sell';
-
-        $movePercent = (($price - $entry) / $entry) * 100.0;
-
-        // Avoid churning around break-even where two-sided fees, spread and
-        // slippage can turn a visually green trade into a real net loss.
-        if ($movePercent >= self::STRATEGY_MIN_GROSS_PROFIT_PERCENT) {
-            return 'strategy_profit_capture';
+        // A reversal signal may capture a small but genuinely positive NET gain;
+        // it may not churn a position that is only visually green before fees.
+        if ($netMovePercent >= self::STRATEGY_MIN_NET_PROFIT_PERCENT) {
+            return 'strategy_net_profit_capture';
         }
 
-        // A confirmed reversal may still justify accepting a controlled loss
-        // before the hard stop-loss is reached. Tiny negative flips are ignored.
-        if ($movePercent <= -self::STRATEGY_REVERSAL_LOSS_PERCENT) {
-            return 'strategy_reversal_exit';
+        // If the forward signal reverses hard enough, accept a controlled NET
+        // loss before the absolute hard stop is reached.
+        if ($netMovePercent <= -self::STRATEGY_REVERSAL_NET_LOSS_PERCENT) {
+            return 'strategy_reversal_exit_after_costs';
         }
 
         return null;
