@@ -20,7 +20,7 @@ use Trade\Database;
  */
 final class NobitexAutoTraderEngine
 {
-    private const MAX_ACTIONS_PER_TICK = 12;
+    private const MAX_ACTIONS_PER_TICK = 20;
 
     public function run(): array
     {
@@ -64,7 +64,7 @@ final class NobitexAutoTraderEngine
         return [
             'status'=>'profit_actions_processed',
             'exchange'=>'nobitex',
-            'decision_model'=>'positive_expected_net_profit',
+            'decision_model'=>'net_edge_after_costs_and_adaptive_forecast_buffer',
             'score_based_selection'=>false,
             'actions_count'=>count($actions),
             'actions'=>$actions,
@@ -90,14 +90,14 @@ final class NobitexAutoTraderEngine
         Database::transaction(function (PDO $tx): void {
             $this->writeSetting($tx, 'nobitex_bootstrap_first_buy_pending', '0');
             $this->writeSetting($tx, 'nobitex_bootstrap_retired_at', gmdate('Y-m-d H:i:s'));
-            $this->writeSetting($tx, 'nobitex_selection_model', 'positive_expected_net_profit');
+            $this->writeSetting($tx, 'nobitex_selection_model', 'net_edge_after_costs_and_adaptive_forecast_buffer');
         });
 
         return [
             'status'=>'not_pending',
             'exchange'=>'nobitex',
             'bootstrap'=>'retired_score_gate',
-            'selection_model'=>'positive_expected_net_profit',
+            'selection_model'=>'net_edge_after_costs_and_adaptive_forecast_buffer',
         ];
     }
 
@@ -106,8 +106,6 @@ final class NobitexAutoTraderEngine
         try {
             return ['status'=>'ok'] + $accounting->sync();
         } catch (\Throwable $e) {
-            // Accounting failure must not disable the core risk engine. Existing
-            // hard SL/TP controls remain active and the next cron tick retries.
             return ['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,240)];
         }
     }
