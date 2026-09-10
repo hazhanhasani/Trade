@@ -16,9 +16,7 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
 
     suspend fun health(): Response = request("GET", "/api/health", authenticated = false)
     suspend fun updateInfo(): Response = request("GET", "/api/update", authenticated = false)
-    suspend fun pair(code: String): Response = request(
-        "POST", "/api/pair", JSONObject().put("code", code).toString(), authenticated = false,
-    )
+    suspend fun pair(code: String): Response = request("POST", "/api/pair", JSONObject().put("code", code).toString(), authenticated = false)
 
     suspend fun status(): Response {
         val response = request("GET", "/api/status")
@@ -28,10 +26,34 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
 
     suspend fun exchanges(): Response = request("GET", "/api/exchanges")
     suspend fun botStatus(): Response = request("GET", "/api/bot")
+
     suspend fun rotationStatus(limit: Int = 20): Response {
         requireCapability("trading.portfolio_rotation_monitor_v1")
         return request("GET", "/api/bot/rotation?limit=${limit.coerceIn(1, 50)}")
     }
+
+    suspend fun globalPortfolio(): Response {
+        requireCapability("trading.global_portfolio_exposure_v1")
+        return request("GET", "/api/portfolio/global")
+    }
+
+    suspend fun analytics(days: Int = 30): Response {
+        requireCapability("analytics.performance_v1")
+        return request("GET", "/api/analytics?days=${days.coerceIn(7, 180)}")
+    }
+
+    suspend fun notifications(limit: Int = 50, unreadOnly: Boolean = false): Response {
+        requireCapability("notifications.center_v1")
+        return request("GET", "/api/notifications?limit=${limit.coerceIn(1, 100)}&unread=${if (unreadOnly) 1 else 0}")
+    }
+
+    suspend fun markNotificationRead(id: Long? = null, all: Boolean = false): Response {
+        requireCapability("notifications.center_v1")
+        val body = JSONObject()
+        if (all) body.put("all", true) else body.put("id", requireNotNull(id) { "Notification id is required" })
+        return request("POST", "/api/notifications/read", body.toString())
+    }
+
     suspend fun markets(exchange: String = "bitpin"): Response = request("GET", "/api/markets?exchange=${exchangeArg(exchange)}")
     suspend fun wallets(exchange: String = "bitpin"): Response = request("GET", "/api/wallets?exchange=${exchangeArg(exchange)}")
     suspend fun orders(exchange: String = "bitpin"): Response = request("GET", "/api/orders?exchange=${exchangeArg(exchange)}")
@@ -67,14 +89,10 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
     }
 
     fun isContractCompatible(): Boolean =
-        contractLoaded &&
-            backendApiContract == ReleaseContract.API_CONTRACT &&
-            ReleaseContract.missingCapabilities(backendCapabilities).isEmpty()
+        contractLoaded && backendApiContract == ReleaseContract.API_CONTRACT && ReleaseContract.missingCapabilities(backendCapabilities).isEmpty()
 
     fun apiContract(): Int? = backendApiContract
-
     fun capabilities(): Set<String> = backendCapabilities
-
     fun missingCapabilities(): Set<String> = ReleaseContract.missingCapabilities(backendCapabilities)
 
     private fun captureContract(response: Response) {
@@ -100,9 +118,7 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
     }
 
     private fun requireCapability(capability: String) {
-        check(contractLoaded) {
-            "وضعیت سازگاری Backend هنوز بررسی نشده است؛ ابتدا وضعیت برنامه را بروزرسانی کن."
-        }
+        check(contractLoaded) { "وضعیت سازگاری Backend هنوز بررسی نشده است؛ ابتدا وضعیت برنامه را بروزرسانی کن." }
         check(backendApiContract == ReleaseContract.API_CONTRACT) {
             "نسخه API Backend با این نسخه اپ سازگار نیست. Backend=${backendApiContract ?: "نامشخص"} / App=${ReleaseContract.API_CONTRACT}"
         }
@@ -117,12 +133,7 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
         return normalized
     }
 
-    private suspend fun request(
-        method: String,
-        path: String,
-        body: String? = null,
-        authenticated: Boolean = true,
-    ): Response = withContext(Dispatchers.IO) {
+    private suspend fun request(method: String, path: String, body: String? = null, authenticated: Boolean = true): Response = withContext(Dispatchers.IO) {
         require(baseUrl.startsWith("https://")) { "Only HTTPS server URLs are allowed" }
         val connection = (URL(baseUrl.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
             requestMethod = method
@@ -142,8 +153,6 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
             Response(code, stream?.bufferedReader()?.use { it.readText() }.orEmpty())
-        } finally {
-            connection.disconnect()
-        }
+        } finally { connection.disconnect() }
     }
 }
