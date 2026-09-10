@@ -7,11 +7,13 @@ function tradeAdminNav(string $active, string $version): void
     $path = (string) (parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH) ?: '');
     if ($path === '/admin/analytics.php') $active = 'analytics';
     elseif ($path === '/admin/notifications.php') $active = 'notifications';
+    elseif ($path === '/admin/bot/learning.php') $active = 'learning';
 
     $items = [
         'dashboard' => ['/admin/', 'داشبورد'],
         'trading' => ['/admin/bot/', 'معاملات'],
         'intelligence' => ['/admin/bot/intelligence.php', 'مدیریت ریسک هوشمند'],
+        'learning' => ['/admin/bot/learning.php', 'یادگیری استراتژی‌ها'],
         'analytics' => ['/admin/analytics.php', 'عملکرد'],
         'exchanges' => ['/admin/exchanges.php', 'صرافی‌ها'],
         'notifications' => ['/admin/notifications.php', 'اعلان‌ها'],
