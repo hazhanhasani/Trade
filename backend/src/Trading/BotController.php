@@ -23,11 +23,16 @@ final class BotController
         $settings['nobitex_max_positions'] = (int)$this->settingNumber($pdo, 'nobitex_max_positions', 5);
         $settings['nobitex_scan_limit'] = (int)$this->settingNumber($pdo, 'nobitex_scan_limit', 12);
         $settings['nobitex_portfolio_exposure_percent'] = $this->settingNumber($pdo, 'nobitex_portfolio_exposure_percent', 60.0);
+        $settings['nobitex_max_pending_orders'] = (int)$this->settingNumber($pdo, 'nobitex_max_pending_orders', 3);
+        $settings['nobitex_pending_timeout_seconds'] = (int)$this->settingNumber($pdo, 'nobitex_pending_timeout_seconds', 60);
         $quote = (string) $settings['quote_asset'];
         $kill = (string) ($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn() ?: '0') === '1';
 
         $bitpinPositions = $this->activePositions($pdo, 'bitpin');
         $nobitexPositions = $this->activePositions($pdo, 'nobitex');
+        $capacity = $this->nobitexCapacity($settings, $nobitexPositions);
+        $settings['nobitex_effective_position_percent'] = $capacity['effective_position_percent'];
+        $settings['nobitex_pending_order_count'] = $capacity['pending_orders'];
         $lastRun = $pdo->query('SELECT run_id,status,summary_json,started_at,finished_at FROM bot_runs ORDER BY id DESC LIMIT 1')->fetch() ?: null;
         if ($lastRun && isset($lastRun['summary_json'])) {
             $lastRun['summary'] = json_decode((string) $lastRun['summary_json'], true);
@@ -38,7 +43,10 @@ final class BotController
         $exchanges = [
             'bitpin' => $this->exchangeStatus($pdo, 'bitpin', $quote, $bitpinPositions, $lastRun, $this->bitpin->liveEnabled()),
             'nobitex' => $this->exchangeStatus($pdo, 'nobitex', $quote, $nobitexPositions, $lastRun, $this->nobitex->liveEnabled())
-                + ['sodium_available'=>function_exists('sodium_crypto_sign_detached')],
+                + [
+                    'sodium_available'=>function_exists('sodium_crypto_sign_detached'),
+                    'portfolio_capacity'=>$capacity,
+                ],
         ];
 
         return [
@@ -135,6 +143,12 @@ final class BotController
         if (array_key_exists('nobitex_portfolio_exposure_percent', $input)) {
             $this->writeSetting($pdo, 'nobitex_portfolio_exposure_percent', (string)$this->boundedFloat($input['nobitex_portfolio_exposure_percent'], 10.0, 90.0, 60.0));
         }
+        if (array_key_exists('nobitex_max_pending_orders', $input)) {
+            $this->writeSetting($pdo, 'nobitex_max_pending_orders', (string)$this->boundedInt($input['nobitex_max_pending_orders'], 1, 5, 3));
+        }
+        if (array_key_exists('nobitex_pending_timeout_seconds', $input)) {
+            $this->writeSetting($pdo, 'nobitex_pending_timeout_seconds', (string)$this->boundedInt($input['nobitex_pending_timeout_seconds'], 30, 300, 60));
+        }
 
         $this->audit('autotrade.shared_settings_updated', $n + ['quote_asset'=>$quote]);
         return $this->status()['settings'];
@@ -187,6 +201,39 @@ final class BotController
     {
         $table = $exchange === 'nobitex' ? 'nobitex_autotrade_positions' : 'autotrade_positions';
         return $pdo->query("SELECT id,symbol,asset,quote_asset,amount,entry_price,stop_loss,take_profit,status,opened_at,updated_at FROM {$table} WHERE status IN ('pending_open','open','pending_close') ORDER BY id DESC LIMIT 20")->fetchAll();
+    }
+
+    private function nobitexCapacity(array $settings, array $positions): array
+    {
+        $maxPositions = max(1, min(20, (int)($settings['nobitex_max_positions'] ?? 5)));
+        $exposureLimit = max(10.0, min(90.0, (float)($settings['nobitex_portfolio_exposure_percent'] ?? 60.0)));
+        $configuredPosition = min((float)($settings['position_percent'] ?? 5.0), (float)($settings['max_position_percent'] ?? 10.0));
+        $effectivePosition = min($configuredPosition, $exposureLimit / $maxPositions);
+        $pending = 0;
+        $notional = ['IRT'=>0.0,'USDT'=>0.0];
+        foreach ($positions as $position) {
+            if (in_array((string)($position['status'] ?? ''), ['pending_open','pending_close'], true)) $pending++;
+            $q = strtoupper((string)($position['quote_asset'] ?? ''));
+            if (array_key_exists($q, $notional)) {
+                $notional[$q] += max(0.0, (float)($position['amount'] ?? 0)) * max(0.0, (float)($position['entry_price'] ?? 0));
+            }
+        }
+        return [
+            'active_positions'=>count($positions),
+            'max_positions'=>$maxPositions,
+            'remaining_position_slots'=>max(0, $maxPositions - count($positions)),
+            'pending_orders'=>$pending,
+            'max_pending_orders'=>max(1, min(5, (int)($settings['nobitex_max_pending_orders'] ?? 3))),
+            'pending_timeout_seconds'=>max(30, min(300, (int)($settings['nobitex_pending_timeout_seconds'] ?? 60))),
+            'configured_position_percent'=>round($configuredPosition, 4),
+            'effective_position_percent'=>round($effectivePosition, 4),
+            'portfolio_exposure_limit_percent'=>round($exposureLimit, 4),
+            'planned_full_capacity_percent'=>round(min($exposureLimit, $effectivePosition * $maxPositions), 4),
+            'active_notional_by_quote'=>[
+                'IRT'=>round($notional['IRT'], 8),
+                'USDT'=>round($notional['USDT'], 8),
+            ],
+        ];
     }
 
     private function latestSignal(PDO $pdo, string $exchange): ?array
