@@ -27,6 +27,8 @@ jobs:
         run: php backend/tests/portfolio_intelligence_test.php
       - name: Execution Quality v2 regression tests
         run: php backend/tests/execution_quality_v2_test.php
+      - name: Nobitex currency unit regression tests
+        run: php backend/tests/nobitex_currency_units_test.php
       - name: Validate Backend ↔ Android API contract parity
         shell: bash
         run: |
