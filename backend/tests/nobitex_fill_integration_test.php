@@ -19,8 +19,8 @@ check(str_contains($accounting,'return NobitexOrderFill::matchedAmount($order, 0
 check(str_contains($accounting,'return NobitexOrderFill::averagePrice($order, $fallback);'),'Accounting must use canonical fill prices.');
 check(str_contains($reprice,'NobitexOrderFill::matchedAmount($order,$fallback)'),'Reprice must require a real matched fill before blocking replacement.');
 
-check(str_contains($orderService,"$order['requestedAmount']=$requested"),'Order normalization must preserve requested quantity for recovery.');
-check(str_contains($orderService,"$order['amount']=0"),'Non-done normalized orders must not expose requested amount as a matched fill.');
+check(str_contains($orderService,'$order[\'requestedAmount\']=$requested'),'Order normalization must preserve requested quantity for recovery.');
+check(str_contains($orderService,'$order[\'amount\']=0'),'Non-done normalized orders must not expose requested amount as a matched fill.');
 
 $legacy="['matchedAmount','matched_amount','filledAmount','amount']";
 check(!str_contains($portfolio,$legacy),'Portfolio still contains the legacy amount-as-fill parser.');
