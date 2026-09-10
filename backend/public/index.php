@@ -8,9 +8,12 @@ use Trade\Config;
 use Trade\Database;
 use Trade\Security\AppAccess;
 use Trade\Trading\BotController;
+use Trade\Trading\NobitexAutoTraderEngine;
 use Trade\Trading\NobitexOrderService;
 use Trade\Trading\NobitexSchema;
 use Trade\Trading\OrderService;
+use Trade\Trading\TradingViewSignalService;
+use Trade\Trading\TradingViewWebhookException;
 use Trade\Updater;
 
 header('Content-Type: application/json; charset=utf-8');
@@ -36,10 +39,32 @@ function credentialExists(string $exchange):bool{$s=Database::connection()->prep
 
 try{
     NobitexSchema::ensure();
+
+    // TradingView must receive a fast acknowledgement. The live re-check is
+    // deliberately performed only after FastCGI has flushed the HTTP response;
+    // otherwise the regular one-minute cron remains the safe fallback.
+    if($method==='POST'&&preg_match('#^/webhooks/tradingview/([A-Za-z0-9_-]{32,128})$#',$path,$m)){
+        if(is_file(dirname(__DIR__).'/storage/maintenance.lock'))respond(['ok'=>false,'error'=>'maintenance'],503);
+        $tv=new TradingViewSignalService();
+        try{$payload=jsonBody();}catch(JsonException|InvalidArgumentException $e){respond(['ok'=>false,'error'=>'invalid_json'],400);}
+        $result=$tv->ingest($m[1],$payload,TradingViewSignalService::requestSourceIp());
+        http_response_code(202);
+        echo json_encode(['ok'=>true,'accepted'=>$result['accepted'],'duplicate'=>$result['duplicate'],'event_id'=>$result['event_id']],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR);
+        if(function_exists('fastcgi_finish_request')){
+            fastcgi_finish_request();
+            ignore_user_abort(true);
+            if($tv->shouldInstantRecheck($result)){
+                try{(new NobitexAutoTraderEngine())->run();}catch(Throwable $e){error_log('[Trade TradingView] instant recheck failed: '.$e->getMessage());}
+            }
+        }
+        exit;
+    }
+
     if($method==='GET'&&$path==='/api/health'){
         $db=true;try{$pdo=Database::connection();$pdo->query('SELECT 1');AppAccess::bootstrapLegacy($pdo);}catch(Throwable){$db=false;}
         $bot=$db?(new BotController())->status():null;
-        respond(['ok'=>$db,'service'=>'Trade','execution_mode'=>'live_only','capital_asset'=>'IRT/USDT','quote_priority'=>['IRT','USDT'],'version'=>Updater::currentVersion(),'app_url'=>(string)Config::get('app.url','https://rado-taxi.sbs'),'database'=>$db?'ok':'error','exchanges'=>$bot['exchanges']??[],'cron_health'=>$bot['cron_health']??null,'update_state'=>Updater::state(),'time_utc'=>gmdate(DATE_ATOM)],$db?200:503);
+        $tv=$db?(new TradingViewSignalService())->publicStatus():null;
+        respond(['ok'=>$db,'service'=>'Trade','execution_mode'=>'live_only','capital_asset'=>'IRT/USDT','quote_priority'=>['IRT','USDT'],'version'=>Updater::currentVersion(),'app_url'=>(string)Config::get('app.url','https://rado-taxi.sbs'),'database'=>$db?'ok':'error','exchanges'=>$bot['exchanges']??[],'tradingview'=>$tv,'cron_health'=>$bot['cron_health']??null,'update_state'=>Updater::state(),'time_utc'=>gmdate(DATE_ATOM)],$db?200:503);
     }
     if($method==='GET'&&$path==='/api/update'){
         try{respond(['ok'=>true,'data'=>Updater::appUpdateInfo()]);}catch(Throwable $e){respond(['ok'=>false,'error'=>'update_check_failed','message'=>$e->getMessage(),'backend_version'=>Updater::currentVersion()],503);}
@@ -56,10 +81,11 @@ try{
         respond(['ok'=>true,'data'=>[
             'mode'=>$status['exchanges']['nobitex']['live_execution_enabled']?'live':'live_disabled','execution_mode'=>'live_only','capital_asset'=>'IRT/USDT','quote_priority'=>['IRT','USDT'],'kill_switch'=>$status['kill_switch'],
             'credentials_configured'=>$status['exchanges']['nobitex']['credentials_configured'],'orders_logged'=>(int)$pdo->query('SELECT COUNT(*) FROM orders')->fetchColumn(),'active_app_tokens'=>AppAccess::activeCount($pdo),
-            'backend_version'=>Updater::currentVersion(),'update_state'=>Updater::state(),'last_run'=>$status['last_run'],'cron_health'=>$status['cron_health'],'bot'=>$status,'exchanges'=>$status['exchanges'],
+            'backend_version'=>Updater::currentVersion(),'update_state'=>Updater::state(),'last_run'=>$status['last_run'],'cron_health'=>$status['cron_health'],'tradingview'=>$status['tradingview']??(new TradingViewSignalService())->publicStatus(),'bot'=>$status,'exchanges'=>$status['exchanges'],
         ]]);
     }
     if($method==='GET'&&$path==='/api/exchanges')respond(['ok'=>true,'data'=>$controller->status()['exchanges']]);
+    if($method==='GET'&&$path==='/api/tradingview')respond(['ok'=>true,'data'=>(new TradingViewSignalService())->publicStatus()]);
     if($method==='GET'&&$path==='/api/bot')respond(['ok'=>true,'data'=>$controller->status()]);
     if($method==='GET'&&$path==='/api/bot/recent')respond(['ok'=>true,'data'=>$controller->recentData(isset($_GET['limit'])?(int)$_GET['limit']:25)]);
     if($method==='POST'&&$path==='/api/bot/settings'){$controller->updateSettings(jsonBody());respond(['ok'=>true,'data'=>$controller->status()]);}
@@ -94,4 +120,4 @@ try{
     }
     if($method==='POST'&&$path==='/api/kill-switch'){$b=jsonBody();$enabled=boolValue($b['enabled']??true,true);$controller->setKillSwitch($enabled);respond(['ok'=>true,'kill_switch'=>$enabled]);}
     respond(['ok'=>false,'error'=>'not_found'],404);
-}catch(InvalidArgumentException $e){respond(['ok'=>false,'error'=>'validation_error','message'=>$e->getMessage()],422);}catch(Throwable $e){respond(['ok'=>false,'error'=>'server_error','message'=>$e->getMessage()],500);}
+}catch(TradingViewWebhookException $e){respond(['ok'=>false,'error'=>'tradingview_webhook','message'=>$e->getMessage()],$e->statusCode);}catch(InvalidArgumentException $e){respond(['ok'=>false,'error'=>'validation_error','message'=>$e->getMessage()],422);}catch(Throwable $e){respond(['ok'=>false,'error'=>'server_error','message'=>$e->getMessage()],500);}
