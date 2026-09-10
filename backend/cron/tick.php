@@ -17,11 +17,31 @@ if (!Config::installed()) {
 }
 
 $pdo = Database::connection();
+
+// Recovery invariant: updater MUST run before optional trading-schema migrations.
+// If a newly deployed migration is incompatible with a shared-hosting MariaDB,
+// cron can still download the next hotfix instead of being trapped on the broken
+// version forever. Never execute trading code in the PHP process that replaced
+// backend files because old classes may already be loaded in memory.
+$update = Updater::autoUpdateIfDue();
+if (($update['status'] ?? '') === 'updated') {
+    echo json_encode([
+        'status'=>'success',
+        'update'=>$update,
+        'backend_version'=>Updater::currentVersion(),
+        'exchanges'=>[
+            'bitpin'=>['status'=>'deferred','reason'=>'backend_updated_restart_next_tick'],
+            'nobitex'=>['status'=>'deferred','reason'=>'backend_updated_restart_next_tick'],
+        ],
+        'time_utc'=>gmdate(DATE_ATOM),
+    ], JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE) . PHP_EOL;
+    exit(0);
+}
+
 NobitexSchema::ensure();
 $runId = bin2hex(random_bytes(12));
 $stmt = $pdo->prepare("INSERT INTO bot_runs (run_id,status,started_at) VALUES (:id,'running',UTC_TIMESTAMP())");
 $stmt->execute([':id' => $runId]);
-$update = Updater::autoUpdateIfDue();
 
 $baseSummary = [
     'run_id' => $runId,
@@ -40,20 +60,6 @@ $baseSummary = [
     'backend_version' => Updater::currentVersion(),
     'time_utc' => gmdate(DATE_ATOM),
 ];
-
-// Do not execute live orders in the PHP process that just replaced backend files.
-if (($update['status'] ?? '') === 'updated') {
-    $summary = $baseSummary + [
-        'exchanges' => [
-            'bitpin' => ['status'=>'deferred','reason'=>'backend_updated_restart_next_tick'],
-            'nobitex' => ['status'=>'deferred','reason'=>'backend_updated_restart_next_tick'],
-        ],
-    ];
-    $stmt = $pdo->prepare("UPDATE bot_runs SET status='success',summary_json=:summary,finished_at=UTC_TIMESTAMP() WHERE run_id=:id");
-    $stmt->execute([':summary'=>json_encode($summary,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE),':id'=>$runId]);
-    echo json_encode($summary,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE) . PHP_EOL;
-    exit(0);
-}
 
 $results = [];
 $enabledCount = 0;
