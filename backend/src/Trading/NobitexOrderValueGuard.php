@@ -10,6 +10,8 @@ namespace Trade\Trading;
  * The service accepts both `amount` and the legacy `amount1` alias. The guard
  * always works on the normalized amount and on the final execution price bound,
  * so an Execution Planner reprice cannot silently bypass max_order_value.
+ * Automated reduction-only SELLs are explicitly exempt because an entry cap
+ * must never trap an already-open position during stop-loss/profit-lock exits.
  */
 final class NobitexOrderValueGuard
 {
@@ -46,6 +48,24 @@ final class NobitexOrderValueGuard
         }
 
         return $candidates === [] ? null : max($candidates);
+    }
+
+    /** @return array<string,mixed> */
+    public static function reductionOnlyExitAssessment(float $amount, ?float $priceBound, float $maxValue): array
+    {
+        $orderValue = $priceBound !== null && is_finite($priceBound) && $priceBound > 0.0
+            ? $amount * $priceBound
+            : null;
+        return [
+            'model'=>self::MODEL,
+            'enabled'=>$maxValue > 0.0,
+            'allowed'=>true,
+            'reason'=>'reduction_only_automated_exit_exempt',
+            'amount'=>$amount,
+            'price_bound'=>$priceBound,
+            'order_value'=>$orderValue !== null && is_finite($orderValue) ? $orderValue : null,
+            'max_order_value'=>max(0.0, is_finite($maxValue) ? $maxValue : 0.0),
+        ];
     }
 
     /** @return array<string,mixed> */
