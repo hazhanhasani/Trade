@@ -8,7 +8,6 @@ use Trade\Config;
 use Trade\Database;
 use Trade\Trading\AutoTraderEngine;
 use Trade\Trading\NobitexAutoTraderEngine;
-use Trade\Trading\NobitexFirstBuy;
 use Trade\Trading\NobitexSchema;
 use Trade\Updater;
 
@@ -26,8 +25,8 @@ $update = Updater::autoUpdateIfDue();
 
 $baseSummary = [
     'run_id' => $runId,
-    'asset' => 'GRAM',
-    'legacy_alias' => 'TON',
+    'strategy_mode' => 'multi_asset_portfolio',
+    'nobitex_universe' => 'all_eligible_spot_markets',
     'quote_priority' => ['IRT','USDT'],
     'execution_mode' => 'live_only',
     'update' => $update,
@@ -55,7 +54,7 @@ $failedCount = 0;
 
 $runExchange = static function (string $exchange, callable $runner) use (&$results, &$enabledCount, &$failedCount): void {
     if (!NobitexSchema::botEnabled($exchange)) {
-        $results[$exchange] = ['status'=>'disabled','exchange'=>$exchange,'asset'=>'GRAM'];
+        $results[$exchange] = ['status'=>'disabled','exchange'=>$exchange];
         return;
     }
     $enabledCount++;
@@ -69,12 +68,15 @@ $runExchange = static function (string $exchange, callable $runner) use (&$resul
 
 $runExchange('bitpin', static fn(): array => (new AutoTraderEngine())->run());
 $runExchange('nobitex', static function (): array {
-    // The existing production installation has explicitly requested a first live
-    // entry after this upgrade. This one-shot path is idempotent and still obeys
-    // Bot, Live, Kill Switch, balance, minimum-order and portfolio-risk limits.
-    $first = (new NobitexFirstBuy())->runIfPending();
+    $engine = new NobitexAutoTraderEngine();
+
+    // Existing installations that were explicitly armed for a first live entry
+    // now use the same multi-asset scanner as the normal portfolio engine. This
+    // removes the old hard-coded TON/GRAM bootstrap path.
+    $first = $engine->runBootstrapIfPending();
     if (($first['status'] ?? '') !== 'not_pending') return $first;
-    return (new NobitexAutoTraderEngine())->run();
+
+    return $engine->run();
 });
 
 $overall = $failedCount === 0 ? 'success' : (($enabledCount > $failedCount) ? 'partial' : 'failed');
