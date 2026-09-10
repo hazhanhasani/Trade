@@ -156,14 +156,17 @@ final class NobitexTradeAccounting
             $retryable = (!$actual) && (($r['entry_exchange_order_id'] ?? '') !== '' || ($r['exit_exchange_order_id'] ?? '') !== '');
             $source = $actual ? 'actual' : ($retryable ? 'estimated_retry' : 'estimated_final');
 
+            // Native PDO/MySQL prepared statements do not allow one named placeholder
+            // to be reused multiple times in the same statement. Keep distinct names
+            // for the two columns even though both intentionally receive $net.
             $stmt = $pdo->prepare(
                 "UPDATE nobitex_autotrade_pnl SET gross_pnl=:gross,entry_fee_quote=:entry_fee,
-                    exit_fee_quote=:exit_fee,total_fees_quote=:fees,net_pnl=:net,pnl=:net,pnl_percent=:pct,
+                    exit_fee_quote=:exit_fee,total_fees_quote=:fees,net_pnl=:net_pnl,pnl=:pnl_value,pnl_percent=:pct,
                     fee_source=:source,accounted_at=UTC_TIMESTAMP() WHERE id=:id"
             );
             $stmt->execute([
                 ':gross'=>$gross, ':entry_fee'=>$entryFee['quote_fee'], ':exit_fee'=>$exitFee['quote_fee'],
-                ':fees'=>$fees, ':net'=>$net, ':pct'=>$pct, ':source'=>$source, ':id'=>$r['id'],
+                ':fees'=>$fees, ':net_pnl'=>$net, ':pnl_value'=>$net, ':pct'=>$pct, ':source'=>$source, ':id'=>$r['id'],
             ]);
             $positions[(int)$r['position_id']] = true;
             $updated++;
@@ -181,11 +184,13 @@ final class NobitexTradeAccounting
         );
         $stmt->execute([':id'=>$positionId]);
         $sum = $stmt->fetch() ?: ['gross'=>0,'fees'=>0,'net'=>0];
+        // Same native-PDO rule here: do not reuse :net in two assignments.
         $pdo->prepare(
             "UPDATE nobitex_autotrade_positions SET gross_realized_pnl=:gross,total_fees_quote=:fees,
-                net_realized_pnl=:net,realized_pnl=:net,updated_at=UTC_TIMESTAMP() WHERE id=:id"
+                net_realized_pnl=:net_realized,realized_pnl=:realized_value,updated_at=UTC_TIMESTAMP() WHERE id=:id"
         )->execute([
-            ':gross'=>$sum['gross'], ':fees'=>$sum['fees'], ':net'=>$sum['net'], ':id'=>$positionId,
+            ':gross'=>$sum['gross'], ':fees'=>$sum['fees'], ':net_realized'=>$sum['net'],
+            ':realized_value'=>$sum['net'], ':id'=>$positionId,
         ]);
     }
 
