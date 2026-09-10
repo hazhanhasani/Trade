@@ -257,6 +257,14 @@ jobs:
           BACKEND_SHA=$(sha256sum dist/Trade-cPanel.zip | awk '{print $1}')
           ANDROID_SHA=$(sha256sum dist/Trade.apk | awk '{print $1}')
           ANDROID_URL='https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade.apk'
+          API_CONTRACT=$(php -r "require 'backend/bootstrap.php'; echo Trade\\ReleaseContract::API_CONTRACT;")
+          CAPABILITIES=$(php -r "require 'backend/bootstrap.php'; echo json_encode(Trade\\ReleaseContract::CAPABILITIES, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);")
+
+          if [[ ! "$API_CONTRACT" =~ ^[0-9]+$ ]] || (( API_CONTRACT < 1 )); then
+            echo "::error::Release API contract must be a positive integer."
+            exit 1
+          fi
+          printf '%s' "$CAPABILITIES" | jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' >/dev/null
 
           jq -n \
             --arg releaseVersion "$RELEASE_VERSION" \
@@ -266,11 +274,13 @@ jobs:
             --arg androidUrl "$ANDROID_URL" \
             --arg signingSource "$ANDROID_SIGNING_SOURCE" \
             --arg signingCertSha256 "$ANDROID_CERT_SHA256" \
+            --argjson apiContract "$API_CONTRACT" \
+            --argjson capabilities "$CAPABILITIES" \
             --arg publishedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{schema:2,published_at:$publishedAt,release:{version:$releaseVersion,coordinated:true},backend:{version:$releaseVersion,url:"https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade-cPanel.zip",sha256:$backendSha},android:{available:true,version_code:$androidCode,version_name:$releaseVersion,required_backend_version:$releaseVersion,url:$androidUrl,sha256:$androidSha,signing:{status:"permanent",source:$signingSource,cert_sha256:$signingCertSha256}}}' \
+            '{schema:3,published_at:$publishedAt,release:{version:$releaseVersion,coordinated:true,api_contract:$apiContract,capabilities:$capabilities},backend:{version:$releaseVersion,api_contract:$apiContract,url:"https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade-cPanel.zip",sha256:$backendSha},android:{available:true,version_code:$androidCode,version_name:$releaseVersion,required_backend_version:$releaseVersion,required_api_contract:$apiContract,url:$androidUrl,sha256:$androidSha,signing:{status:"permanent",source:$signingSource,cert_sha256:$signingCertSha256}}}' \
             > dist/latest.json
 
-          jq -e '.release.coordinated == true and .release.version == .backend.version and .backend.version == .android.version_name and .android.required_backend_version == .backend.version and .android.available == true' dist/latest.json >/dev/null
+          jq -e '.schema == 3 and .release.coordinated == true and .release.version == .backend.version and .backend.version == .android.version_name and .android.required_backend_version == .backend.version and .release.api_contract == .backend.api_contract and .android.required_api_contract == .release.api_contract and (.release.capabilities | index("api.capability_contract")) != null and (.release.capabilities | index("updates.coordinated_backend_android")) != null and .android.available == true' dist/latest.json >/dev/null
 
       - name: Publish stable release assets atomically
         env:
