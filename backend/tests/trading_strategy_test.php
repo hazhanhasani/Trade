@@ -5,6 +5,7 @@ declare(strict_types=1);
 require dirname(__DIR__) . '/bootstrap.php';
 
 use Trade\Trading\NobitexInternalSignalEngine;
+use Trade\Trading\NobitexPortfolioRotation;
 use Trade\Trading\RiskManager;
 
 function assertTrue(bool $condition, string $message): void
@@ -79,4 +80,86 @@ $givebackPosition['highest_net_pnl_percent'] = 1.20;
 $givebackReason = $risk->exitReason(100.3, $givebackPosition, 'sell');
 assertTrue($givebackReason === 'strategy_profit_giveback_exit', 'profit giveback exit should protect a previously meaningful net gain');
 
-echo "Nobitex strategy v5 regression tests passed.\n";
+$rotation = new NobitexPortfolioRotation();
+$now = time();
+$rotationConfig = [
+    'min_advantage_percent'=>0.75,
+    'min_hold_minutes'=>45,
+    'max_rotation_loss_percent'=>0.75,
+    'friction_margin_percent'=>0.15,
+];
+$positions = [
+    [
+        'id'=>1,
+        'symbol'=>'WEAKIRT',
+        'asset'=>'WEAK',
+        'quote_asset'=>'IRT',
+        'status'=>'open',
+        'amount'=>2.0,
+        'forward_edge_percent'=>0.05,
+        'estimated_exit_cost_percent'=>0.30,
+        'unrealized_net_pnl_percent'=>0.20,
+        'opened_at'=>gmdate('Y-m-d H:i:s', $now - 2 * 3600),
+    ],
+    [
+        'id'=>2,
+        'symbol'=>'STRONGIRT',
+        'asset'=>'STRONG',
+        'quote_asset'=>'IRT',
+        'status'=>'open',
+        'amount'=>1.0,
+        'forward_edge_percent'=>0.70,
+        'estimated_exit_cost_percent'=>0.25,
+        'unrealized_net_pnl_percent'=>0.40,
+        'opened_at'=>gmdate('Y-m-d H:i:s', $now - 3 * 3600),
+    ],
+];
+$candidates = [
+    [
+        'symbol'=>'NEWIRT',
+        'asset'=>'NEW',
+        'quote_asset'=>'IRT',
+        'signal'=>[
+            'ready'=>true,
+            'action'=>'buy',
+            'tradable_net_edge_percent'=>1.25,
+            'execution_quality_score'=>84,
+        ],
+    ],
+    [
+        'symbol'=>'WEAKUSDT',
+        'asset'=>'WEAK',
+        'quote_asset'=>'USDT',
+        'signal'=>[
+            'ready'=>true,
+            'action'=>'buy',
+            'tradable_net_edge_percent'=>3.00,
+            'execution_quality_score'=>95,
+        ],
+    ],
+];
+$plan = $rotation->plan($positions, $candidates, $rotationConfig, $now);
+assertTrue(($plan['rotate'] ?? false) === true, 'superior replacement should trigger rotation');
+assertTrue((int)($plan['victim']['id'] ?? 0) === 1, 'rotation should release the weakest eligible incumbent');
+assertTrue(($plan['candidate']['symbol'] ?? '') === 'NEWIRT', 'rotation should select the best inactive same-quote candidate');
+assertTrue((float)($plan['advantage_percent'] ?? 0) >= 1.19, 'rotation advantage was not calculated correctly');
+
+$tooYoung = $positions;
+$tooYoung[0]['opened_at'] = gmdate('Y-m-d H:i:s', $now - 10 * 60);
+$tooYoung[1]['opened_at'] = gmdate('Y-m-d H:i:s', $now - 10 * 60);
+$youngPlan = $rotation->plan($tooYoung, $candidates, $rotationConfig, $now);
+assertTrue(($youngPlan['rotate'] ?? true) === false, 'minimum hold guard should block premature rotation');
+assertTrue(($youngPlan['reason'] ?? '') === 'no_rotation_eligible_position', 'minimum hold rejection reason mismatch');
+
+$deepLoss = [$positions[0]];
+$deepLoss[0]['unrealized_net_pnl_percent'] = -1.20;
+$lossPlan = $rotation->plan($deepLoss, $candidates, $rotationConfig, $now);
+assertTrue(($lossPlan['rotate'] ?? true) === false, 'rotation must not realize a deep loss just to chase another opportunity');
+
+$weakCandidate = $candidates;
+$weakCandidate[0]['signal']['tradable_net_edge_percent'] = 0.55;
+$weakPlan = $rotation->plan($positions, $weakCandidate, $rotationConfig, $now);
+assertTrue(($weakPlan['rotate'] ?? true) === false, 'insufficient replacement edge should not churn the portfolio');
+assertTrue(($weakPlan['reason'] ?? '') === 'replacement_advantage_insufficient', 'insufficient advantage rejection reason mismatch');
+
+echo "Nobitex strategy v5 + portfolio rotation regression tests passed.\n";
