@@ -1,0 +1,31 @@
+<?php
+
+declare(strict_types=1);
+
+require dirname(__DIR__,2).'/bootstrap.php';
+
+use Trade\Config;
+use Trade\Trading\NobitexPerformanceAnalytics;
+use Trade\Updater;
+
+if(!Config::installed()){header('Location:/install/');exit;}
+session_name('trade_admin');session_set_cookie_params(['httponly'=>true,'secure'=>true,'samesite'=>'Strict','path'=>'/admin']);session_start();header('Cache-Control:no-store');
+if(!isset($_SESSION['admin_id'])){header('Location:/admin/');exit;}
+function h(mixed $v):string{return htmlspecialchars((string)$v,ENT_QUOTES,'UTF-8');}
+function f(mixed $v,int $d=2):string{return is_numeric($v)?number_format((float)$v,$d,'.',','):'—';}
+
+$days=max(7,min(180,(int)($_GET['days']??30)));$error='';
+try{$data=(new NobitexPerformanceAnalytics())->snapshot(null,$days);}catch(Throwable $e){$data=[];$error=mb_substr($e->getMessage(),0,800);}
+$summary=is_array($data['summary_by_quote']??null)?$data['summary_by_quote']:[];$irt=$summary['IRT']??[];$usdt=$summary['USDT']??[];$edge=$data['edge_calibration']??[];$assets=$data['asset_performance']??[];$daily=$data['daily_series_by_quote']['IRT']??[];$version=Updater::currentVersion();
+require __DIR__.'/_nav.php';
+?><!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>تحلیل عملکرد — Trade</title><link rel="stylesheet" href="/admin/assets/cockpit.css"><style>.bar-list{display:grid;gap:7px}.daybar{display:grid;grid-template-columns:90px 1fr 120px;gap:10px;align-items:center}.daybar i{display:block;height:8px;border-radius:999px;background:linear-gradient(90deg,#6246ea,#0891b2)}@media(max-width:600px){.daybar{grid-template-columns:78px 1fr 90px}}</style></head><body><div class="admin-shell">
+<?php tradeAdminNav('intelligence',$version);?>
+<div class="page-head"><div><div class="page-eyebrow">PERFORMANCE / FEE AWARE</div><h1>تحلیل عملکرد</h1><p>سود واقعی پس از کارمزد، Win Rate، Profit Factor، عملکرد دارایی‌ها و Expected Edge در برابر نتیجه واقعی.</p></div><span class="badge info"><?=$days?> DAYS</span></div>
+<div class="subnav"><a href="/admin/bot/intelligence.php">Intelligence</a><a class="active" href="/admin/analytics.php">Performance</a><a href="/admin/bot/rotation.php">Rotation</a></div>
+<?php if($error!==''):?><div class="notice bad"><?=h($error)?></div><?php else:?>
+<form method="get" class="actions"><a class="btn <?=$days===7?'':'soft'?>" href="?days=7">۷ روز</a><a class="btn <?=$days===30?'':'soft'?>" href="?days=30">۳۰ روز</a><a class="btn <?=$days===90?'':'soft'?>" href="?days=90">۹۰ روز</a></form>
+<div class="stat-grid"><div class="stat-card"><span>PnL امروز IRT</span><b class="<?=((float)($irt['today_net_pnl']??0)>=0)?'ok':'bad-text'?>"><?=f($irt['today_net_pnl']??0)?></b></div><div class="stat-card"><span>PnL هفته IRT</span><b><?=f($irt['week_net_pnl']??0)?></b></div><div class="stat-card"><span>PnL ماه IRT</span><b><?=f($irt['month_net_pnl']??0)?></b></div><div class="stat-card"><span>Win Rate IRT</span><b><?=f($irt['win_rate_percent']??0,1)?>%</b></div><div class="stat-card"><span>Profit Factor IRT</span><b><?=f($irt['profit_factor']??0,2)?></b></div><div class="stat-card"><span>Avg Return</span><b><?=f($irt['average_return_percent']??0,3)?>%</b></div><div class="stat-card"><span>Max Drawdown</span><b><?=f($irt['max_drawdown_absolute']??0,2)?> IRT</b></div><div class="stat-card"><span>Trades</span><b><?=h($irt['trades']??0)?></b></div></div>
+<div class="panel-grid"><section class="panel"><div class="panel-head"><div><h2>USDT Performance</h2><p>بدون تبدیل مصنوعی PnL؛ ارقام Quote اصلی حفظ شده‌اند.</p></div></div><div class="metric-grid"><div class="metric"><span>Today</span><b><?=f($usdt['today_net_pnl']??0,4)?></b></div><div class="metric"><span>Week</span><b><?=f($usdt['week_net_pnl']??0,4)?></b></div><div class="metric"><span>Month</span><b><?=f($usdt['month_net_pnl']??0,4)?></b></div><div class="metric"><span>Win Rate</span><b><?=f($usdt['win_rate_percent']??0,1)?>%</b></div><div class="metric"><span>Profit Factor</span><b><?=f($usdt['profit_factor']??0,2)?></b></div><div class="metric"><span>Trades</span><b><?=h($usdt['trades']??0)?></b></div></div></section><section class="panel soft"><div class="panel-head"><div><h2>Edge Calibration</h2><p>مقایسه Edge پیش‌بینی‌شده در ورود با Return واقعی بسته‌شده.</p></div><span class="badge info"><?=h($edge['samples']??0)?> SAMPLES</span></div><div class="metric-grid"><div class="metric"><span>Expected Edge</span><b><?=f($edge['average_expected_edge_percent']??null,3)?>%</b></div><div class="metric"><span>Realized Return</span><b><?=f($edge['average_realized_return_percent']??null,3)?>%</b></div><div class="metric"><span>Directional Hit</span><b><?=f($edge['directional_hit_rate_percent']??null,1)?>%</b></div></div></section></div>
+<section class="panel"><div class="panel-head"><div><h2>عملکرد دارایی‌ها</h2><p>بر اساس Net PnL واقعی بازه انتخاب‌شده.</p></div></div><div class="table-wrap"><table><thead><tr><th>Asset</th><th>Quote</th><th>Trades</th><th>Net PnL</th><th>Avg Return</th><th>Win Rate</th></tr></thead><tbody><?php if($assets===[]):?><tr><td colspan="6" class="empty">هنوز معامله بسته‌شده کافی وجود ندارد.</td></tr><?php endif?><?php foreach($assets as $r):?><tr><td><b><?=h($r['asset']??'—')?></b></td><td><?=h($r['quote_asset']??'—')?></td><td><?=h($r['trades']??0)?></td><td class="<?=((float)($r['net_pnl']??0)>=0)?'ok':'bad-text'?>"><?=f($r['net_pnl']??0,4)?></td><td><?=f($r['average_return_percent']??0,3)?>%</td><td><?=f($r['win_rate_percent']??0,1)?>%</td></tr><?php endforeach?></tbody></table></div></section>
+<section class="panel"><div class="panel-head"><div><h2>Daily Equity Flow — IRT</h2><p>Net PnL روزانه و مقدار تجمعی.</p></div></div><div class="bar-list"><?php $max=1.0;foreach($daily as $r)$max=max($max,abs((float)($r['net_pnl']??0)));foreach(array_slice($daily,-14) as $r):$width=min(100,(abs((float)($r['net_pnl']??0))/$max)*100);?><div class="daybar"><span><?=h($r['day']??'')?></span><div class="progress"><i style="width:<?=$width?>%"></i></div><b class="<?=((float)($r['net_pnl']??0)>=0)?'ok':'bad-text'?>"><?=f($r['net_pnl']??0,2)?></b></div><?php endforeach?></div></section>
+<?php endif?><?php tradeAdminFooter($version);?></div></body></html>
