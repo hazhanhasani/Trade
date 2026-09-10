@@ -8,12 +8,14 @@ function tradeAdminNav(string $active, string $version): void
     if ($path === '/admin/analytics.php') $active = 'analytics';
     elseif ($path === '/admin/notifications.php') $active = 'notifications';
     elseif ($path === '/admin/bot/learning.php') $active = 'learning';
+    elseif ($path === '/admin/bot/calibration.php') $active = 'calibration';
 
     $items = [
         'dashboard' => ['/admin/', 'داشبورد'],
         'trading' => ['/admin/bot/', 'معاملات'],
         'intelligence' => ['/admin/bot/intelligence.php', 'مدیریت ریسک هوشمند'],
         'learning' => ['/admin/bot/learning.php', 'یادگیری استراتژی‌ها'],
+        'calibration' => ['/admin/bot/calibration.php', 'کالیبراسیون Edge'],
         'analytics' => ['/admin/analytics.php', 'عملکرد'],
         'exchanges' => ['/admin/exchanges.php', 'صرافی‌ها'],
         'notifications' => ['/admin/notifications.php', 'اعلان‌ها'],
