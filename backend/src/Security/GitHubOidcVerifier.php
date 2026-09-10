@@ -11,6 +11,7 @@ final class GitHubOidcVerifier
     private const AUDIENCE = 'trade-android-signing';
     private const REPOSITORY = 'hazhanhasani/Trade';
     private const REPOSITORY_ID = '1363124612';
+    private const OWNER = 'hazhanhasani';
     private const OWNER_ID = '311383112';
 
     private const ALLOWED_WORKFLOWS = [
@@ -77,8 +78,13 @@ final class GitHubOidcVerifier
         if ((string) ($claims['repository_id'] ?? '') !== self::REPOSITORY_ID) {
             throw new \RuntimeException('Untrusted GitHub repository id.');
         }
-        if ((string) ($claims['repository_owner_id'] ?? '') !== self::OWNER_ID) {
+        if ((string) ($claims['repository_owner'] ?? '') !== self::OWNER || (string) ($claims['repository_owner_id'] ?? '') !== self::OWNER_ID) {
             throw new \RuntimeException('Untrusted GitHub repository owner.');
+        }
+        // The signing private key is intentionally more restricted than normal CI:
+        // only Actions triggered by the repository owner may retrieve it.
+        if ((string) ($claims['actor'] ?? '') !== self::OWNER || (string) ($claims['actor_id'] ?? '') !== self::OWNER_ID) {
+            throw new \RuntimeException('Android signing access is restricted to the repository owner.');
         }
         if ((string) ($claims['ref'] ?? '') !== 'refs/heads/main') {
             throw new \RuntimeException('Android signing access is restricted to main.');
@@ -151,7 +157,7 @@ final class GitHubOidcVerifier
             CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
             CURLOPT_PROXY => '',
             CURLOPT_NOPROXY => '*',
-            CURLOPT_HTTPHEADER => ['Accept: application/json', 'User-Agent: Trade-Android-Signing/1.0'],
+            CURLOPT_HTTPHEADER => ['Accept: application/json', 'User-Agent: Trade-Android-Signing/1.1'],
         ]);
         $raw = curl_exec($ch);
         $error = curl_error($ch);
@@ -183,26 +189,14 @@ final class GitHubOidcVerifier
     {
         $modulus = $this->base64UrlDecode((string) $jwk['n']);
         $exponent = $this->base64UrlDecode((string) $jwk['e']);
-        $rsaPublicKey = $this->asn1Sequence(
-            $this->asn1Integer($modulus) . $this->asn1Integer($exponent)
-        );
+        $rsaPublicKey = $this->asn1Sequence($this->asn1Integer($modulus) . $this->asn1Integer($exponent));
         $rsaEncryptionAlgorithm = hex2bin('300d06092a864886f70d0101010500');
-        if ($rsaEncryptionAlgorithm === false) {
-            throw new \RuntimeException('Unable to build RSA algorithm identifier.');
-        }
-        $subjectPublicKeyInfo = $this->asn1Sequence(
-            $rsaEncryptionAlgorithm . $this->asn1BitString($rsaPublicKey)
-        );
-        return "-----BEGIN PUBLIC KEY-----\n"
-            . chunk_split(base64_encode($subjectPublicKeyInfo), 64, "\n")
-            . "-----END PUBLIC KEY-----\n";
+        if ($rsaEncryptionAlgorithm === false) throw new \RuntimeException('Unable to build RSA algorithm identifier.');
+        $subjectPublicKeyInfo = $this->asn1Sequence($rsaEncryptionAlgorithm . $this->asn1BitString($rsaPublicKey));
+        return "-----BEGIN PUBLIC KEY-----\n" . chunk_split(base64_encode($subjectPublicKeyInfo), 64, "\n") . "-----END PUBLIC KEY-----\n";
     }
 
-    private function asn1Sequence(string $value): string
-    {
-        return "\x30" . $this->asn1Length(strlen($value)) . $value;
-    }
-
+    private function asn1Sequence(string $value): string { return "\x30" . $this->asn1Length(strlen($value)) . $value; }
     private function asn1Integer(string $value): string
     {
         $value = ltrim($value, "\x00");
@@ -210,24 +204,14 @@ final class GitHubOidcVerifier
         if ((ord($value[0]) & 0x80) !== 0) $value = "\x00" . $value;
         return "\x02" . $this->asn1Length(strlen($value)) . $value;
     }
-
-    private function asn1BitString(string $value): string
-    {
-        $value = "\x00" . $value;
-        return "\x03" . $this->asn1Length(strlen($value)) . $value;
-    }
-
+    private function asn1BitString(string $value): string { $value = "\x00" . $value; return "\x03" . $this->asn1Length(strlen($value)) . $value; }
     private function asn1Length(int $length): string
     {
         if ($length < 0x80) return chr($length);
         $bytes = '';
-        while ($length > 0) {
-            $bytes = chr($length & 0xff) . $bytes;
-            $length >>= 8;
-        }
+        while ($length > 0) { $bytes = chr($length & 0xff) . $bytes; $length >>= 8; }
         return chr(0x80 | strlen($bytes)) . $bytes;
     }
-
     private function base64UrlDecode(string $value): string
     {
         $value = strtr($value, '-_', '+/');
