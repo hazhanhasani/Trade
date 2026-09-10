@@ -20,6 +20,9 @@ final class BotController
         $pdo = Database::connection();
         $settings = Schema::settings($pdo);
         $settings = array_merge($settings, (new RiskManager())->normalizeSettings($settings));
+        $settings['nobitex_max_positions'] = (int)$this->settingNumber($pdo, 'nobitex_max_positions', 5);
+        $settings['nobitex_scan_limit'] = (int)$this->settingNumber($pdo, 'nobitex_scan_limit', 12);
+        $settings['nobitex_portfolio_exposure_percent'] = $this->settingNumber($pdo, 'nobitex_portfolio_exposure_percent', 60.0);
         $quote = (string) $settings['quote_asset'];
         $kill = (string) ($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn() ?: '0') === '1';
 
@@ -33,22 +36,9 @@ final class BotController
         $cronHealth = $this->cronHealth($lastRun);
 
         $exchanges = [
-            'bitpin' => $this->exchangeStatus(
-                $pdo,
-                'bitpin',
-                $quote,
-                $bitpinPositions,
-                $lastRun,
-                $this->bitpin->liveEnabled()
-            ),
-            'nobitex' => $this->exchangeStatus(
-                $pdo,
-                'nobitex',
-                $quote,
-                $nobitexPositions,
-                $lastRun,
-                $this->nobitex->liveEnabled()
-            ) + ['sodium_available'=>function_exists('sodium_crypto_sign_detached')],
+            'bitpin' => $this->exchangeStatus($pdo, 'bitpin', $quote, $bitpinPositions, $lastRun, $this->bitpin->liveEnabled()),
+            'nobitex' => $this->exchangeStatus($pdo, 'nobitex', $quote, $nobitexPositions, $lastRun, $this->nobitex->liveEnabled())
+                + ['sodium_available'=>function_exists('sodium_crypto_sign_detached')],
         ];
 
         return [
@@ -56,7 +46,6 @@ final class BotController
             'capital_asset'=>'IRT/USDT',
             'quote_priority'=>['IRT','USDT'],
             'execution_mode'=>'live_only',
-            // Legacy fields map to Bitpin so older Android versions keep working.
             'bot_enabled'=>$exchanges['bitpin']['bot_enabled'],
             'live_execution_enabled'=>$exchanges['bitpin']['live_execution_enabled'],
             'kill_switch'=>$kill,
@@ -69,10 +58,7 @@ final class BotController
         ];
     }
 
-    public function setEnabled(bool $enabled): void
-    {
-        $this->setExchangeEnabled('bitpin', $enabled);
-    }
+    public function setEnabled(bool $enabled): void { $this->setExchangeEnabled('bitpin', $enabled); }
 
     public function setExchangeEnabled(string $exchange, bool $enabled): void
     {
@@ -85,10 +71,7 @@ final class BotController
         $this->audit($exchange . ($enabled ? '.autotrade.enabled' : '.autotrade.disabled'));
     }
 
-    public function setLiveEnabled(bool $enabled): void
-    {
-        $this->setExchangeLive('bitpin', $enabled);
-    }
+    public function setLiveEnabled(bool $enabled): void { $this->setExchangeLive('bitpin', $enabled); }
 
     public function setExchangeLive(string $exchange, bool $enabled): void
     {
@@ -142,8 +125,19 @@ final class BotController
             ':stop'=>$n['stop_loss_percent'], ':take'=>$n['take_profit_percent'], ':daily'=>$n['daily_loss_limit_percent'],
             ':score'=>$n['min_signal_score'], ':cooldown'=>$n['cooldown_minutes'],
         ]);
+
+        if (array_key_exists('nobitex_max_positions', $input)) {
+            $this->writeSetting($pdo, 'nobitex_max_positions', (string)$this->boundedInt($input['nobitex_max_positions'], 1, 10, 5));
+        }
+        if (array_key_exists('nobitex_scan_limit', $input)) {
+            $this->writeSetting($pdo, 'nobitex_scan_limit', (string)$this->boundedInt($input['nobitex_scan_limit'], 3, 20, 12));
+        }
+        if (array_key_exists('nobitex_portfolio_exposure_percent', $input)) {
+            $this->writeSetting($pdo, 'nobitex_portfolio_exposure_percent', (string)$this->boundedFloat($input['nobitex_portfolio_exposure_percent'], 10.0, 90.0, 60.0));
+        }
+
         $this->audit('autotrade.shared_settings_updated', $n + ['quote_asset'=>$quote]);
-        return Schema::settings($pdo);
+        return $this->status()['settings'];
     }
 
     public function runNow(string $exchange = 'bitpin'): array
@@ -254,6 +248,14 @@ final class BotController
         return ['quote_asset'=>$quote] + $selected + ['by_quote'=>$byQuote];
     }
 
+    private function settingNumber(PDO $pdo, string $key, float $default): float
+    {
+        $stmt=$pdo->prepare('SELECT value_text FROM settings WHERE key_name=:key LIMIT 1');$stmt->execute([':key'=>$key]);$v=$stmt->fetchColumn();
+        return is_numeric($v) ? (float)$v : $default;
+    }
+    private function writeSetting(PDO $pdo,string $key,string $value):void{$stmt=$pdo->prepare("INSERT INTO settings (key_name,value_text,updated_at) VALUES (:k,:v,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE value_text=VALUES(value_text),updated_at=UTC_TIMESTAMP()");$stmt->execute([':k'=>$key,':v'=>$value]);}
+    private function boundedInt(mixed $value,int $min,int $max,int $default):int{return is_numeric($value)?max($min,min($max,(int)$value)):$default;}
+    private function boundedFloat(mixed $value,float $min,float $max,float $default):float{return is_numeric($value)?max($min,min($max,(float)$value)):$default;}
     private function credentialExists(PDO $pdo,string $exchange):bool{$s=$pdo->prepare('SELECT EXISTS(SELECT 1 FROM exchange_credentials WHERE exchange_name=:e)');$s->execute([':e'=>$exchange]);return(bool)$s->fetchColumn();}
     private function exchange(string $exchange):string{$exchange=strtolower(trim($exchange));if(!in_array($exchange,['bitpin','nobitex'],true))throw new \InvalidArgumentException('Unsupported exchange.');return$exchange;}
     private function number(array $input,string $key,float $default):float{if(!array_key_exists($key,$input)||$input[$key]==='')return$default;if(!is_numeric($input[$key])||!is_finite((float)$input[$key]))throw new \InvalidArgumentException($key.' must be numeric.');return(float)$input[$key];}
