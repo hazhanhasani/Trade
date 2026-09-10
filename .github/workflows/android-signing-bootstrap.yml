@@ -1,171 +1,110 @@
-name: Android Signing Bootstrap
+name: Android Release Validation
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - 'backend/src/Security/AndroidSigningService.php'
-      - 'backend/src/Security/GitHubOidcVerifier.php'
-      - 'backend/public/internal/android-signing.php'
-      - 'android/**'
       - '.github/workflows/android-signing-bootstrap.yml'
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 concurrency:
-  group: trade-android-signing-bootstrap
+  group: trade-android-release-validation
   cancel-in-progress: true
 
 jobs:
-  bootstrap:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.6.0'
-
-      - name: Wait for cPanel signer and fetch permanent identity
-        id: signing
+      - name: Resolve unified local version
+        id: version
         shell: bash
         run: |
-          set -u
-          normalize_fp() { printf '%s' "$1" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]'; }
-          PREVIOUS_CERT=$(curl -fsSL --connect-timeout 5 --max-time 10 \
-            'https://github.com/hazhanhasani/Trade/releases/download/trade-latest/latest.json' 2>/dev/null \
-            | jq -r '.android.signing.cert_sha256 // empty' 2>/dev/null || true)
-          PREVIOUS_CERT=$(normalize_fp "$PREVIOUS_CERT")
-
-          SUCCESS=false
-          for ATTEMPT in $(seq 1 18); do
-            echo "Attempt $ATTEMPT/18 to obtain the cPanel permanent signer..."
-            OIDC_URL="$ACTIONS_ID_TOKEN_REQUEST_URL"
-            if [[ "$OIDC_URL" == *'?'* ]]; then SEP='&'; else SEP='?'; fi
-            OIDC=$(curl -fsS --connect-timeout 5 --max-time 15 \
-              -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              "${OIDC_URL}${SEP}audience=trade-android-signing" 2>/dev/null \
-              | jq -r '.value // empty' 2>/dev/null || true)
-
-            if [[ -n "$OIDC" ]]; then
-              CODE=$(curl -sS --connect-timeout 5 --max-time 20 \
-                -o "$RUNNER_TEMP/cpanel-signing.json" -w '%{http_code}' \
-                -X POST -H "Authorization: Bearer $OIDC" -H 'Accept: application/json' \
-                'https://rado-taxi.sbs/internal/android-signing.php' || true)
-              if [[ "$CODE" == '200' ]] && jq -e '.ok == true' "$RUNNER_TEMP/cpanel-signing.json" >/dev/null 2>&1; then
-                SUCCESS=true
-                break
-              fi
-              MESSAGE=$(jq -r '.message // .error // empty' "$RUNNER_TEMP/cpanel-signing.json" 2>/dev/null || true)
-              echo "cPanel signer not ready yet (HTTP $CODE${MESSAGE:+ - $MESSAGE})."
-            fi
-            sleep 30
-          done
-
-          if [[ "$SUCCESS" != 'true' ]]; then
-            echo "::error::cPanel permanent signer did not become available within the bootstrap window."
+          set -euo pipefail
+          VERSION=$(php -r "echo require 'backend/version.php';")
+          if [[ ! "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::backend/version.php must contain a semantic version like 1.3.2"
             exit 1
           fi
+          MAJOR=$((10#${BASH_REMATCH[1]}))
+          MINOR=$((10#${BASH_REMATCH[2]}))
+          PATCH=$((10#${BASH_REMATCH[3]}))
+          VERSION_CODE=$((MAJOR * 1000000 + MINOR * 1000 + PATCH))
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
 
-          PASSWORD=$(jq -r '.signing.password' "$RUNNER_TEMP/cpanel-signing.json")
-          ALIAS=$(jq -r '.signing.alias' "$RUNNER_TEMP/cpanel-signing.json")
-          EXPECTED=$(normalize_fp "$(jq -r '.signing.cert_sha256' "$RUNNER_TEMP/cpanel-signing.json")")
-          echo "::add-mask::$PASSWORD"
-          jq -r '.signing.pkcs12_base64' "$RUNNER_TEMP/cpanel-signing.json" | base64 --decode > "$RUNNER_TEMP/Trade-release.p12"
-          test -s "$RUNNER_TEMP/Trade-release.p12"
-
-          CERT=$(keytool -list -v -storetype PKCS12 -keystore "$RUNNER_TEMP/Trade-release.p12" -storepass "$PASSWORD" -alias "$ALIAS" 2>/dev/null \
-            | sed -n 's/^[[:space:]]*SHA256: //p' | head -n1)
-          CERT=$(normalize_fp "$CERT")
-          if [[ -z "$CERT" || "$CERT" != "$EXPECTED" ]]; then
-            echo "::error::cPanel signing bundle fingerprint verification failed."
-            exit 1
-          fi
-          if [[ -n "$PREVIOUS_CERT" && "$CERT" != "$PREVIOUS_CERT" ]]; then
-            echo "::error::A different Android signer is already established. Refusing key rotation."
-            exit 1
-          fi
-
-          {
-            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/Trade-release.p12"
-            echo "ANDROID_KEYSTORE_PASSWORD=$PASSWORD"
-            echo "ANDROID_KEY_ALIAS=$ALIAS"
-            echo "ANDROID_KEY_PASSWORD=$PASSWORD"
-            echo "ANDROID_KEYSTORE_TYPE=PKCS12"
-          } >> "$GITHUB_ENV"
-          echo "cert_sha256=$CERT" >> "$GITHUB_OUTPUT"
-
-      - name: Build permanently signed APK
-        working-directory: android
+      - name: Download stable coordinated release
+        shell: bash
         run: |
-          keytool -list -storetype "$ANDROID_KEYSTORE_TYPE" -keystore "$ANDROID_KEYSTORE_PATH" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" >/dev/null
-          gradle :app:assembleRelease --stacktrace
-          mkdir -p ../dist
-          cp app/build/outputs/apk/release/app-release.apk ../dist/Trade.apk
+          set -euo pipefail
+          mkdir -p dist
+          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 5 --max-time 30 \
+            'https://github.com/hazhanhasani/Trade/releases/download/trade-latest/latest.json' \
+            -o dist/latest.json
+          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 5 --max-time 120 \
+            'https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade.apk' \
+            -o dist/Trade.apk
 
-      - name: Verify final APK signer
-        id: apk
+      - name: Verify coordinated version contract
         env:
-          EXPECTED_CERT: ${{ steps.signing.outputs.cert_sha256 }}
+          LOCAL_VERSION: ${{ steps.version.outputs.value }}
+          LOCAL_VERSION_CODE: ${{ steps.version.outputs.code }}
         shell: bash
         run: |
+          set -euo pipefail
+          RELEASE_VERSION=$(jq -r '.release.version // empty' dist/latest.json)
+          BACKEND_VERSION=$(jq -r '.backend.version // empty' dist/latest.json)
+          ANDROID_VERSION=$(jq -r '.android.version_name // empty' dist/latest.json)
+          REQUIRED_BACKEND=$(jq -r '.android.required_backend_version // empty' dist/latest.json)
+          ANDROID_CODE=$(jq -r '.android.version_code // 0' dist/latest.json)
+          ANDROID_AVAILABLE=$(jq -r '.android.available // false' dist/latest.json)
+
+          if [[ "$RELEASE_VERSION" != "$LOCAL_VERSION" || \
+                "$BACKEND_VERSION" != "$LOCAL_VERSION" || \
+                "$ANDROID_VERSION" != "$LOCAL_VERSION" || \
+                "$REQUIRED_BACKEND" != "$LOCAL_VERSION" ]]; then
+            echo "::error::Backend, Android and release versions are not coordinated."
+            exit 1
+          fi
+          if [[ "$ANDROID_CODE" != "$LOCAL_VERSION_CODE" ]]; then
+            echo "::error::Android versionCode does not match the unified semantic version."
+            exit 1
+          fi
+          if [[ "$ANDROID_AVAILABLE" != "true" ]]; then
+            echo "::error::The coordinated Android APK is not marked available."
+            exit 1
+          fi
+          echo "Release contract is coordinated at Trade $LOCAL_VERSION."
+
+      - name: Verify released APK checksum and signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_SHA=$(jq -r '.android.sha256 // empty' dist/latest.json | tr '[:upper:]' '[:lower:]')
+          ACTUAL_SHA=$(sha256sum dist/Trade.apk | awk '{print $1}')
+          if [[ -z "$EXPECTED_SHA" || "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+            echo "::error::Released APK SHA-256 does not match latest.json."
+            exit 1
+          fi
+
+          EXPECTED_CERT=$(jq -r '.android.signing.cert_sha256 // empty' dist/latest.json | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n1)
-          if [[ -z "$APKSIGNER" ]]; then echo "::error::apksigner was not found."; exit 1; fi
+          if [[ -z "$APKSIGNER" ]]; then
+            echo "::error::apksigner was not found in the Android SDK."
+            exit 1
+          fi
           "$APKSIGNER" verify --verbose --print-certs dist/Trade.apk | tee "$RUNNER_TEMP/apksigner.txt"
-          CERT=$(grep -E -m1 'certificate SHA-256 digest:' "$RUNNER_TEMP/apksigner.txt" | sed -E 's/^.*certificate SHA-256 digest:[[:space:]]*//' | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
-          EXPECTED=$(printf '%s' "$EXPECTED_CERT" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
-          if [[ -z "$CERT" || "$CERT" != "$EXPECTED" ]]; then echo "::error::APK signer mismatch."; exit 1; fi
-          echo "cert_sha256=$CERT" >> "$GITHUB_OUTPUT"
-          echo "sha256=$(sha256sum dist/Trade.apk | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-
-      - name: Update stable Android release asset and manifest
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CERT_SHA256: ${{ steps.apk.outputs.cert_sha256 }}
-          APK_SHA256: ${{ steps.apk.outputs.sha256 }}
-        shell: bash
-        run: |
-          ANDROID_VERSION_NAME=$(grep -m1 'versionName = ' android/app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
-          ANDROID_VERSION_CODE=$(grep -m1 'versionCode = ' android/app/build.gradle.kts | sed -E 's/[^0-9]*([0-9]+).*/\1/')
-
-          for ATTEMPT in $(seq 1 20); do
-            if curl -fsSL --connect-timeout 5 --max-time 15 \
-              'https://github.com/hazhanhasani/Trade/releases/download/trade-latest/latest.json' \
-              -o dist/latest.json; then
-              RELEASE_ANDROID_VERSION=$(jq -r '.android.version_name // empty' dist/latest.json)
-              if [[ "$RELEASE_ANDROID_VERSION" == "$ANDROID_VERSION_NAME" ]]; then break; fi
-            fi
-            echo "Waiting for Publish Latest to expose the current manifest..."
-            sleep 15
-          done
-
-          if [[ ! -s dist/latest.json ]]; then
-            echo "::error::Stable latest.json was not available."
+          ACTUAL_CERT=$(grep -E -m1 'certificate SHA-256 digest:' "$RUNNER_TEMP/apksigner.txt" | sed -E 's/^.*certificate SHA-256 digest:[[:space:]]*//' | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
+          if [[ -z "$EXPECTED_CERT" || "$ACTUAL_CERT" != "$EXPECTED_CERT" ]]; then
+            echo "::error::Released APK signer does not match latest.json."
             exit 1
           fi
 
-          jq \
-            --arg version "$ANDROID_VERSION_NAME" \
-            --argjson code "$ANDROID_VERSION_CODE" \
-            --arg sha "$APK_SHA256" \
-            --arg cert "$CERT_SHA256" \
-            --arg publishedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '.published_at=$publishedAt | .android.available=true | .android.version_name=$version | .android.version_code=$code | .android.url="https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade.apk" | .android.sha256=$sha | .android.signing={status:"permanent",source:"cpanel-oidc",cert_sha256:$cert}' \
-            dist/latest.json > dist/latest.new.json
-          mv dist/latest.new.json dist/latest.json
-
-          gh release upload trade-latest dist/Trade.apk dist/latest.json --clobber
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Trade-permanent-signed-apk
-          path: dist/Trade.apk
-          if-no-files-found: error
+      - name: Validation summary
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: echo "Trade $VERSION Backend + Android release validation passed."
