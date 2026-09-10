@@ -10,10 +10,6 @@ import java.net.URLEncoder
 class TradeApi(private val baseUrl: String, private val apiToken: String) {
     data class Response(val code: Int, val body: String) { val ok: Boolean get() = code in 200..299 }
 
-    companion object {
-        const val SUPPORTED_API_CONTRACT = 1
-    }
-
     @Volatile private var contractLoaded = false
     @Volatile private var backendApiContract: Int? = null
     @Volatile private var backendCapabilities: Set<String> = emptySet()
@@ -66,11 +62,16 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
         return request("POST", "/api/exchanges/${exchangeArg(exchange)}/run", "{}")
     }
 
-    fun isContractCompatible(): Boolean = contractLoaded && backendApiContract == SUPPORTED_API_CONTRACT
+    fun isContractCompatible(): Boolean =
+        contractLoaded &&
+            backendApiContract == ReleaseContract.API_CONTRACT &&
+            ReleaseContract.missingCapabilities(backendCapabilities).isEmpty()
 
     fun apiContract(): Int? = backendApiContract
 
     fun capabilities(): Set<String> = backendCapabilities
+
+    fun missingCapabilities(): Set<String> = ReleaseContract.missingCapabilities(backendCapabilities)
 
     private fun captureContract(response: Response) {
         try {
@@ -98,8 +99,8 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
         check(contractLoaded) {
             "وضعیت سازگاری Backend هنوز بررسی نشده است؛ ابتدا وضعیت برنامه را بروزرسانی کن."
         }
-        check(backendApiContract == SUPPORTED_API_CONTRACT) {
-            "نسخه API Backend با این نسخه اپ سازگار نیست. Backend=${backendApiContract ?: "نامشخص"} / App=$SUPPORTED_API_CONTRACT"
+        check(backendApiContract == ReleaseContract.API_CONTRACT) {
+            "نسخه API Backend با این نسخه اپ سازگار نیست. Backend=${backendApiContract ?: "نامشخص"} / App=${ReleaseContract.API_CONTRACT}"
         }
         check(backendCapabilities.contains(capability)) {
             "Backend قابلیت موردنیاز «$capability» را اعلام نکرده است؛ عملیات برای جلوگیری از اجرای ناسازگار متوقف شد."
@@ -125,7 +126,7 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
             readTimeout = 20_000
             instanceFollowRedirects = true
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("X-Trade-App-Api-Contract", SUPPORTED_API_CONTRACT.toString())
+            setRequestProperty("X-Trade-App-Api-Contract", ReleaseContract.API_CONTRACT.toString())
             if (authenticated) setRequestProperty("Authorization", "Bearer $apiToken")
             if (body != null) {
                 doOutput = true
