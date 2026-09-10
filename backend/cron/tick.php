@@ -7,8 +7,12 @@ require dirname(__DIR__) . '/bootstrap.php';
 use Trade\Config;
 use Trade\Database;
 use Trade\Integrations\BaleTradeNotifier;
+use Trade\Observability\BaleSystemAlert;
+use Trade\Observability\ErrorReporter;
+use Trade\Support\IranClock;
 use Trade\Trading\AutoTraderEngine;
 use Trade\Trading\NobitexAutoTraderEngine;
+use Trade\Trading\NobitexDustConverter;
 use Trade\Trading\NobitexRuntimeModels;
 use Trade\Trading\NobitexSchema;
 use Trade\Updater;
@@ -22,6 +26,7 @@ $heartbeatPath = dirname(__DIR__) . '/storage/cron-heartbeat.json';
 $heartbeat = [
     'status' => 'running',
     'started_at' => gmdate(DATE_ATOM),
+    'started_at_iran' => IranClock::nowPayload(),
     'finished_at' => null,
     'backend_version' => Updater::currentVersion(),
     'pid' => getmypid(),
@@ -41,6 +46,7 @@ register_shutdown_function(static function () use (&$heartbeat, $writeHeartbeat)
     $last = error_get_last();
     $heartbeat['status'] = $last ? 'fatal' : 'terminated';
     $heartbeat['finished_at'] = gmdate(DATE_ATOM);
+    $heartbeat['finished_at_iran'] = IranClock::nowPayload();
     if ($last) {
         $heartbeat['last_error'] = [
             'type' => (int) ($last['type'] ?? 0),
@@ -72,6 +78,7 @@ if (($update['status'] ?? '') === 'updated' && !$updatedThisProcess) {
 if ($updatedThisProcess) {
     $heartbeat['status'] = 'updated_deferred';
     $heartbeat['finished_at'] = gmdate(DATE_ATOM);
+    $heartbeat['finished_at_iran'] = IranClock::nowPayload();
     $heartbeat['backend_version'] = $versionAfterUpdate;
     $writeHeartbeat($heartbeat);
 
@@ -84,6 +91,7 @@ if ($updatedThisProcess) {
             'nobitex'=>['status'=>'deferred','reason'=>'backend_updated_restart_next_tick'],
         ],
         'time_utc'=>gmdate(DATE_ATOM),
+        'time_iran'=>IranClock::nowPayload(),
     ], JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE) . PHP_EOL;
     exit(0);
 }
@@ -118,6 +126,7 @@ try {
         'update' => $update,
         'backend_version' => $versionAfterUpdate,
         'time_utc' => gmdate(DATE_ATOM),
+        'time_iran' => IranClock::nowPayload(),
     ];
 
     $results = [];
@@ -135,6 +144,7 @@ try {
         } catch (Throwable $e) {
             $failedCount++;
             $results[$exchange] = ['status'=>'failed','exchange'=>$exchange,'error'=>$e->getMessage()];
+            ErrorReporter::captureThrowable($e, 'error', 'cron_exchange', ['exchange'=>$exchange,'status'=>'failed']);
         }
     };
 
@@ -145,22 +155,33 @@ try {
         return $engine->run();
     });
 
+    $dust = ['status'=>'disabled'];
+    try {
+        $dust = (new NobitexDustConverter())->runIfDue($pdo);
+    } catch (Throwable $e) {
+        $dust = ['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];
+        ErrorReporter::captureThrowable($e, 'error', 'dust_converter_cron', ['exchange'=>'nobitex']);
+    }
+
     $bale = ['status'=>'disabled'];
     try {
         $notifier = new BaleTradeNotifier();
         $baleStatus = $notifier->status($pdo);
         if (($baleStatus['enabled'] ?? false) && ($baleStatus['configured'] ?? false)) {
             $sync = $notifier->syncConfirmedTrades(50, $pdo);
-            $delivery = $notifier->flushPending(10, $pdo);
-            $bale = ['status'=>'ok','sync'=>$sync,'delivery'=>$delivery];
+            $delivery = $notifier->flushPending(15, $pdo);
+            $systemDelivery = (new BaleSystemAlert())->flushPending(20, $pdo);
+            $bale = ['status'=>'ok','sync'=>$sync,'delivery'=>$delivery,'system_alerts'=>$systemDelivery];
         }
     } catch (Throwable $e) {
         $bale = ['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];
+        ErrorReporter::captureThrowable($e, 'warning', 'bale_delivery', ['status'=>'deferred']);
     }
 
     $overall = $failedCount === 0 ? 'success' : (($enabledCount > $failedCount) ? 'partial' : 'failed');
     $summary = $baseSummary + [
         'exchanges' => $results,
+        'dust_conversion' => $dust,
         'bale_notifications' => $bale,
         'kill_switch' => (string) ($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn() ?: '0') === '1',
     ];
@@ -174,6 +195,7 @@ try {
 
     $heartbeat['status'] = $overall;
     $heartbeat['finished_at'] = gmdate(DATE_ATOM);
+    $heartbeat['finished_at_iran'] = IranClock::nowPayload();
     $heartbeat['run_id'] = $runId;
     $heartbeat['backend_version'] = $versionAfterUpdate;
     $writeHeartbeat($heartbeat);
@@ -181,8 +203,10 @@ try {
     echo json_encode($summary,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR) . PHP_EOL;
     exit($overall === 'failed' ? 1 : 0);
 } catch (Throwable $e) {
+    ErrorReporter::captureThrowable($e, 'critical', 'cron_tick', ['status'=>'failed_before_summary']);
     $heartbeat['status'] = 'failed_before_summary';
     $heartbeat['finished_at'] = gmdate(DATE_ATOM);
+    $heartbeat['finished_at_iran'] = IranClock::nowPayload();
     $heartbeat['error'] = mb_substr($e->getMessage(), 0, 1000);
     $heartbeat['backend_version'] = Updater::currentVersion();
     $writeHeartbeat($heartbeat);
