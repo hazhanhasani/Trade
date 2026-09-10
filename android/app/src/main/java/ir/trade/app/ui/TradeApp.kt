@@ -12,6 +12,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.Dashboard
 import androidx.compose.material.icons.rounded.Logout
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Security
@@ -43,20 +44,30 @@ import java.util.Locale
 
 private val AppBg = Color(0xFFF6F7FB)
 private val CardBg = Color(0xFFFFFFFF)
-private val Ink = Color(0xFF161922)
-private val Muted = Color(0xFF737A8C)
-private val Primary = Color(0xFF6C4BFF)
+private val Ink = Color(0xFF171A24)
+private val Muted = Color(0xFF73798B)
+private val Primary = Color(0xFF6941FF)
 private val PrimarySoft = Color(0xFFF0EDFF)
-private val Success = Color(0xFF119C78)
-private val SuccessSoft = Color(0xFFE9F8F3)
-private val Danger = Color(0xFFD74747)
-private val DangerSoft = Color(0xFFFFEEEE)
-private val Stroke = Color(0xFFE6E8EF)
+private val Success = Color(0xFF0D966F)
+private val SuccessSoft = Color(0xFFEAF8F3)
+private val Danger = Color(0xFFD14343)
+private val DangerSoft = Color(0xFFFFF0F0)
+private val Warning = Color(0xFFB46A00)
+private val WarningSoft = Color(0xFFFFF7E5)
+private val Stroke = Color(0xFFE7E9F0)
 
 data class ExchangeUiState(
     val credentials: Boolean = false,
     val bot: Boolean = false,
     val live: Boolean = false,
+    val activePositions: Int = 0,
+    val pnlToday: Double = 0.0,
+    val pnlTotal: Double = 0.0,
+    val winRate: Double = 0.0,
+    val quote: String = "IRT",
+    val latestSignal: String = "هنوز سیگنالی ثبت نشده",
+    val lastDecision: String = "هنوز تصمیمی ثبت نشده",
+    val latestOrder: String = "هنوز سفارشی ثبت نشده",
 )
 
 data class WalletRow(
@@ -106,22 +117,16 @@ private fun SetupScreen(prefs: TradePreferences, onSaved: () -> Unit) {
             colors = CardDefaults.cardColors(containerColor = CardBg),
         ) {
             Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                BrandHeader(subtitle = "اتصال امن به موتور معاملات")
+                BrandHeader("اتصال امن به موتور معاملات")
                 InfoCard(
-                    icon = Icons.Rounded.Security,
-                    title = "کلید صرافی داخل گوشی نیست",
-                    text = "اپ فقط به Backend شخصی وصل می‌شود. کلیدهای Nobitex و Bitpin روی سرور باقی می‌مانند.",
+                    Icons.Rounded.Security,
+                    "کلید صرافی داخل گوشی نیست",
+                    "اپ فقط به Backend شخصی وصل می‌شود و کلیدهای صرافی روی سرور باقی می‌مانند.",
                 )
+                OutlinedTextField(server, { server = it }, label = { Text("آدرس سرور") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(
-                    value = server,
-                    onValueChange = { server = it },
-                    label = { Text("آدرس سرور") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = token,
-                    onValueChange = { token = it },
+                    token,
+                    { token = it },
                     label = { Text("App API Token") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
@@ -155,6 +160,8 @@ private fun DashboardShell(prefs: TradePreferences, onDisconnect: () -> Unit) {
     var bitpin by remember { mutableStateOf(ExchangeUiState()) }
     var nobitex by remember { mutableStateOf(ExchangeUiState()) }
     var killSwitch by remember { mutableStateOf(false) }
+    var cronHealthy by remember { mutableStateOf(false) }
+    var cronText by remember { mutableStateOf("در حال بررسی Cron…") }
     var backendVersion by remember { mutableStateOf("-") }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
@@ -175,22 +182,40 @@ private fun DashboardShell(prefs: TradePreferences, onDisconnect: () -> Unit) {
 
     fun parseExchangeState(data: JSONObject, name: String): ExchangeUiState {
         val x = data.optJSONObject("exchanges")?.optJSONObject(name) ?: JSONObject()
+        val performance = x.optJSONObject("performance") ?: JSONObject()
         return ExchangeUiState(
             credentials = x.optBoolean("credentials_configured"),
             bot = x.optBoolean("bot_enabled"),
             live = x.optBoolean("live_execution_enabled"),
+            activePositions = x.optInt("active_position_count", 0),
+            pnlToday = performance.optDouble("today_realized_pnl", 0.0),
+            pnlTotal = performance.optDouble("total_realized_pnl", 0.0),
+            winRate = performance.optDouble("win_rate_percent", 0.0),
+            quote = performance.optString("quote_asset", "IRT"),
+            latestSignal = signalDescription(x.optJSONObject("latest_signal")),
+            lastDecision = decisionDescription(x.optJSONObject("last_decision")),
+            latestOrder = orderDescription(x.optJSONObject("latest_order")),
         )
     }
 
     fun refreshStatus() {
         scope.launch {
-            loading = true; error = ""
+            loading = true
+            error = ""
             try {
                 val response = api.status()
                 if (!response.ok) throw IllegalStateException(readableHttpError(response))
                 val data = JSONObject(response.body).getJSONObject("data")
                 backendVersion = data.optString("backend_version", "-")
                 killSwitch = data.optBoolean("kill_switch")
+                val health = data.optJSONObject("cron_health")
+                cronHealthy = health?.optBoolean("healthy") == true
+                val age = health?.optLong("age_seconds", -1L) ?: -1L
+                cronText = when {
+                    cronHealthy && age >= 0 -> "Cron سالم • ${age} ثانیه از آخرین اجرا"
+                    age >= 0 -> "Cron نیازمند بررسی • ${age} ثانیه از آخرین اجرا"
+                    else -> "هنوز اجرای Cron ثبت نشده"
+                }
                 bitpin = parseExchangeState(data, "bitpin")
                 nobitex = parseExchangeState(data, "nobitex")
                 val summary = data.optJSONObject("last_run")?.optJSONObject("summary")
@@ -219,7 +244,9 @@ private fun DashboardShell(prefs: TradePreferences, onDisconnect: () -> Unit) {
     fun selectExchange(value: String) {
         exchange = value
         symbol = if (value == "nobitex") "BTCIRT" else "BTC_IRT"
-        message = ""; error = ""; wallets = emptyList()
+        message = ""
+        error = ""
+        wallets = emptyList()
         refreshWallet()
     }
 
@@ -227,10 +254,13 @@ private fun DashboardShell(prefs: TradePreferences, onDisconnect: () -> Unit) {
         val a = amount.toDoubleOrNull()
         val p = price.toDoubleOrNull()
         if (symbol.isBlank() || a == null || a <= 0 || (mode != "market" && (p == null || p <= 0))) {
-            error = "نماد بازار و مقدار سفارش را درست وارد کن."; return
+            error = "نماد بازار و مقدار سفارش را درست وارد کن."
+            return
         }
         scope.launch {
-            loading = true; error = ""; message = ""
+            loading = true
+            error = ""
+            message = ""
             try {
                 val payload = JSONObject()
                     .put("exchange", exchange)
@@ -242,7 +272,8 @@ private fun DashboardShell(prefs: TradePreferences, onDisconnect: () -> Unit) {
                 val response = api.createOrder(payload.toString())
                 if (!response.ok) throw IllegalStateException(readableHttpError(response))
                 message = "سفارش واقعی در $exchangeTitle ارسال شد."
-                refreshStatus(); refreshWallet()
+                refreshStatus()
+                refreshWallet()
             } catch (e: Exception) {
                 error = e.message ?: "ثبت سفارش ناموفق بود"
             } finally { loading = false }
@@ -252,12 +283,15 @@ private fun DashboardShell(prefs: TradePreferences, onDisconnect: () -> Unit) {
     fun cancelOrder() {
         if (cancelId.isBlank()) { error = "شناسه سفارش را وارد کن."; return }
         scope.launch {
-            loading = true; error = ""; message = ""
+            loading = true
+            error = ""
+            message = ""
             try {
                 val response = api.cancelOrder(cancelId.trim(), exchange)
                 if (!response.ok) throw IllegalStateException(readableHttpError(response))
                 message = "درخواست لغو ارسال شد."
                 cancelId = ""
+                refreshStatus()
             } catch (e: Exception) { error = e.message ?: "لغو سفارش ناموفق بود" }
             finally { loading = false }
         }
@@ -265,7 +299,8 @@ private fun DashboardShell(prefs: TradePreferences, onDisconnect: () -> Unit) {
 
     fun setBot(enabled: Boolean) {
         scope.launch {
-            loading = true; error = ""
+            loading = true
+            error = ""
             try {
                 val r = api.setExchangeBot(exchange, enabled)
                 if (!r.ok) throw IllegalStateException(readableHttpError(r))
@@ -278,7 +313,8 @@ private fun DashboardShell(prefs: TradePreferences, onDisconnect: () -> Unit) {
 
     fun setLive(enabled: Boolean) {
         scope.launch {
-            loading = true; error = ""
+            loading = true
+            error = ""
             try {
                 val r = api.setExchangeLive(exchange, enabled)
                 if (!r.ok) throw IllegalStateException(readableHttpError(r))
@@ -291,13 +327,32 @@ private fun DashboardShell(prefs: TradePreferences, onDisconnect: () -> Unit) {
 
     fun setKill(enabled: Boolean) {
         scope.launch {
-            loading = true; error = ""
+            loading = true
+            error = ""
             try {
                 val r = api.setKillSwitch(enabled)
                 if (!r.ok) throw IllegalStateException(readableHttpError(r))
                 killSwitch = enabled
                 message = if (enabled) "توقف اضطراری فعال شد." else "توقف اضطراری برداشته شد."
+                refreshStatus()
             } catch (e: Exception) { error = e.message ?: "تغییر Kill Switch ناموفق بود" }
+            finally { loading = false }
+        }
+    }
+
+    fun runNow() {
+        scope.launch {
+            loading = true
+            error = ""
+            message = ""
+            try {
+                val r = api.runExchange(exchange)
+                if (!r.ok) throw IllegalStateException(readableHttpError(r))
+                val result = JSONObject(r.body).optJSONObject("data")
+                message = "چرخه $exchangeTitle: ${runDescription(result)}"
+                refreshStatus()
+                refreshWallet()
+            } catch (e: Exception) { error = e.message ?: "اجرای چرخه ناموفق بود" }
             finally { loading = false }
         }
     }
@@ -318,7 +373,7 @@ private fun DashboardShell(prefs: TradePreferences, onDisconnect: () -> Unit) {
     Scaffold(
         containerColor = AppBg,
         bottomBar = {
-            NavigationBar(containerColor = Color.White, tonalElevation = 4.dp) {
+            NavigationBar(containerColor = Color.White, tonalElevation = 3.dp) {
                 nav.forEachIndexed { index, item ->
                     NavigationBarItem(
                         selected = tab == index,
@@ -337,14 +392,13 @@ private fun DashboardShell(prefs: TradePreferences, onDisconnect: () -> Unit) {
             }
         },
     ) { padding ->
-        Column(
-            Modifier.fillMaxSize().padding(padding).statusBarsPadding(),
-        ) {
+        Column(Modifier.fillMaxSize().padding(padding).statusBarsPadding()) {
             AppTopBar(
                 appVersion = AppUpdateManager.currentVersionName(context),
                 backendVersion = backendVersion,
                 exchange = exchange,
                 current = current,
+                cronHealthy = cronHealthy,
                 onSelectExchange = { selectExchange(it) },
                 onRefresh = { refreshStatus(); refreshWallet() },
                 loading = loading,
@@ -359,6 +413,8 @@ private fun DashboardShell(prefs: TradePreferences, onDisconnect: () -> Unit) {
                         exchangeTitle = exchangeTitle,
                         current = current,
                         killSwitch = killSwitch,
+                        cronText = cronText,
+                        cronHealthy = cronHealthy,
                         wallets = wallets,
                         lastRun = if (exchange == "nobitex") lastNobitexRun else lastBitpinRun,
                         onAssets = { tab = 1 },
@@ -393,10 +449,12 @@ private fun DashboardShell(prefs: TradePreferences, onDisconnect: () -> Unit) {
                         nobitex = nobitex,
                         kill = killSwitch,
                         loading = loading,
+                        cronText = cronText,
                         lastRun = if (exchange == "nobitex") lastNobitexRun else lastBitpinRun,
                         onBot = { setBot(it) },
                         onLive = { setLive(it) },
                         onKill = { setKill(it) },
+                        onRunNow = { runNow() },
                     )
                     else -> SettingsScreen(
                         appVersion = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
@@ -417,6 +475,7 @@ private fun AppTopBar(
     backendVersion: String,
     exchange: String,
     current: ExchangeUiState,
+    cronHealthy: Boolean,
     onSelectExchange: (String) -> Unit,
     onRefresh: () -> Unit,
     loading: Boolean,
@@ -426,30 +485,27 @@ private fun AppTopBar(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Surface(shape = RoundedCornerShape(14.dp), color = Primary) {
-                Text("T", Modifier.padding(horizontal = 13.dp, vertical = 8.dp), color = Color.White, fontWeight = FontWeight.Black)
+            Surface(shape = RoundedCornerShape(15.dp), color = Primary) {
+                Text("T", Modifier.padding(horizontal = 14.dp, vertical = 9.dp), color = Color.White, fontWeight = FontWeight.Black)
             }
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text("Trade", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
                 Text("App v$appVersion  •  Backend v$backendVersion", color = Muted, style = MaterialTheme.typography.labelMedium)
             }
+            StatusDot(cronHealthy)
             IconButton(onClick = onRefresh, enabled = !loading) {
                 Icon(Icons.Rounded.Refresh, contentDescription = "بروزرسانی", tint = Primary)
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             FilterChip(
                 selected = exchange == "nobitex",
                 onClick = { onSelectExchange("nobitex") },
                 label = { Text("Nobitex") },
-                leadingIcon = if (exchange == "nobitex") {{ Icon(Icons.Rounded.CheckCircle, null, Modifier.size(18.dp)) }} else null,
+                leadingIcon = if (exchange == "nobitex") ({ Icon(Icons.Rounded.CheckCircle, null, Modifier.size(18.dp)) }) else null,
             )
-            FilterChip(
-                selected = exchange == "bitpin",
-                onClick = { onSelectExchange("bitpin") },
-                label = { Text("Bitpin") },
-            )
+            FilterChip(selected = exchange == "bitpin", onClick = { onSelectExchange("bitpin") }, label = { Text("Bitpin") })
             Spacer(Modifier.weight(1f))
             StatusChip(if (current.credentials) "API آماده" else "API قطع", current.credentials)
         }
@@ -461,6 +517,8 @@ private fun HomeScreen(
     exchangeTitle: String,
     current: ExchangeUiState,
     killSwitch: Boolean,
+    cronText: String,
+    cronHealthy: Boolean,
     wallets: List<WalletRow>,
     lastRun: String,
     onAssets: () -> Unit,
@@ -474,8 +532,8 @@ private fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item {
-            Card(shape = RoundedCornerShape(26.dp), colors = CardDefaults.cardColors(containerColor = Ink)) {
-                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Card(shape = RoundedCornerShape(28.dp), colors = CardDefaults.cardColors(containerColor = Ink)) {
+                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Column {
                             Text("ارزش تقریبی دارایی‌ها", color = Color(0xFFBFC4D2), style = MaterialTheme.typography.labelLarge)
@@ -486,20 +544,43 @@ private fun HomeScreen(
                                 fontWeight = FontWeight.ExtraBold,
                             )
                         }
-                        Surface(shape = RoundedCornerShape(16.dp), color = Color(0xFF282C38)) {
-                            Icon(Icons.Rounded.AutoGraph, null, Modifier.padding(12.dp), tint = Color(0xFFA996FF))
+                        Surface(shape = RoundedCornerShape(17.dp), color = Color(0xFF292D39)) {
+                            Icon(Icons.Rounded.AutoGraph, null, Modifier.padding(13.dp), tint = Color(0xFFB3A4FF))
                         }
                     }
-                    Text("صرافی فعال: $exchangeTitle", color = Color(0xFFBFC4D2))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        DarkChip(exchangeTitle)
+                        DarkChip("${current.activePositions} پوزیشن")
+                        DarkChip(if (killSwitch) "متوقف" else "Live")
+                    }
                 }
             }
         }
         item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                MetricCard("ربات", if (current.bot) "روشن" else "خاموش", current.bot, Modifier.weight(1f))
-                MetricCard("Live", if (current.live) "فعال" else "خاموش", current.live, Modifier.weight(1f))
-                MetricCard("ایمنی", if (killSwitch) "متوقف" else "عادی", !killSwitch, Modifier.weight(1f))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                MetricCard("پوزیشن", current.activePositions.toString(), true, Modifier.weight(1f))
+                MetricCard("Win Rate", "${formatOne(current.winRate)}%", current.winRate >= 50.0, Modifier.weight(1f))
+                MetricCard("Bot", if (current.bot) "ON" else "OFF", current.bot, Modifier.weight(1f))
             }
+        }
+        item {
+            Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = if (cronHealthy) SuccessSoft else WarningSoft)) {
+                Row(Modifier.fillMaxWidth().padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.CloudDone, null, tint = if (cronHealthy) Success else Warning)
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text("سلامت موتور", fontWeight = FontWeight.Bold)
+                        Text(cronText, color = Muted, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+        item {
+            SectionTitle("تصمیم و سیگنال")
+            Spacer(Modifier.height(7.dp))
+            InsightCard("آخرین تصمیم", current.lastDecision)
+            Spacer(Modifier.height(8.dp))
+            InsightCard("آخرین سیگنال", current.latestSignal)
         }
         item {
             SectionTitle("دسترسی سریع")
@@ -510,18 +591,7 @@ private fun HomeScreen(
                 QuickAction("ربات", Icons.Rounded.SmartToy, onBot, Modifier.weight(1f))
             }
         }
-        item {
-            Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardBg)) {
-                Column(Modifier.padding(17.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.CloudDone, null, tint = Primary)
-                        Spacer(Modifier.width(8.dp))
-                        Text("آخرین وضعیت موتور", fontWeight = FontWeight.Bold)
-                    }
-                    Text(lastRun, color = Muted, style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-        }
+        item { InsightCard("آخرین چرخه", lastRun) }
     }
 }
 
@@ -536,16 +606,13 @@ private fun AssetsScreen(name: String, wallets: List<WalletRow>, loading: Boolea
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("دارایی‌های $name", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
-                    Text("فقط موجودی‌های واقعی و قابل استفاده", color = Muted)
+                    Text("موجودی واقعی و قابل استفاده", color = Muted)
                 }
                 FilledTonalIconButton(onClick = onRefresh, enabled = !loading) { Icon(Icons.Rounded.Refresh, null) }
             }
         }
-        if (wallets.isEmpty()) {
-            item { EmptyCard(if (loading) "در حال دریافت کیف پول…" else "موجودی قابل نمایش پیدا نشد.") }
-        } else {
-            items(wallets, key = { it.code }) { item -> AssetCard(item) }
-        }
+        if (wallets.isEmpty()) item { EmptyCard(if (loading) "در حال دریافت کیف پول…" else "موجودی قابل نمایش پیدا نشد.") }
+        else items(wallets, key = { it.code }) { AssetCard(it) }
     }
 }
 
@@ -588,58 +655,41 @@ private fun TradeScreen(
     onCancel: () -> Unit,
 ) {
     val enabled = !loading && state.credentials && state.live && !kill
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
             Text("معامله دستی", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
-            Text("ارسال سفارش مستقیم به $name", color = Muted)
+            Text("ارسال مستقیم سفارش به $name", color = Muted)
         }
-        if (!enabled) {
-            item {
-                InfoCard(
-                    Icons.Rounded.Security,
-                    "ارسال سفارش فعلاً قفل است",
-                    when {
-                        kill -> "Kill Switch روشن است."
-                        !state.credentials -> "API صرافی تنظیم نشده است."
-                        !state.live -> "Live Execution خاموش است."
-                        else -> "سیستم آماده نیست."
-                    },
-                    danger = true,
-                )
-            }
+        if (!enabled) item {
+            InfoCard(
+                Icons.Rounded.Security,
+                "ارسال سفارش فعلاً قفل است",
+                when {
+                    kill -> "Kill Switch روشن است."
+                    !state.credentials -> "API صرافی تنظیم نشده است."
+                    !state.live -> "Live Execution خاموش است."
+                    else -> "سیستم آماده نیست."
+                },
+                true,
+            )
         }
         item {
             Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardBg)) {
                 Column(Modifier.padding(17.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
-                    OutlinedTextField(
-                        symbol, onSymbol,
-                        label = { Text("بازار") },
-                        supportingText = { Text(if (name == "Nobitex") "مثل BTCIRT یا ETHUSDT" else "مثل BTC_IRT") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    OutlinedTextField(symbol, onSymbol, label = { Text("بازار") }, supportingText = { Text(if (name == "Nobitex") "مثل BTCIRT یا ETHUSDT" else "مثل BTC_IRT") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(amount, onAmount, label = { Text("مقدار ارز") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(selected = side == "buy", onClick = { onSide("buy") }, label = { Text("خرید") })
-                        FilterChip(selected = side == "sell", onClick = { onSide("sell") }, label = { Text("فروش") })
+                        FilterChip(side == "buy", { onSide("buy") }, label = { Text("خرید") })
+                        FilterChip(side == "sell", { onSide("sell") }, label = { Text("فروش") })
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(selected = mode == "market", onClick = { onMode("market") }, label = { Text("Market") })
-                        FilterChip(selected = mode == "limit", onClick = { onMode("limit") }, label = { Text("Limit") })
+                        FilterChip(mode == "market", { onMode("market") }, label = { Text("Market") })
+                        FilterChip(mode == "limit", { onMode("limit") }, label = { Text("Limit") })
                     }
-                    if (mode != "market") {
-                        OutlinedTextField(price, onPrice, label = { Text("قیمت") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    if (mode != "market") OutlinedTextField(price, onPrice, label = { Text("قیمت") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    Button(onClick = onSubmit, enabled = enabled, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(15.dp)) {
+                        Text("ارسال سفارش واقعی", fontWeight = FontWeight.Bold)
                     }
-                    Button(
-                        onClick = onSubmit,
-                        enabled = enabled,
-                        modifier = Modifier.fillMaxWidth().height(52.dp),
-                        shape = RoundedCornerShape(15.dp),
-                    ) { Text("ارسال سفارش واقعی", fontWeight = FontWeight.Bold) }
                 }
             }
         }
@@ -648,9 +698,7 @@ private fun TradeScreen(
                 Column(Modifier.padding(17.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("لغو سفارش", fontWeight = FontWeight.Bold)
                     OutlinedTextField(cancelId, onCancelId, label = { Text("Order ID / Client Order ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    OutlinedButton(onClick = onCancel, enabled = !loading && state.credentials && cancelId.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
-                        Text("لغو سفارش")
-                    }
+                    OutlinedButton(onClick = onCancel, enabled = !loading && state.credentials && cancelId.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("لغو سفارش") }
                 }
             }
         }
@@ -665,39 +713,53 @@ private fun BotScreen(
     nobitex: ExchangeUiState,
     kill: Boolean,
     loading: Boolean,
+    cronText: String,
     lastRun: String,
     onBot: (Boolean) -> Unit,
     onLive: (Boolean) -> Unit,
     onKill: (Boolean) -> Unit,
+    onRunNow: () -> Unit,
 ) {
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
             Text("ربات معاملات", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
-            Text("کنترل موتور چندارزی IRT / USDT", color = Muted)
+            Text("موتور چندارزی IRT / USDT با کنترل ریسک", color = Muted)
         }
         item {
-            InfoCard(
-                Icons.Rounded.AutoGraph,
-                "موتور چندارزی",
-                "در Nobitex بازارهای قابل معامله را اسکن می‌کند، نقدشوندگی و سیگنال را رتبه‌بندی می‌کند و فقط پس از عبور از Risk Manager سفارش می‌فرستد.",
-            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                MetricCard("پوزیشن", current.activePositions.toString(), true, Modifier.weight(1f))
+                MetricCard("Win Rate", "${formatOne(current.winRate)}%", current.winRate >= 50, Modifier.weight(1f))
+                MetricCard("PnL ${current.quote}", formatCompact(current.pnlTotal), current.pnlTotal >= 0, Modifier.weight(1f))
+            }
         }
-        item { ToggleCard("Auto Trading $name", "اجازه اجرای خودکار موتور در Cron", current.bot, { onBot(it) }, current.credentials && !loading) }
-        item { ToggleCard("Live Execution $name", "اجازه ارسال سفارش واقعی", current.live, { onLive(it) }, current.credentials && !loading) }
-        item { ToggleCard("Kill Switch سراسری", "توقف فوری ارسال سفارش در هر دو صرافی", kill, { onKill(it) }, !loading, danger = true) }
+        item { InsightCard("آخرین تصمیم $name", current.lastDecision) }
+        item { InsightCard("آخرین سیگنال", current.latestSignal) }
+        item { InsightCard("آخرین سفارش", current.latestOrder) }
+        item { ToggleCard("Auto Trading $name", "اجازه اجرای خودکار موتور در Cron", current.bot, onBot, current.credentials && !loading) }
+        item { ToggleCard("Live Execution $name", "اجازه ارسال سفارش واقعی", current.live, onLive, current.credentials && !loading) }
+        item { ToggleCard("Kill Switch سراسری", "توقف فوری سفارش‌های جدید در هر دو صرافی", kill, onKill, !loading, true) }
+        item {
+            Button(
+                onClick = onRunNow,
+                enabled = !loading && current.credentials && current.bot && current.live && !kill,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = RoundedCornerShape(15.dp),
+            ) {
+                Icon(Icons.Rounded.PlayArrow, null)
+                Spacer(Modifier.width(8.dp))
+                Text("اجرای یک چرخه ربات", fontWeight = FontWeight.Bold)
+            }
+        }
         item {
             Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardBg)) {
                 Column(Modifier.padding(17.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("وضعیت صرافی‌ها", fontWeight = FontWeight.Bold)
-                    Text("Nobitex  •  Bot ${onOff(nobitex.bot)}  •  Live ${onOff(nobitex.live)}", color = Muted)
-                    Text("Bitpin  •  Bot ${onOff(bitpin.bot)}  •  Live ${onOff(bitpin.live)}", color = Muted)
+                    Text("سلامت و صرافی‌ها", fontWeight = FontWeight.Bold)
+                    Text(cronText, color = Muted)
                     HorizontalDivider(color = Stroke)
-                    Text("آخرین چرخه", fontWeight = FontWeight.Bold)
-                    Text(lastRun, color = Muted)
+                    Text("Nobitex • Bot ${onOff(nobitex.bot)} • Live ${onOff(nobitex.live)} • ${nobitex.activePositions} پوزیشن", color = Muted)
+                    Text("Bitpin • Bot ${onOff(bitpin.bot)} • Live ${onOff(bitpin.live)} • ${bitpin.activePositions} پوزیشن", color = Muted)
+                    HorizontalDivider(color = Stroke)
+                    Text("آخرین چرخه: $lastRun", color = Muted, style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -712,11 +774,7 @@ private fun SettingsScreen(
     onCheckUpdate: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
             Text("تنظیمات", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
             Text("نسخه‌ها، آپدیت و اتصال", color = Muted)
@@ -734,16 +792,10 @@ private fun SettingsScreen(
             Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardBg)) {
                 Column(Modifier.padding(17.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("آپدیت برنامه", fontWeight = FontWeight.Bold)
-                    Text("آپدیت از کانال رسمی GitHub بررسی می‌شود و به نسخه Backend وابسته نیست.", color = Muted)
+                    Text("کانال رسمی Release مستقل از نسخه Backend بررسی می‌شود.", color = Muted)
                     Text(updateState.lastResult, color = if (updateState.lastResult.contains("خطا")) Danger else Success, fontWeight = FontWeight.SemiBold)
-                    Button(
-                        onClick = onCheckUpdate,
-                        enabled = !updateState.checking,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(14.dp),
-                    ) {
-                        if (updateState.checking) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                        else Icon(Icons.Rounded.Refresh, null)
+                    Button(onClick = onCheckUpdate, enabled = !updateState.checking, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+                        if (updateState.checking) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.Refresh, null)
                         Spacer(Modifier.width(8.dp))
                         Text(if (updateState.checking) "در حال بررسی…" else "بررسی نسخه جدید")
                     }
@@ -751,11 +803,7 @@ private fun SettingsScreen(
             }
         }
         item {
-            OutlinedButton(
-                onClick = onDisconnect,
-                modifier = Modifier.fillMaxWidth().height(50.dp),
-                shape = RoundedCornerShape(14.dp),
-            ) {
+            OutlinedButton(onClick = onDisconnect, modifier = Modifier.fillMaxWidth().height(50.dp), shape = RoundedCornerShape(14.dp)) {
                 Icon(Icons.Rounded.Logout, null)
                 Spacer(Modifier.width(8.dp))
                 Text("قطع اتصال این گوشی")
@@ -784,13 +832,21 @@ private fun SectionTitle(text: String) = Text(text, style = MaterialTheme.typogr
 @Composable
 private fun StatusChip(text: String, ok: Boolean) {
     Surface(shape = RoundedCornerShape(100.dp), color = if (ok) SuccessSoft else DangerSoft) {
-        Text(
-            text,
-            Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
-            color = if (ok) Success else Danger,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Bold,
-        )
+        Text(text, Modifier.padding(horizontal = 10.dp, vertical = 7.dp), color = if (ok) Success else Danger, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun StatusDot(ok: Boolean) {
+    Surface(shape = RoundedCornerShape(100.dp), color = if (ok) SuccessSoft else WarningSoft) {
+        Text(if (ok) "●" else "!", Modifier.padding(horizontal = 9.dp, vertical = 5.dp), color = if (ok) Success else Warning, fontWeight = FontWeight.Black)
+    }
+}
+
+@Composable
+private fun DarkChip(text: String) {
+    Surface(shape = RoundedCornerShape(100.dp), color = Color(0xFF2A2E3A)) {
+        Text(text, Modifier.padding(horizontal = 10.dp, vertical = 6.dp), color = Color(0xFFD5D8E3), style = MaterialTheme.typography.labelMedium)
     }
 }
 
@@ -798,8 +854,18 @@ private fun StatusChip(text: String, ok: Boolean) {
 private fun MetricCard(title: String, value: String, ok: Boolean, modifier: Modifier = Modifier) {
     Card(modifier, shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = CardBg)) {
         Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(title, color = Muted, style = MaterialTheme.typography.labelMedium)
-            Text(value, color = if (ok) Success else Danger, fontWeight = FontWeight.ExtraBold)
+            Text(title, color = Muted, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+            Text(value, color = if (ok) Success else Danger, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun InsightCard(title: String, text: String) {
+    Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = CardBg)) {
+        Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text(title, fontWeight = FontWeight.Bold)
+            Text(text, color = Muted, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -823,11 +889,7 @@ private fun QuickAction(title: String, icon: ImageVector, onClick: () -> Unit, m
 
 @Composable
 private fun InfoCard(icon: ImageVector, title: String, text: String, danger: Boolean = false) {
-    Card(
-        Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = if (danger) DangerSoft else PrimarySoft),
-    ) {
+    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = if (danger) DangerSoft else PrimarySoft)) {
         Row(Modifier.padding(15.dp), verticalAlignment = Alignment.Top) {
             Icon(icon, null, tint = if (danger) Danger else Primary)
             Spacer(Modifier.width(10.dp))
@@ -845,12 +907,7 @@ private fun ToggleCard(title: String, text: String, checked: Boolean, onChange: 
     Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = CardBg)) {
         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Surface(shape = RoundedCornerShape(14.dp), color = if (danger) DangerSoft else PrimarySoft) {
-                Icon(
-                    if (danger) Icons.Rounded.PowerSettingsNew else Icons.Rounded.SmartToy,
-                    null,
-                    Modifier.padding(10.dp),
-                    tint = if (danger) Danger else Primary,
-                )
+                Icon(if (danger) Icons.Rounded.PowerSettingsNew else Icons.Rounded.SmartToy, null, Modifier.padding(10.dp), tint = if (danger) Danger else Primary)
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
@@ -881,11 +938,7 @@ private fun EmptyCard(text: String) {
 
 @Composable
 private fun MessageCard(text: String, isError: Boolean) {
-    Card(
-        Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = if (isError) DangerSoft else SuccessSoft),
-    ) {
+    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = if (isError) DangerSoft else SuccessSoft)) {
         Text(text, Modifier.padding(13.dp), color = if (isError) Danger else Success, fontWeight = FontWeight.SemiBold)
     }
 }
@@ -901,9 +954,7 @@ private fun parseWalletRows(raw: String): List<WalletRow> {
     return try {
         val root = JSONObject(raw)
         val outer = root.optJSONObject("data") ?: root
-        val array = outer.optJSONArray("wallets")
-            ?: outer.optJSONObject("data")?.optJSONArray("wallets")
-            ?: JSONArray()
+        val array = outer.optJSONArray("wallets") ?: outer.optJSONObject("data")?.optJSONArray("wallets") ?: JSONArray()
         val rows = mutableListOf<WalletRow>()
         for (i in 0 until array.length()) {
             val row = array.optJSONObject(i) ?: continue
@@ -914,14 +965,10 @@ private fun parseWalletRows(raw: String): List<WalletRow> {
             val code = if (rawCode == "RLS") "IRT" else rawCode
             val displayBalance = if (rawCode == "RLS") available / 10.0 else available
             val displayRialValue = if (rialValue > 0) rialValue else if (rawCode == "RLS") displayBalance else 0.0
-            if (displayBalance > 0.0000000001 || displayRialValue > 0.01) {
-                rows += WalletRow(code, displayBalance, displayRialValue)
-            }
+            if (displayBalance > 0.0000000001 || displayRialValue > 0.01) rows += WalletRow(code, displayBalance, displayRialValue)
         }
         rows.sortedWith(compareByDescending<WalletRow> { it.rialValueToman }.thenByDescending { it.balance })
-    } catch (_: Exception) {
-        emptyList()
-    }
+    } catch (_: Exception) { emptyList() }
 }
 
 private fun firstNumber(row: JSONObject, vararg keys: String): Double {
@@ -942,10 +989,68 @@ private fun runDescription(run: JSONObject?): String {
     if (run == null) return "هنوز داده‌ای از اجرای Cron ثبت نشده است."
     val status = run.optString("status", "-")
     val reason = run.optString("reason").ifBlank { run.optString("error") }
-    return when {
-        reason.isNotBlank() -> "$status — $reason"
-        else -> status
-    }
+    val selected = run.optJSONObject("selected")
+    val symbol = selected?.optString("symbol").orEmpty()
+    val score = selected?.optInt("signal_score", Int.MIN_VALUE) ?: Int.MIN_VALUE
+    val base = statusFa(status)
+    val reasonText = if (reason.isNotBlank()) " • ${reasonFa(reason)}" else ""
+    val selectedText = if (symbol.isNotBlank()) " • $symbol${if (score != Int.MIN_VALUE) " • Score $score" else ""}" else ""
+    return base + reasonText + selectedText
+}
+
+private fun signalDescription(signal: JSONObject?): String {
+    if (signal == null) return "هنوز سیگنالی ثبت نشده"
+    val symbol = signal.optString("symbol", "-")
+    val action = signal.optString("action", "hold").uppercase()
+    val score = signal.optInt("score", 0)
+    val details = signal.optJSONObject("details")
+    val confidence = details?.optInt("confidence", -1) ?: -1
+    val reason = details?.optString("reason").orEmpty()
+    return "$symbol • $action • Score $score${if (confidence >= 0) " • Confidence $confidence%" else ""}${if (reason.isNotBlank()) " • ${reasonFa(reason)}" else ""}"
+}
+
+private fun decisionDescription(decision: JSONObject?): String = runDescription(decision)
+
+private fun orderDescription(order: JSONObject?): String {
+    if (order == null) return "هنوز سفارشی ثبت نشده"
+    val market = order.optString("market_code", "-")
+    val side = order.optString("side", "-").uppercase()
+    val status = order.optString("status", "-")
+    val error = order.optString("error_text")
+    return "$market • $side • $status${if (error.isNotBlank()) " • $error" else ""}"
+}
+
+private fun statusFa(value: String): String = when (value) {
+    "buy_submitted", "first_buy_submitted" -> "سفارش خرید ارسال شد"
+    "sell_submitted" -> "سفارش فروش ارسال شد"
+    "holding_position" -> "در حال نگهداری پوزیشن"
+    "waiting_order" -> "در انتظار تکمیل سفارش"
+    "portfolio_full" -> "ظرفیت پورتفو تکمیل است"
+    "no_trade" -> "فعلاً معامله‌ای انجام نمی‌شود"
+    "blocked" -> "اجرای ربات مسدود است"
+    "disabled" -> "ربات خاموش است"
+    "failed" -> "خطا"
+    else -> value
+}
+
+private fun reasonFa(value: String): String = when (value) {
+    "no_candidate_passed_signal_and_risk_filters" -> "هیچ بازار فعلی از فیلتر سیگنال و ریسک عبور نکرد"
+    "no_eligible_markets" -> "بازار واجد شرایط پیدا نشد"
+    "score_below_threshold" -> "امتیاز هنوز به حد ورود نرسیده"
+    "buy_score_without_confirmation" -> "تأیید روند کامل نشده"
+    "spread_too_wide" -> "Spread زیاد است"
+    "volatility_too_high" -> "نوسان کوتاه‌مدت زیاد است"
+    "symbol_cooldown_active" -> "Cooldown بازار فعال است"
+    "daily_loss_limit_reached" -> "حد زیان روزانه فعال شده"
+    "minimum_order_rounding" -> "مبلغ کمتر از حداقل سفارش است"
+    "bot_disabled" -> "Bot خاموش است"
+    "live_execution_disabled" -> "Live خاموش است"
+    "kill_switch" -> "Kill Switch فعال است"
+    "credentials_missing" -> "API تنظیم نشده"
+    "no_quote_balance" -> "موجودی IRT/USDT کافی نیست"
+    "multi_factor_buy_confirmed" -> "خرید چندعاملی تأیید شده"
+    "multi_factor_sell_confirmed" -> "فروش چندعاملی تأیید شده"
+    else -> value.replace('_', ' ')
 }
 
 private fun formatNumber(value: Double): String {
@@ -954,12 +1059,18 @@ private fun formatNumber(value: Double): String {
     return formatter.format(value)
 }
 
-private fun formatAsset(value: Double): String {
-    return when {
-        value >= 1000 -> formatNumber(value)
-        value >= 1 -> String.format(Locale.US, "%.4f", value).trimEnd('0').trimEnd('.')
-        else -> String.format(Locale.US, "%.8f", value).trimEnd('0').trimEnd('.')
-    }
+private fun formatOne(value: Double): String = String.format(Locale.US, "%.1f", value)
+
+private fun formatCompact(value: Double): String = when {
+    kotlin.math.abs(value) >= 1_000_000 -> String.format(Locale.US, "%.1fM", value / 1_000_000.0)
+    kotlin.math.abs(value) >= 1_000 -> String.format(Locale.US, "%.1fK", value / 1_000.0)
+    else -> String.format(Locale.US, "%.2f", value)
+}
+
+private fun formatAsset(value: Double): String = when {
+    value >= 1000 -> formatNumber(value)
+    value >= 1 -> String.format(Locale.US, "%.4f", value).trimEnd('0').trimEnd('.')
+    else -> String.format(Locale.US, "%.8f", value).trimEnd('0').trimEnd('.')
 }
 
 private fun onOff(value: Boolean) = if (value) "ON" else "OFF"
