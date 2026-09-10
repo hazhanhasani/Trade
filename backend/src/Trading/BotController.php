@@ -127,7 +127,7 @@ final class BotController
         ]);
 
         if (array_key_exists('nobitex_max_positions', $input)) {
-            $this->writeSetting($pdo, 'nobitex_max_positions', (string)$this->boundedInt($input['nobitex_max_positions'], 1, 10, 5));
+            $this->writeSetting($pdo, 'nobitex_max_positions', (string)$this->boundedInt($input['nobitex_max_positions'], 1, 20, 5));
         }
         if (array_key_exists('nobitex_scan_limit', $input)) {
             $this->writeSetting($pdo, 'nobitex_scan_limit', (string)$this->boundedInt($input['nobitex_scan_limit'], 3, 20, 12));
@@ -186,7 +186,7 @@ final class BotController
     private function activePositions(PDO $pdo, string $exchange): array
     {
         $table = $exchange === 'nobitex' ? 'nobitex_autotrade_positions' : 'autotrade_positions';
-        return $pdo->query("SELECT id,symbol,asset,quote_asset,amount,entry_price,stop_loss,take_profit,status,opened_at,updated_at FROM {$table} WHERE status IN ('pending_open','open','pending_close') ORDER BY id DESC LIMIT 10")->fetchAll();
+        return $pdo->query("SELECT id,symbol,asset,quote_asset,amount,entry_price,stop_loss,take_profit,status,opened_at,updated_at FROM {$table} WHERE status IN ('pending_open','open','pending_close') ORDER BY id DESC LIMIT 20")->fetchAll();
     }
 
     private function latestSignal(PDO $pdo, string $exchange): ?array
