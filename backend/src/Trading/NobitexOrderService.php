@@ -82,8 +82,6 @@ final class NobitexOrderService
         [$base,$quote]=$this->parseSymbol($symbol);
         if($base===''||$quote==='') throw new \InvalidArgumentException('Nobitex symbol must look like TONUSDT or TONIRT.');
 
-        // Normalize both supported amount aliases once. Every downstream safety
-        // guard, risk check and payload uses this canonical value.
         $amount=NobitexOrderValueGuard::amountFromInput($input);
         $price=isset($input['price'])&&$input['price']!==''?$this->positive($input['price'],'price'):null;
         $side=strtolower(trim((string)($input['side']??$input['type']??'')));
@@ -96,26 +94,58 @@ final class NobitexOrderService
         $this->assertAllowed($input,$source);
         $pdo=Database::connection();
         $executionPlan=null;
+        $executionLearning=null;
+        $adaptiveExecution=null;
+        $entryContext=is_array($input['_trade_entry_context']??null)?$input['_trade_entry_context']:[];
         $globalRisk=null;
         $client=null;
 
-        // Execution Quality v2 is BUY-entry only. Safety exits remain market
-        // orders so stop-loss/profit-lock cannot be delayed by maker logic.
+        // Fresh automated BUYs are revalidated at submit time. The adaptive
+        // policy combines current strategy/regime, realized strategy learning,
+        // calibrated edge and real execution history. It may only make entry
+        // harder; reduction-only exits and confirmed-cancel reprices bypass it.
         if($side==='buy'&&str_starts_with($source,'autotrade_nobitex')){
             $client=$this->client();
             if($source!=='autotrade_nobitex_reprice'&&in_array($mode,['market','limit'],true)){
                 $market=(new NobitexUniverseScanner())->snapshotSymbol($client,$symbol);
                 $signal=is_array($market['signal']??null)?$market['signal']:[];
+                if(($signal['ready']??false)!==true||(string)($signal['action']??'hold')!=='buy'){
+                    throw new NobitexCandidateRejectedException($symbol,'execution_signal_expired',['signal'=>$signal]);
+                }
+
                 $executionPlan=(new NobitexExecutionPlanner())->plan($market,$signal,$amount,'buy');
-                $mode=(string)$executionPlan['mode'];
-                $price=(float)($mode==='market'?$executionPlan['hard_price_limit']:$executionPlan['limit_price']);
+                $adaptiveExecution=(new NobitexAdaptiveExecutionPolicy())->apply($pdo,$market,$signal,$executionPlan);
+                if(!($adaptiveExecution['allowed']??false)){
+                    throw new NobitexCandidateRejectedException(
+                        $symbol,
+                        (string)($adaptiveExecution['reason']??'adaptive_execution_blocked'),
+                        $adaptiveExecution
+                    );
+                }
+
+                $executionPlan=is_array($adaptiveExecution['plan']??null)?$adaptiveExecution['plan']:$executionPlan;
+                $executionLearning=is_array($adaptiveExecution['execution_learning']??null)?$adaptiveExecution['execution_learning']:null;
+                $mode=(string)($executionPlan['mode']??'limit');
+                $price=(float)($mode==='market'
+                    ? ($executionPlan['hard_price_limit']??0.0)
+                    : ($executionPlan['limit_price']??0.0));
+
+                $entryContext=[
+                    'strategy_key'=>NobitexStrategyLearning::strategyKey($signal),
+                    'market_regime'=>NobitexStrategyLearning::regimeKey($signal),
+                    'quote_asset'=>$quote,
+                    'reference_price'=>(float)($executionPlan['reference_price']??0.0),
+                    'tradable_net_edge_percent'=>(float)($adaptiveExecution['raw_tradable_net_edge_percent']??0.0),
+                    'calibrated_tradable_net_edge_percent'=>(float)($adaptiveExecution['calibrated_tradable_net_edge_percent']??0.0),
+                    'execution_learning_penalty_percent'=>(float)($adaptiveExecution['execution_penalty_percent']??0.0),
+                    'effective_tradable_net_edge_percent'=>(float)($adaptiveExecution['effective_tradable_net_edge_percent']??0.0),
+                    'adaptive_execution_model'=>NobitexAdaptiveExecutionPolicy::MODEL,
+                    'learning_forced_limit'=>(bool)($adaptiveExecution['forced_limit']??false),
+                ];
             }
             if($price===null||$price<=0) throw new \RuntimeException('Automated BUY has no safe execution price bound.');
         }
 
-        // Entry/API order caps are enforced after Execution Quality has resolved
-        // its final price. Automated SELLs are reduction-only safety exits and
-        // must never be trapped by a cap that exists to limit fresh exposure.
         $maxOrderValue=(float)Config::get('trading.max_order_value',0);
         $guardPrice=NobitexOrderValueGuard::priceBound($mode,$price,$input);
         $reductionOnlyExit=$side==='sell'&&str_starts_with($source,'autotrade_nobitex');
@@ -158,6 +188,9 @@ final class NobitexOrderService
         $requestLog=$payload;
         $requestLog['_trade_order_value_guard']=$orderValueGuard;
         if($executionPlan!==null) $requestLog['_trade_execution_plan']=$executionPlan;
+        if($executionLearning!==null) $requestLog['_trade_execution_learning']=$executionLearning;
+        if($adaptiveExecution!==null) $requestLog['_trade_adaptive_execution']=$adaptiveExecution;
+        if($entryContext!==[]) $requestLog['_trade_entry_context']=$entryContext;
         if($globalRisk!==null) $requestLog['_trade_global_risk']=$globalRisk;
         if($replacePositionId>0) $requestLog['_trade_replace_position_id']=$replacePositionId;
 
@@ -197,6 +230,8 @@ final class NobitexOrderService
                 'source'=>$source,
                 'order_value_guard'=>$orderValueGuard,
                 'execution_plan'=>$executionPlan,
+                'execution_learning'=>$executionLearning,
+                'adaptive_execution'=>$adaptiveExecution,
                 'global_risk'=>$globalRisk,
                 'replace_position_id'=>$replacePositionId?:null,
             ]);
@@ -216,6 +251,8 @@ final class NobitexOrderService
                 'order'=>$order,
                 'order_value_guard'=>$orderValueGuard,
                 'execution_plan'=>$executionPlan,
+                'execution_learning'=>$executionLearning,
+                'adaptive_execution'=>$adaptiveExecution,
                 'global_risk'=>$globalRisk,
             ];
         }catch(\Throwable $e){
@@ -250,7 +287,17 @@ final class NobitexOrderService
 
     public function normalizedOrder(array $response):array
     {
-        return$this->firstOrder($response);
+        $order=$this->firstOrder($response);
+        if($order===[]||NobitexOrderFill::isDone($order)) return$order;
+
+        // Preserve the requested quantity separately, but never expose it as a
+        // matched fill for Active/Canceled/Rejected orders. Older portfolio code
+        // scans `amount` after `matchedAmount`; zeroing it here prevents a
+        // zero-fill cancellation from being adopted as a real position.
+        $requested=NobitexOrderFill::requestedAmount($order,0.0);
+        if($requested>0.0) $order['requestedAmount']=$requested;
+        $order['amount']=0;
+        return$order;
     }
 
     private function assertAllowed(array $order,string $source='api'):void
@@ -259,15 +306,10 @@ final class NobitexOrderService
         $pdo=Database::connection();
         $side=strtolower(trim((string)($order['side']??$order['type']??'')));
 
-        // Emergency/risk stop blocks new exposure, not reduction-only exits.
-        // An already-open position must retain its stop-loss/profit-lock path.
         $kill=(string)($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn()?:'0');
         if($kill==='1'&&$side==='buy') throw new \RuntimeException('Kill switch is enabled for new BUY entries.');
 
         if($side==='buy'){
-            // A bounded reprice replaces a confirmed-cancelled order and is not
-            // a fresh portfolio entry, so it does not consume the hourly entry
-            // count or rerun duplicate-position intelligence.
             if($source!=='autotrade_nobitex_reprice'){
                 $stmt=$pdo->prepare("SELECT value_text FROM settings WHERE key_name='nobitex_max_buy_orders_per_hour' LIMIT 1");
                 $stmt->execute();
@@ -290,11 +332,6 @@ final class NobitexOrderService
                 if(!($assessment['allowed']??false)){
                     $reason=(string)($assessment['reason']??'portfolio_intelligence_blocked');
                     if($reason==='strategy_profile_underperforming'&&$this->usesStrategyLearningV2($pdo,$symbol)){
-                        // Strategy Learning v2 owns performance penalties for the
-                        // new regime router. The legacy Intelligence profile may
-                        // still enforce duplicate/correlation guards, but its old
-                        // mixed performance bucket must not cross-penalize Trend,
-                        // Breakout and Mean Reversion.
                         $this->audit('nobitex.intelligence.legacy_strategy_penalty_superseded',[
                             'symbol'=>$symbol,'source'=>$source,'assessment'=>$assessment,
                         ]);

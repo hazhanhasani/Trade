@@ -37,6 +37,7 @@ final class NobitexAutoTraderEngine
         } finally {
             NobitexPortfolioIntelligence::clearRuntimePolicy();
             NobitexGlobalRiskRuntime::clear();
+            NobitexExecutionLearning::clearRuntime();
         }
     }
 
@@ -60,10 +61,6 @@ final class NobitexAutoTraderEngine
             } catch (NobitexCandidateRejectedException $e) {
                 $reason = $e->reasonCode();
 
-                // Portfolio-wide valuation/exposure failures apply to every
-                // candidate. Retrying symbols would only repeat the same wallet
-                // and conversion calls, so stop this tick without mutating more
-                // candidate cooldowns.
                 if (str_starts_with($reason, 'global_portfolio_')) {
                     $last = [
                         'status'=>'no_trade',
@@ -198,6 +195,8 @@ final class NobitexAutoTraderEngine
             'decision_model'=>NobitexRuntimeModels::DECISION,
             'selection_model'=>NobitexRuntimeModels::SELECTION,
             'execution_model'=>NobitexRuntimeModels::EXECUTION,
+            'execution_learning_model'=>NobitexRuntimeModels::EXECUTION_LEARNING,
+            'adaptive_execution_model'=>NobitexRuntimeModels::ADAPTIVE_EXECUTION,
             'global_portfolio_model'=>NobitexRuntimeModels::GLOBAL_PORTFOLIO,
             'rotation_model'=>NobitexRuntimeModels::ROTATION,
             'intelligence_model'=>NobitexPortfolioIntelligence::MODEL,
@@ -250,6 +249,8 @@ final class NobitexAutoTraderEngine
             'decision'=>NobitexRuntimeModels::DECISION,
             'selection'=>NobitexRuntimeModels::SELECTION,
             'execution'=>NobitexRuntimeModels::EXECUTION,
+            'execution_learning'=>NobitexRuntimeModels::EXECUTION_LEARNING,
+            'adaptive_execution'=>NobitexRuntimeModels::ADAPTIVE_EXECUTION,
             'global_portfolio'=>NobitexRuntimeModels::GLOBAL_PORTFOLIO,
             'rotation'=>NobitexRuntimeModels::ROTATION,
             'strategy_learning'=>NobitexRuntimeModels::STRATEGY_LEARNING,

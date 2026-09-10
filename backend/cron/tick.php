@@ -100,6 +100,8 @@ try {
         'decision_model' => NobitexRuntimeModels::DECISION,
         'selection_model' => NobitexRuntimeModels::SELECTION,
         'execution_model' => NobitexRuntimeModels::EXECUTION,
+        'execution_learning_model' => NobitexRuntimeModels::EXECUTION_LEARNING,
+        'adaptive_execution_model' => NobitexRuntimeModels::ADAPTIVE_EXECUTION,
         'global_portfolio_model' => NobitexRuntimeModels::GLOBAL_PORTFOLIO,
         'strategy_learning_model' => NobitexRuntimeModels::STRATEGY_LEARNING,
         'edge_calibration_model' => NobitexRuntimeModels::EDGE_CALIBRATION,
@@ -143,9 +145,6 @@ try {
         return $engine->run();
     });
 
-    // Bale delivery is intentionally isolated from trading success/failure.
-    // Confirmed trades are discovered from local positions/PnL, queued
-    // idempotently, and failed API deliveries are retried on later ticks.
     $bale = ['status'=>'disabled'];
     try {
         $notifier = new BaleTradeNotifier();
