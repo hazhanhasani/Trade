@@ -14,6 +14,7 @@ import java.security.MessageDigest
 
 object AppUpdateManager {
     private const val SERVER = "https://rado-taxi.sbs"
+    private const val DIRECT_MANIFEST = "https://github.com/hazhanhasani/Trade/releases/download/trade-latest/latest.json"
 
     data class UpdateInfo(
         val available: Boolean,
@@ -24,28 +25,47 @@ object AppUpdateManager {
     )
 
     suspend fun check(context: Context): UpdateInfo? = withContext(Dispatchers.IO) {
-        val response = TradeApi(SERVER, "").updateInfo()
-        if (!response.ok) return@withContext null
-
-        val root = JSONObject(response.body)
-        val android = root.optJSONObject("data")?.optJSONObject("android") ?: return@withContext null
-        val remoteCode = android.optLong("version_code", 0L)
-        val available = android.optBoolean("available", false)
-        val url = android.optString("url").trim()
-        val sha256 = android.optString("sha256").trim().lowercase()
         val currentCode = currentVersionCode(context)
+        val payloads = mutableListOf<String>()
 
-        if (!available || remoteCode <= currentCode || !url.startsWith("https://") || !sha256.matches(Regex("^[a-f0-9]{64}$"))) {
-            return@withContext null
+        // Primary path: installed backend. This lets self-hosted deployments override
+        // release metadata if needed.
+        try {
+            val response = TradeApi(SERVER, "").updateInfo()
+            if (response.ok && response.body.isNotBlank()) payloads += response.body
+        } catch (_: Exception) {
+            // Direct release fallback below keeps Android updates working even while
+            // the backend itself is stale, temporarily unavailable or mid-update.
         }
 
-        UpdateInfo(
-            available = true,
-            versionCode = remoteCode,
-            versionName = android.optString("version_name"),
-            url = url,
-            sha256 = sha256,
-        )
+        try {
+            payloads += downloadText("$DIRECT_MANIFEST?ts=${System.currentTimeMillis()}")
+        } catch (_: Exception) {
+            // If backend metadata was available we can still continue with it.
+        }
+
+        for (raw in payloads) {
+            val android = parseAndroid(raw) ?: continue
+            val remoteCode = android.optLong("version_code", 0L)
+            val available = android.optBoolean("available", false)
+            val url = android.optString("url").trim()
+            val sha256 = android.optString("sha256").trim().lowercase()
+            if (
+                available &&
+                remoteCode > currentCode &&
+                url.startsWith("https://") &&
+                sha256.matches(Regex("^[a-f0-9]{64}$"))
+            ) {
+                return@withContext UpdateInfo(
+                    available = true,
+                    versionCode = remoteCode,
+                    versionName = android.optString("version_name").ifBlank { remoteCode.toString() },
+                    url = url,
+                    sha256 = sha256,
+                )
+            }
+        }
+        null
     }
 
     suspend fun download(context: Context, info: UpdateInfo): File = withContext(Dispatchers.IO) {
@@ -56,12 +76,13 @@ object AppUpdateManager {
         targetDir.listFiles()?.forEach { if (it.name.endsWith(".apk")) it.delete() }
 
         val target = File(targetDir, "Trade-${info.versionCode}.apk")
-        val connection = (URL(info.url).openConnection() as HttpURLConnection).apply {
+        val connection = (URL(info.url + if (info.url.contains('?')) "&ts=${System.currentTimeMillis()}" else "?ts=${System.currentTimeMillis()}").openConnection() as HttpURLConnection).apply {
             connectTimeout = 15_000
-            readTimeout = 60_000
+            readTimeout = 90_000
             instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "Trade-Android-Updater")
+            setRequestProperty("User-Agent", "Trade-Android-Updater/${currentVersionName(context)}")
             setRequestProperty("Accept", "application/vnd.android.package-archive")
+            setRequestProperty("Cache-Control", "no-cache")
         }
 
         try {
@@ -74,10 +95,15 @@ object AppUpdateManager {
             connection.disconnect()
         }
 
+        if (target.length() < 100_000) {
+            target.delete()
+            throw IllegalStateException("فایل APK دانلودشده معتبر نیست.")
+        }
+
         val actual = sha256(target)
         if (!actual.equals(info.sha256, ignoreCase = true)) {
             target.delete()
-            throw SecurityException("امضای هش فایل آپدیت تأیید نشد.")
+            throw SecurityException("SHA-256 فایل آپدیت تأیید نشد.")
         }
         target
     }
@@ -88,6 +114,39 @@ object AppUpdateManager {
             packageInfo.longVersionCode
         } else {
             @Suppress("DEPRECATION") packageInfo.versionCode.toLong()
+        }
+    }
+
+    fun currentVersionName(context: Context): String {
+        val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+        return packageInfo.versionName?.takeIf { it.isNotBlank() } ?: "-"
+    }
+
+    private fun parseAndroid(raw: String): JSONObject? {
+        return try {
+            val root = JSONObject(raw)
+            root.optJSONObject("data")?.optJSONObject("android")
+                ?: root.optJSONObject("android")
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun downloadText(url: String): String {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 10_000
+            readTimeout = 20_000
+            instanceFollowRedirects = true
+            setRequestProperty("User-Agent", "Trade-Android-Updater")
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Cache-Control", "no-cache")
+        }
+        try {
+            val code = connection.responseCode
+            if (code !in 200..299) throw IllegalStateException("Update manifest HTTP $code")
+            return connection.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            connection.disconnect()
         }
     }
 
