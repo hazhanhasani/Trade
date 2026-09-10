@@ -27,6 +27,8 @@ jobs:
         run: php backend/tests/multi_strategy_test.php
       - name: Strategy Learning v2 regression tests
         run: php backend/tests/strategy_learning_v2_test.php
+      - name: Adaptive Edge Calibration regression tests
+        run: php backend/tests/edge_calibration_test.php
       - name: Portfolio Intelligence v2 regression tests
         run: php backend/tests/portfolio_intelligence_test.php
       - name: Execution Quality v2 regression tests
