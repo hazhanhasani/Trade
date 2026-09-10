@@ -81,8 +81,6 @@ final class GitHubOidcVerifier
         if ((string) ($claims['repository_owner'] ?? '') !== self::OWNER || (string) ($claims['repository_owner_id'] ?? '') !== self::OWNER_ID) {
             throw new \RuntimeException('Untrusted GitHub repository owner.');
         }
-        // The signing private key is intentionally more restricted than normal CI:
-        // only Actions triggered by the repository owner may retrieve it.
         if ((string) ($claims['actor'] ?? '') !== self::OWNER || (string) ($claims['actor_id'] ?? '') !== self::OWNER_ID) {
             throw new \RuntimeException('Android signing access is restricted to the repository owner.');
         }
@@ -99,8 +97,14 @@ final class GitHubOidcVerifier
             throw new \RuntimeException('Untrusted GitHub workflow event.');
         }
 
+        // GitHub repositories created after July 15, 2026 use immutable default
+        // subjects that include owner/repository IDs. Keep legacy acceptance only
+        // for compatibility; the independent repository/owner/ref claims above are
+        // pinned as well, so neither form weakens the trust decision.
         $subject = (string) ($claims['sub'] ?? '');
-        if (!str_starts_with($subject, 'repo:' . self::REPOSITORY . ':')) {
+        $legacyPrefix = 'repo:' . self::REPOSITORY . ':';
+        $immutablePrefix = 'repo:' . self::OWNER . '@' . self::OWNER_ID . '/Trade@' . self::REPOSITORY_ID . ':';
+        if (!str_starts_with($subject, $legacyPrefix) && !str_starts_with($subject, $immutablePrefix)) {
             throw new \RuntimeException('Unexpected GitHub OIDC subject.');
         }
 
