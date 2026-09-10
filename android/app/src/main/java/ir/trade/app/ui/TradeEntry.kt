@@ -63,7 +63,7 @@ fun TradeEntry(pairingUri: String?, onPairingHandled: () -> Unit) {
     }
 
     when {
-        paired || prefs.isConfigured() || manualSetup -> TradeApp()
+        paired || prefs.isConfigured() || manualSetup -> TradeAppV2()
         pairing -> PairingStatusCard("در حال اتصال امن به پنل…", null)
         error.isNotBlank() -> PairingStatusCard(
             title = "اتصال خودکار انجام نشد",
