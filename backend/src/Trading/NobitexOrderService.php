@@ -179,10 +179,26 @@ final class NobitexOrderService
         $pdo = Database::connection();
         $kill = (string) ($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn() ?: '0');
         if ($kill === '1') throw new \RuntimeException('Kill switch is enabled.');
-        $maxOrders = max(1, (int) Config::get('trading.max_orders_per_hour', 10));
-        $stmt = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE exchange_name='nobitex' AND created_at >= (UTC_TIMESTAMP() - INTERVAL 1 HOUR) AND status IN ('submitting','submitted','filled')");
-        $stmt->execute();
-        if ((int) $stmt->fetchColumn() >= $maxOrders) throw new \RuntimeException('Nobitex hourly order limit reached.');
+
+        // Entry throttling is intentionally BUY-only. Exit orders, including
+        // stop-loss, trailing-stop and profit-lock exits, must not be blocked
+        // merely because the bot opened several positions earlier in the hour.
+        $side = strtolower(trim((string) ($order['side'] ?? $order['type'] ?? '')));
+        if ($side === 'buy') {
+            $stmt = $pdo->prepare("SELECT value_text FROM settings WHERE key_name='nobitex_max_buy_orders_per_hour' LIMIT 1");
+            $stmt->execute();
+            $configured = $stmt->fetchColumn();
+            $maxBuyOrders = is_numeric($configured) ? (int) $configured : 30;
+            $maxBuyOrders = max(5, min(120, $maxBuyOrders));
+
+            $stmt = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE exchange_name='nobitex' AND side='buy' AND created_at >= (UTC_TIMESTAMP() - INTERVAL 1 HOUR) AND status IN ('submitting','submitted','filled')");
+            $stmt->execute();
+            $used = (int) $stmt->fetchColumn();
+            if ($used >= $maxBuyOrders) {
+                throw new \RuntimeException('Nobitex buy order safety limit reached.');
+            }
+        }
+
         $maxValue = (float) Config::get('trading.max_order_value', 0);
         if ($maxValue > 0 && isset($order['price']) && isset($order['amount1'])) {
             if ((float) $order['price'] * (float) $order['amount1'] > $maxValue) throw new \RuntimeException('Order exceeds configured max_order_value.');
