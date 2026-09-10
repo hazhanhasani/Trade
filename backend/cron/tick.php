@@ -25,8 +25,13 @@ $update = Updater::autoUpdateIfDue();
 
 $baseSummary = [
     'run_id' => $runId,
-    'strategy_mode' => 'multi_asset_portfolio',
+    'strategy_mode' => 'nobitex_internal_mtf_portfolio',
     'nobitex_universe' => 'all_eligible_spot_markets',
+    'universe_awareness' => 'full_orderbook_prescan_each_tick',
+    'deep_analysis' => 'top_20_liquid_markets',
+    'signal_source' => 'nobitex_internal_1m_5m_15m',
+    'tradingview_dependency' => false,
+    'analysis_interval_target_seconds' => 60,
     'quote_priority' => ['IRT','USDT'],
     'execution_mode' => 'live_only',
     'update' => $update,
@@ -69,13 +74,8 @@ $runExchange = static function (string $exchange, callable $runner) use (&$resul
 $runExchange('bitpin', static fn(): array => (new AutoTraderEngine())->run());
 $runExchange('nobitex', static function (): array {
     $engine = new NobitexAutoTraderEngine();
-
-    // Existing installations that were explicitly armed for a first live entry
-    // now use the same multi-asset scanner as the normal portfolio engine. This
-    // removes the old hard-coded TON/GRAM bootstrap path.
     $first = $engine->runBootstrapIfPending();
     if (($first['status'] ?? '') !== 'not_pending') return $first;
-
     return $engine->run();
 });
 

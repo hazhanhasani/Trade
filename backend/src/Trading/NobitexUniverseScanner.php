@@ -7,24 +7,23 @@ namespace Trade\Trading;
 use Trade\Exchange\NobitexClient;
 
 /**
- * Discovers and ranks the whole Nobitex spot universe instead of hard-coding one asset.
- * IRT is preferred, USDT is the automatic fallback. Only liquid, reasonably tight
- * books are promoted to OHLC analysis so the 60 req/min history limit is respected.
+ * Discovers the complete Nobitex spot universe every tick.
+ *
+ * The full IRT/USDT order-book universe is pre-scanned each minute. Deep OHLC
+ * analysis is then limited to the best liquid candidates to stay comfortably
+ * inside public API limits. TradingView is not part of the execution path.
  */
 final class NobitexUniverseScanner
 {
     private const QUOTES = ['IRT', 'USDT'];
     private const EXCLUDED_BASES = ['IRT','RLS','USDT','USDC','DAI','TUSD','BUSD','FDUSD'];
 
-    public function __construct(
-        private readonly SignalEngine $signals = new SignalEngine(),
-        private readonly TradingViewSignalService $tradingView = new TradingViewSignalService(),
-    ) {}
+    public function __construct(private readonly NobitexInternalSignalEngine $signals = new NobitexInternalSignalEngine()) {}
 
     public function rankedCandidates(
         NobitexClient $client,
         string $preferredQuote = 'IRT',
-        int $limit = 12,
+        int $limit = 20,
         int $threshold = 60
     ): array {
         $preferredQuote = $this->quote($preferredQuote);
@@ -34,28 +33,19 @@ final class NobitexUniverseScanner
         try { $options = $client->options(); } catch (\Throwable) { $options = []; }
 
         $markets = $this->marketsFromAll($all, $stats, $options, $preferredQuote);
+        $universeSize = count($markets);
         usort($markets, static fn(array $a, array $b): int => ($b['pre_score'] <=> $a['pre_score']));
-        $markets = array_slice($markets, 0, min(20, max($limit + 4, $limit)));
+        $markets = array_slice($markets, 0, $limit);
+        $deepScanSize = count($markets);
 
         $ranked = [];
         foreach ($markets as $market) {
-            $prices = [];
-            try {
-                $history = $client->ohlc((string) $market['symbol'], '15', 96);
-                $closes = $history['c'] ?? [];
-                if (is_array($closes)) {
-                    foreach ($closes as $close) {
-                        $n = $this->number($close);
-                        if ($n > 0) $prices[] = $n;
-                    }
-                }
-            } catch (\Throwable) {}
-            if ($prices === [] || abs((float) end($prices) - (float) $market['price']) > 0.00000001) {
-                $prices[] = (float) $market['price'];
-            }
-            $market['prices'] = array_slice($prices, -96);
-            $signal = $this->signals->analyze($market, $threshold);
-            $signal = $this->tradingView->fuse($market, $signal, $threshold);
+            $minutePrices = $this->minuteHistory($client, (string) $market['symbol'], (float) $market['price']);
+            $market['prices'] = $minutePrices;
+            $market['analysis_resolution'] = '1m';
+            $market['universe_size'] = $universeSize;
+            $market['deep_scan_size'] = $deepScanSize;
+            $signal = $this->signals->analyze($market, $minutePrices, $threshold);
             $market['signal'] = $signal;
 
             $liquidityBonus = min(15.0, max(0.0, log10(max(1.0, (float) $market['depth_quote'])) * 2.0));
@@ -75,7 +65,7 @@ final class NobitexUniverseScanner
             if ($aBuy !== $bBuy) return $bBuy <=> $aBuy;
             return ($b['opportunity_score'] <=> $a['opportunity_score']);
         });
-        return array_slice($ranked, 0, $limit);
+        return $ranked;
     }
 
     public function snapshotSymbol(NobitexClient $client, string $symbol, int $threshold = 60): array
@@ -90,9 +80,18 @@ final class NobitexUniverseScanner
         $market = $this->market($symbol, $book, $stats, $options, $quote);
         if ($market === null) throw new \RuntimeException('Nobitex market is unavailable: ' . $symbol);
 
+        $minutePrices = $this->minuteHistory($client, $symbol, (float) $market['price']);
+        $market['prices'] = $minutePrices;
+        $market['analysis_resolution'] = '1m';
+        $market['signal'] = $this->signals->analyze($market, $minutePrices, $threshold);
+        return $market;
+    }
+
+    private function minuteHistory(NobitexClient $client, string $symbol, float $lastPrice): array
+    {
         $prices = [];
         try {
-            $history = $client->ohlc($symbol, '15', 96);
+            $history = $client->ohlc($symbol, '1', 480);
             $closes = $history['c'] ?? [];
             if (is_array($closes)) {
                 foreach ($closes as $close) {
@@ -101,11 +100,8 @@ final class NobitexUniverseScanner
                 }
             }
         } catch (\Throwable) {}
-        if ($prices === [] || abs((float) end($prices) - (float) $market['price']) > 0.00000001) $prices[] = (float) $market['price'];
-        $market['prices'] = array_slice($prices, -96);
-        $localSignal = $this->signals->analyze($market, $threshold);
-        $market['signal'] = $this->tradingView->fuse($market, $localSignal, $threshold);
-        return $market;
+        if ($lastPrice > 0 && ($prices === [] || abs((float) end($prices) - $lastPrice) > 0.00000001)) $prices[] = $lastPrice;
+        return array_slice($prices, -480);
     }
 
     private function marketsFromAll(array $response, array $stats, array $options, string $preferredQuote): array

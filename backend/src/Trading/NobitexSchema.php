@@ -91,6 +91,11 @@ final class NobitexSchema
         self::seedSetting($pdo,'live_trading_nobitex_enabled','0');
         self::seedSetting($pdo,'nobitex_bootstrap_first_buy_pending','0');
         self::seedSetting($pdo,'nobitex_bootstrap_first_buy_id','trade-first-v113');
+        self::seedSetting($pdo,'nobitex_max_positions','5');
+        self::seedSetting($pdo,'nobitex_scan_limit','20');
+        self::seedSetting($pdo,'nobitex_portfolio_exposure_percent','60');
+        self::seedSetting($pdo,'nobitex_analysis_interval_seconds','60');
+        self::seedSetting($pdo,'nobitex_signal_source','internal_mtf_1m_5m_15m');
 
         // One-time migration for the already-authorized production installation.
         // It never arms on a fresh install and never enables Bot/Live by itself.
@@ -99,7 +104,16 @@ final class NobitexSchema
             self::writeSetting($pdo,'nobitex_bootstrap_first_buy_armed_at',gmdate('Y-m-d H:i:s'));
         }
 
-        self::writeSetting($pdo,'nobitex_schema_version','2');
+        // v3 makes TradingView optional-only. Execution decisions use Nobitex
+        // market data and an internal 1m/5m/15m engine even if old TV settings exist.
+        if($previous!=='3'){
+            self::writeSetting($pdo,'tradingview_enabled','0');
+            self::writeSetting($pdo,'nobitex_scan_limit','20');
+            self::writeSetting($pdo,'nobitex_analysis_interval_seconds','60');
+            self::writeSetting($pdo,'nobitex_signal_source','internal_mtf_1m_5m_15m');
+        }
+
+        self::writeSetting($pdo,'nobitex_schema_version','3');
         self::$ensured=true;
     }
 
