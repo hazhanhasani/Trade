@@ -69,6 +69,7 @@ final class NobitexOrderService
         $mode=strtolower(trim((string)($input['mode']??$input['execution']??'limit')));if(!in_array($mode,['limit','market','stop_market','stop_limit','oco'],true))throw new \InvalidArgumentException('Unsupported Nobitex order mode.');
         if(in_array($mode,['limit','stop_limit','oco'],true)&&$price===null)throw new \InvalidArgumentException('price is required for this order mode.');
 
+        $replacePositionId=$source==='autotrade_nobitex_reprice'?max(0,(int)($input['_replace_position_id']??0)):0;
         $this->assertAllowed($input,$source);
         $pdo=Database::connection();$executionPlan=null;$globalRisk=null;$client=null;
 
@@ -84,7 +85,9 @@ final class NobitexOrderService
                 $price=(float)($mode==='market'?$executionPlan['hard_price_limit']:$executionPlan['limit_price']);
             }
             if($price===null||$price<=0)throw new \RuntimeException('Automated BUY has no safe execution price bound.');
-            $globalRisk=(new NobitexGlobalRiskRuntime())->assertFreshAutomatedBuy($pdo,$client,$symbol,$amount,$price);
+            $globalRisk=(new NobitexGlobalRiskRuntime())->assertFreshAutomatedBuy(
+                $pdo,$client,$symbol,$amount,$price,$replacePositionId>0?$replacePositionId:null
+            );
         }
 
         $clientOrderId=trim((string)($input['clientOrderId']??$input['identifier']??''));if($clientOrderId==='')$clientOrderId='trd-'.substr(bin2hex(random_bytes(12)),0,24);$clientOrderId=substr($clientOrderId,0,32);if(!preg_match('/^[A-Za-z0-9._-]{1,32}$/',$clientOrderId))throw new \InvalidArgumentException('Invalid clientOrderId.');
@@ -95,7 +98,7 @@ final class NobitexOrderService
             $payload['execution']=$mode;if($price!==null)$payload['price']=$this->num($price);if(in_array($mode,['stop_market','stop_limit'],true))$payload['stopPrice']=$this->num($this->positive($input['stopPrice']??$input['price_stop']??null,'stopPrice'));
         }
 
-        $requestLog=$payload;if($executionPlan!==null)$requestLog['_trade_execution_plan']=$executionPlan;if($globalRisk!==null)$requestLog['_trade_global_risk']=$globalRisk;
+        $requestLog=$payload;if($executionPlan!==null)$requestLog['_trade_execution_plan']=$executionPlan;if($globalRisk!==null)$requestLog['_trade_global_risk']=$globalRisk;if($replacePositionId>0)$requestLog['_trade_replace_position_id']=$replacePositionId;
         $localId=bin2hex(random_bytes(12));
         $stmt=$pdo->prepare("INSERT INTO orders (local_id,exchange_name,identifier,market_code,side,order_mode,amount,price,status,source,request_json,created_at,updated_at) VALUES (:local,'nobitex',:identifier,:market,:side,:mode,:amount,:price,'submitting',:source,:request,UTC_TIMESTAMP(),UTC_TIMESTAMP())");
         $stmt->execute([':local'=>$localId,':identifier'=>$clientOrderId,':market'=>$symbol,':side'=>$side,':mode'=>$mode,':amount'=>$this->num($amount),':price'=>$price===null?null:$this->num($price),':source'=>$source,':request'=>json_encode($requestLog,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES)]);
@@ -103,7 +106,7 @@ final class NobitexOrderService
         try{
             $client??=$this->client();$response=$client->createOrder($payload);$order=$this->firstOrder($response);$exchangeId=trim((string)($order['id']??''));$state=strtolower(trim((string)($order['status']??'')));$localStatus=in_array($state,['done','completed','filled'],true)?'filled':'submitted';
             $stmt=$pdo->prepare("UPDATE orders SET exchange_order_id=:id,status=:status,response_json=:response,updated_at=UTC_TIMESTAMP() WHERE local_id=:local");$stmt->execute([':id'=>$exchangeId!==''?$exchangeId:null,':status'=>$localStatus,':response'=>json_encode($response,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES),':local'=>$localId]);
-            $this->audit('nobitex.order_submitted',['local_id'=>$localId,'exchange_order_id'=>$exchangeId,'side'=>$side,'mode'=>$mode,'source'=>$source,'execution_plan'=>$executionPlan,'global_risk'=>$globalRisk]);
+            $this->audit('nobitex.order_submitted',['local_id'=>$localId,'exchange_order_id'=>$exchangeId,'side'=>$side,'mode'=>$mode,'source'=>$source,'execution_plan'=>$executionPlan,'global_risk'=>$globalRisk,'replace_position_id'=>$replacePositionId?:null]);
             try{(new TradeNotificationCenter())->emit('order:'.$localId,'trade','success',$side==='buy'?'سفارش خرید ارسال شد':'سفارش فروش ارسال شد',$symbol.' • '.strtoupper($mode),['local_id'=>$localId,'symbol'=>$symbol,'side'=>$side,'mode'=>$mode]);}catch(\Throwable){}
             return['local_id'=>$localId,'exchange'=>$response,'order'=>$order,'execution_plan'=>$executionPlan,'global_risk'=>$globalRisk];
         }catch(\Throwable $e){
@@ -124,9 +127,14 @@ final class NobitexOrderService
         $this->assertEnabled();$pdo=Database::connection();$kill=(string)($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn()?:'0');if($kill==='1')throw new \RuntimeException('Kill switch is enabled.');
         $side=strtolower(trim((string)($order['side']??$order['type']??'')));
         if($side==='buy'){
-            $stmt=$pdo->prepare("SELECT value_text FROM settings WHERE key_name='nobitex_max_buy_orders_per_hour' LIMIT 1");$stmt->execute();$configured=$stmt->fetchColumn();$maxBuyOrders=is_numeric($configured)?(int)$configured:30;$maxBuyOrders=max(5,min(120,$maxBuyOrders));
-            $stmt=$pdo->prepare("SELECT COUNT(*) FROM orders WHERE exchange_name='nobitex' AND side='buy' AND created_at >= (UTC_TIMESTAMP() - INTERVAL 1 HOUR) AND status IN ('submitting','submitted','filled')");$stmt->execute();if((int)$stmt->fetchColumn()>=$maxBuyOrders)throw new \RuntimeException('Nobitex buy order safety limit reached.');
-            if(str_starts_with($source,'autotrade_nobitex')){
+            // A bounded reprice replaces a confirmed-cancelled order and is not
+            // a fresh portfolio entry, so it does not consume the hourly entry
+            // count or rerun duplicate-position intelligence.
+            if($source!=='autotrade_nobitex_reprice'){
+                $stmt=$pdo->prepare("SELECT value_text FROM settings WHERE key_name='nobitex_max_buy_orders_per_hour' LIMIT 1");$stmt->execute();$configured=$stmt->fetchColumn();$maxBuyOrders=is_numeric($configured)?(int)$configured:30;$maxBuyOrders=max(5,min(120,$maxBuyOrders));
+                $stmt=$pdo->prepare("SELECT COUNT(*) FROM orders WHERE exchange_name='nobitex' AND side='buy' AND created_at >= (UTC_TIMESTAMP() - INTERVAL 1 HOUR) AND status IN ('submitting','submitted','filled') AND source<>'autotrade_nobitex_reprice'");$stmt->execute();if((int)$stmt->fetchColumn()>=$maxBuyOrders)throw new \RuntimeException('Nobitex buy order safety limit reached.');
+            }
+            if(str_starts_with($source,'autotrade_nobitex')&&$source!=='autotrade_nobitex_reprice'){
                 $symbol=strtoupper(preg_replace('/[^A-Z0-9]/','',(string)($order['symbol']??$order['market_symbol']??''))??'');
                 try{$assessment=(new NobitexPortfolioIntelligence())->assessAutomatedBuy($pdo,$symbol);}catch(\Throwable $e){$this->audit('nobitex.intelligence.guard_error',['symbol'=>$symbol,'source'=>$source,'error'=>mb_substr($e->getMessage(),0,500)]);throw new \RuntimeException('Portfolio intelligence unavailable; automated BUY blocked.');}
                 if(!($assessment['allowed']??false)){$reason=(string)($assessment['reason']??'portfolio_intelligence_blocked');$this->audit('nobitex.intelligence.buy_blocked',['symbol'=>$symbol,'source'=>$source,'reason'=>$reason,'assessment'=>$assessment]);throw new NobitexCandidateRejectedException($symbol,$reason,$assessment);}
