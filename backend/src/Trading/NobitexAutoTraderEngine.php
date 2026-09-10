@@ -13,6 +13,10 @@ use Trade\Database;
  * PortfolioEngine remains responsible for risk controls and order state. This
  * coordinator lets one cron cycle continue through multiple immediately-filled
  * profitable actions while reusing the same full-universe analysis cache.
+ *
+ * Fee accounting runs before and after trading so exits see the latest entry fee,
+ * mark price and trailing-profit floor, while completed orders are converted from
+ * gross PnL to net PnL after actual/estimated exchange fees.
  */
 final class NobitexAutoTraderEngine
 {
@@ -21,12 +25,16 @@ final class NobitexAutoTraderEngine
     public function run(): array
     {
         NobitexUniverseScanner::resetProcessCache();
+        $accounting = new NobitexTradeAccounting();
+        $accountingBefore = $this->safeAccountingSync($accounting);
 
         $actions = [];
         $last = null;
+        $accountingAfter = null;
 
         for ($i = 0; $i < self::MAX_ACTIONS_PER_TICK; $i++) {
             $last = (new NobitexPortfolioEngine())->run();
+            $accountingAfter = $this->safeAccountingSync($accounting);
             $status = (string) ($last['status'] ?? 'unknown');
 
             if (in_array($status, ['buy_submitted','sell_submitted'], true)) {
@@ -37,16 +45,19 @@ final class NobitexAutoTraderEngine
         }
 
         if ($actions === []) {
-            return $this->stripLegacyScores(is_array($last) ? $last : [
+            $result = $this->stripLegacyScores(is_array($last) ? $last : [
                 'status'=>'no_trade',
                 'exchange'=>'nobitex',
                 'reason'=>'no_actionable_profit',
             ]);
+            $result['accounting'] = ['before'=>$accountingBefore,'after'=>$accountingAfter];
+            return $result;
         }
 
         if (count($actions) === 1 && is_array($last) && in_array((string) ($last['status'] ?? ''), ['waiting_order','portfolio_full'], true)) {
             $one = $actions[0];
             $one['continuation_status'] = $last['status'];
+            $one['accounting'] = ['before'=>$accountingBefore,'after'=>$accountingAfter];
             return $one;
         }
 
@@ -58,6 +69,7 @@ final class NobitexAutoTraderEngine
             'actions_count'=>count($actions),
             'actions'=>$actions,
             'continuation'=>$this->stripLegacyScores(is_array($last) ? $last : []),
+            'accounting'=>['before'=>$accountingBefore,'after'=>$accountingAfter],
         ];
     }
 
@@ -87,6 +99,17 @@ final class NobitexAutoTraderEngine
             'bootstrap'=>'retired_score_gate',
             'selection_model'=>'positive_expected_net_profit',
         ];
+    }
+
+    private function safeAccountingSync(NobitexTradeAccounting $accounting): array
+    {
+        try {
+            return ['status'=>'ok'] + $accounting->sync();
+        } catch (\Throwable $e) {
+            // Accounting failure must not disable the core risk engine. Existing
+            // hard SL/TP controls remain active and the next cron tick retries.
+            return ['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,240)];
+        }
     }
 
     private function settingIsTrue(PDO $pdo, string $key): bool
