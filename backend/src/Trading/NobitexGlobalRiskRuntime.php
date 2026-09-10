@@ -18,7 +18,7 @@ final class NobitexGlobalRiskRuntime
         $pdo??=Database::connection();
         $client??=(new NobitexOrderService())->client();
         $wallets=$client->wallets();
-        $positions=$pdo->query("SELECT symbol,asset,quote_asset,amount,entry_price,mark_price,status FROM nobitex_autotrade_positions WHERE status IN ('pending_open','open','pending_close') ORDER BY id ASC LIMIT 30")->fetchAll();
+        $positions=$pdo->query("SELECT id,symbol,asset,quote_asset,amount,entry_price,mark_price,status FROM nobitex_autotrade_positions WHERE status IN ('pending_open','open','pending_close') ORDER BY id ASC LIMIT 30")->fetchAll();
         $valuation=(new NobitexPortfolioValuation())->snapshot($client,$wallets,$positions);
         $limit=$this->settingFloat($pdo,'nobitex_portfolio_exposure_percent',60.0,10.0,90.0);
         $maxPositions=$this->settingInt($pdo,'nobitex_max_positions',5,1,20);
@@ -46,28 +46,31 @@ final class NobitexGlobalRiskRuntime
     public static function runtimeSnapshot():array{return self::$snapshot;}
     public static function clear():void{self::$multiplier=1.0;self::$snapshot=[];}
 
-    public function assertFreshAutomatedBuy(PDO $pdo,NobitexClient $client,string $symbol,float $amount,float $price):array
+    public function assertFreshAutomatedBuy(PDO $pdo,NobitexClient $client,string $symbol,float $amount,float $price,?int $excludePositionId=null):array
     {
         $wallets=$client->wallets();
-        $positions=$pdo->query("SELECT symbol,asset,quote_asset,amount,entry_price,mark_price,status FROM nobitex_autotrade_positions WHERE status IN ('pending_open','open','pending_close') ORDER BY id ASC LIMIT 30")->fetchAll();
+        $positions=$pdo->query("SELECT id,symbol,asset,quote_asset,amount,entry_price,mark_price,status FROM nobitex_autotrade_positions WHERE status IN ('pending_open','open','pending_close') ORDER BY id ASC LIMIT 30")->fetchAll();
+        if($excludePositionId!==null&&$excludePositionId>0){
+            $positions=array_values(array_filter($positions,static fn(array $row):bool=>(int)($row['id']??0)!==$excludePositionId));
+        }
         $valuation=(new NobitexPortfolioValuation())->snapshot($client,$wallets,$positions);
         $limit=$this->settingFloat($pdo,'nobitex_portfolio_exposure_percent',60.0,10.0,90.0);
         if(!($valuation['conversion_ready']??false)&&$this->isMixedPortfolio($valuation)){
-            throw new NobitexCandidateRejectedException($symbol,'global_portfolio_valuation_unavailable',['valuation'=>$valuation,'limit_percent'=>$limit]);
+            throw new NobitexCandidateRejectedException($symbol,'global_portfolio_valuation_unavailable',['valuation'=>$valuation,'limit_percent'=>$limit,'excluded_position_id'=>$excludePositionId]);
         }
         $quote=str_ends_with(strtoupper($symbol),'USDT')?'USDT':'IRT';
         $orderQuote=max(0.0,$amount*$price);
         $orderIrt=$quote==='IRT'?$orderQuote:((float)($valuation['usdt_to_irt_rate']??0)>0?$orderQuote*(float)$valuation['usdt_to_irt_rate']:0.0);
-        if($orderIrt<=0.0)throw new NobitexCandidateRejectedException($symbol,'global_portfolio_order_valuation_unavailable',['valuation'=>$valuation]);
+        if($orderIrt<=0.0)throw new NobitexCandidateRejectedException($symbol,'global_portfolio_order_valuation_unavailable',['valuation'=>$valuation,'excluded_position_id'=>$excludePositionId]);
         $total=max(0.0,(float)($valuation['portfolio_value_irt']??0));
         $current=max(0.0,(float)($valuation['exposure_irt']??0));
         $projected=$current+$orderIrt;$projectedPct=$total>0?($projected/$total)*100.0:100.0;
         if($total<=0.0||$projectedPct>$limit+0.0001){
             throw new NobitexCandidateRejectedException($symbol,'global_portfolio_exposure_limit_reached',[
-                'valuation'=>$valuation,'order_value_irt'=>round($orderIrt,8),'projected_exposure_irt'=>round($projected,8),'projected_exposure_percent'=>round($projectedPct,4),'limit_percent'=>$limit,
+                'valuation'=>$valuation,'order_value_irt'=>round($orderIrt,8),'projected_exposure_irt'=>round($projected,8),'projected_exposure_percent'=>round($projectedPct,4),'limit_percent'=>$limit,'excluded_position_id'=>$excludePositionId,
             ]);
         }
-        return ['allowed'=>true,'order_value_irt'=>round($orderIrt,8),'projected_exposure_percent'=>round($projectedPct,4),'limit_percent'=>$limit,'valuation'=>$valuation];
+        return ['allowed'=>true,'order_value_irt'=>round($orderIrt,8),'projected_exposure_percent'=>round($projectedPct,4),'limit_percent'=>$limit,'valuation'=>$valuation,'excluded_position_id'=>$excludePositionId];
     }
 
     private function isMixedPortfolio(array $v):bool
