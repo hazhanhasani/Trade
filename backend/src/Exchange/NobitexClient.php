@@ -35,10 +35,111 @@ final class NobitexClient
     public function ohlc(string $symbol, string $resolution = '15', int $countback = 120): array
     {
         $symbol = $this->safeSymbol($symbol);
-        $allowed = ['1','5','15','30','60','180','240','360','720','D','2D','3D'];
-        if (!in_array($resolution, $allowed, true)) $resolution = '15';
+        $resolution = $this->safeResolution($resolution);
         $countback = max(20, min(500, $countback));
         return $this->request('GET', '/market/udf/history', ['symbol'=>$symbol,'resolution'=>$resolution,'to'=>time(),'countback'=>$countback], false, false);
+    }
+
+    /**
+     * Fetches public OHLC histories concurrently. This lets the trading engine
+     * inspect the complete executable market universe instead of arbitrarily
+     * choosing a top-N shortlist before profitability analysis.
+     *
+     * Failed batch items are retried through the normal public-host fallback.
+     */
+    public function ohlcMany(array $symbols, string $resolution = '1', int $countback = 480, int $concurrency = 8): array
+    {
+        $resolution = $this->safeResolution($resolution);
+        $countback = max(20, min(500, $countback));
+        $concurrency = max(2, min(12, $concurrency));
+
+        $safe = [];
+        foreach ($symbols as $symbol) {
+            if (!is_string($symbol) || trim($symbol) === '') continue;
+            try {
+                $normalized = $this->safeSymbol($symbol);
+                $safe[$normalized] = $normalized;
+            } catch (\Throwable) {}
+        }
+        if ($safe === []) return [];
+
+        $result = [];
+        $failed = [];
+        $to = time();
+
+        foreach (array_chunk(array_values($safe), $concurrency) as $chunk) {
+            $multi = curl_multi_init();
+            if ($multi === false) {
+                foreach ($chunk as $symbol) $failed[$symbol] = true;
+                continue;
+            }
+
+            $handles = [];
+            foreach ($chunk as $symbol) {
+                $query = http_build_query([
+                    'symbol'=>$symbol,
+                    'resolution'=>$resolution,
+                    'to'=>$to,
+                    'countback'=>$countback,
+                ], '', '&', PHP_QUERY_RFC3986);
+
+                $ch = curl_init($this->publicBaseUrl . '/market/udf/history?' . $query);
+                if ($ch === false) {
+                    $failed[$symbol] = true;
+                    continue;
+                }
+
+                curl_setopt_array($ch, [
+                    CURLOPT_RETURNTRANSFER=>true,
+                    CURLOPT_CONNECTTIMEOUT=>min(5, $this->timeout),
+                    CURLOPT_TIMEOUT=>$this->timeout,
+                    CURLOPT_HTTPHEADER=>['Accept: application/json','User-Agent: Trade/1.2.3'],
+                    CURLOPT_FOLLOWLOCATION=>false,
+                    CURLOPT_MAXREDIRS=>0,
+                    CURLOPT_PROTOCOLS=>CURLPROTO_HTTPS,
+                    CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,
+                    CURLOPT_PROXY=>'',
+                    CURLOPT_NOPROXY=>'*',
+                ]);
+                curl_multi_add_handle($multi, $ch);
+                $handles[$symbol] = $ch;
+            }
+
+            do {
+                $status = curl_multi_exec($multi, $running);
+                if ($running > 0) curl_multi_select($multi, 0.75);
+            } while ($running > 0 && $status === CURLM_OK);
+
+            foreach ($handles as $symbol => $ch) {
+                $raw = curl_multi_getcontent($ch);
+                $errno = curl_errno($ch);
+                $http = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+                $decoded = is_string($raw) ? json_decode($raw, true) : null;
+
+                if ($errno === 0 && $http >= 200 && $http < 300 && is_array($decoded)) {
+                    $result[$symbol] = $decoded;
+                } else {
+                    $failed[$symbol] = true;
+                }
+
+                curl_multi_remove_handle($multi, $ch);
+                curl_close($ch);
+            }
+            curl_multi_close($multi);
+        }
+
+        // Public fallback hosts are used only for batch misses; one bad/illiquid
+        // market must not abort analysis of the rest of the universe.
+        foreach (array_keys($failed) as $symbol) {
+            if (isset($result[$symbol])) continue;
+            try {
+                $result[$symbol] = $this->ohlc($symbol, $resolution, $countback);
+            } catch (\Throwable) {
+                $result[$symbol] = [];
+            }
+        }
+
+        return $result;
     }
 
     public function wallets(array $query = []): array
@@ -72,7 +173,7 @@ final class NobitexClient
     {
         $method=strtoupper($method);$path='/'.ltrim($path,'/');$body='';$fullPath=$path;
         if($method==='GET'&&$data!==[]){$fullPath.='?'.http_build_query($data,'','&',PHP_QUERY_RFC3986);}elseif($method!=='GET'){$body=json_encode($data,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);}
-        $headers=['Accept: application/json','User-Agent: Trade/1.1.3'];if($method!=='GET')$headers[]='Content-Type: application/json';if($authenticated)foreach($this->authHeaders($method,$fullPath,$body)as$header)$headers[]=$header;
+        $headers=['Accept: application/json','User-Agent: Trade/1.2.3'];if($method!=='GET')$headers[]='Content-Type: application/json';if($authenticated)foreach($this->authHeaders($method,$fullPath,$body)as$header)$headers[]=$header;
 
         $bases = $authenticated
             ? [$this->baseUrl]
@@ -109,6 +210,12 @@ final class NobitexClient
     private function base64UrlDecode(string $value):string
     {
         $value=strtr(trim($value),'-_','+/');$padding=strlen($value)%4;if($padding!==0)$value.=str_repeat('=',4-$padding);$decoded=base64_decode($value,true);if($decoded===false)throw new \RuntimeException('Invalid Nobitex private key encoding.');return$decoded;
+    }
+
+    private function safeResolution(string $resolution): string
+    {
+        $allowed = ['1','5','15','30','60','180','240','360','720','D','2D','3D'];
+        return in_array($resolution, $allowed, true) ? $resolution : '15';
     }
 
     private function safeSymbol(string $symbol):string{$symbol=strtoupper(trim($symbol));if(!preg_match('/^[A-Z0-9]{4,30}$/',$symbol))throw new \InvalidArgumentException('Invalid Nobitex market symbol.');return$symbol;}
