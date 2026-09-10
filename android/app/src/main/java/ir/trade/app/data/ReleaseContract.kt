@@ -14,6 +14,7 @@ object ReleaseContract {
         "trading.auto_trading",
         "trading.dynamic_position_sizing",
         "trading.execution_quality_v2",
+        "trading.execution_learning_v1",
         "trading.multi_strategy_regime_router_v1",
         "trading.strategy_learning_v2",
         "trading.adaptive_edge_calibration_v1",
