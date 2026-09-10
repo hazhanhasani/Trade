@@ -59,17 +59,37 @@ $pdo = Database::connection();
 // cron can still download the next hotfix instead of being trapped on the broken
 // version forever. Never execute trading code in the PHP process that replaced
 // backend files because old classes may already be loaded in memory.
+$versionBeforeUpdate = Updater::currentVersion();
 $update = Updater::autoUpdateIfDue();
-if (($update['status'] ?? '') === 'updated') {
+$versionAfterUpdate = Updater::currentVersion();
+
+// Updater::autoUpdateIfDue() returns the persisted update state while the next
+// manifest check is not due. Historically that meant a previous `updated` state
+// was replayed on every minute tick for up to five minutes, so cron incorrectly
+// deferred trading again and again. Only defer when this PHP process actually
+// changed the installed backend version.
+$updatedThisProcess = ($update['status'] ?? '') === 'updated'
+    && $versionAfterUpdate !== $versionBeforeUpdate
+    && version_compare($versionAfterUpdate, $versionBeforeUpdate, '>');
+
+if (($update['status'] ?? '') === 'updated' && !$updatedThisProcess) {
+    $update['previous_result_status'] = 'updated';
+    $update['status'] = 'up_to_date';
+    $update['current_version'] = $versionAfterUpdate;
+    $update['latest_version'] = (string) ($update['latest_version'] ?? $versionAfterUpdate);
+    $update['replayed_update_state'] = true;
+}
+
+if ($updatedThisProcess) {
     $heartbeat['status'] = 'updated_deferred';
     $heartbeat['finished_at'] = gmdate(DATE_ATOM);
-    $heartbeat['backend_version'] = Updater::currentVersion();
+    $heartbeat['backend_version'] = $versionAfterUpdate;
     $writeHeartbeat($heartbeat);
 
     echo json_encode([
         'status'=>'success',
         'update'=>$update,
-        'backend_version'=>Updater::currentVersion(),
+        'backend_version'=>$versionAfterUpdate,
         'exchanges'=>[
             'bitpin'=>['status'=>'deferred','reason'=>'backend_updated_restart_next_tick'],
             'nobitex'=>['status'=>'deferred','reason'=>'backend_updated_restart_next_tick'],
@@ -99,7 +119,7 @@ try {
         'quote_priority' => ['IRT','USDT'],
         'execution_mode' => 'live_only',
         'update' => $update,
-        'backend_version' => Updater::currentVersion(),
+        'backend_version' => $versionAfterUpdate,
         'time_utc' => gmdate(DATE_ATOM),
     ];
 
@@ -148,7 +168,7 @@ try {
     $heartbeat['status'] = $overall;
     $heartbeat['finished_at'] = gmdate(DATE_ATOM);
     $heartbeat['run_id'] = $runId;
-    $heartbeat['backend_version'] = Updater::currentVersion();
+    $heartbeat['backend_version'] = $versionAfterUpdate;
     $writeHeartbeat($heartbeat);
 
     echo json_encode($summary,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR) . PHP_EOL;
