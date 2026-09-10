@@ -32,9 +32,7 @@ fun TradeEntry(pairingUri: String?, onPairingHandled: () -> Unit) {
         if (pairingUri.isNullOrBlank()) return@LaunchedEffect
         try {
             val uri = Uri.parse(pairingUri)
-            if (uri.scheme != "trade" || uri.host != "pair") {
-                throw IllegalArgumentException("لینک اتصال معتبر نیست.")
-            }
+            if (uri.scheme != "trade" || uri.host != "pair") throw IllegalArgumentException("لینک اتصال معتبر نیست.")
             val code = uri.getQueryParameter("code")?.trim().orEmpty()
             if (code.isBlank()) throw IllegalArgumentException("کد اتصال در لینک وجود ندارد.")
 
@@ -63,20 +61,15 @@ fun TradeEntry(pairingUri: String?, onPairingHandled: () -> Unit) {
     }
 
     when {
-        paired || prefs.isConfigured() || manualSetup -> TradeAppV2()
+        paired || prefs.isConfigured() || manualSetup -> TradeAppV3()
         pairing -> PairingStatusCard("در حال اتصال امن به پنل…", null)
         error.isNotBlank() -> PairingStatusCard(
             title = "اتصال خودکار انجام نشد",
             error = error,
-            action = {
-                error = ""
-                onPairingHandled()
-            },
+            action = { error = ""; onPairingHandled() },
         )
         else -> SmartSetupScreen(
-            onOpenAdmin = {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("$TRUSTED_SERVER/admin/")))
-            },
+            onOpenAdmin = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("$TRUSTED_SERVER/admin/"))) },
             onManualSetup = { manualSetup = true },
         )
     }
@@ -87,44 +80,20 @@ private fun SmartSetupScreen(onOpenAdmin: () -> Unit, onManualSetup: () -> Unit)
     val colors = lightColorScheme(primary = androidx.compose.ui.graphics.Color(0xFF0B63F6))
     MaterialTheme(colorScheme = colors) {
         Surface(modifier = Modifier.fillMaxSize(), color = androidx.compose.ui.graphics.Color(0xFFF5F7FB)) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .statusBarsPadding()
-                    .navigationBarsPadding()
-                    .padding(20.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(24.dp),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                ) {
-                    Column(
-                        modifier = Modifier.padding(22.dp),
-                        verticalArrangement = Arrangement.spacedBy(13.dp),
-                    ) {
+            Box(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(20.dp), contentAlignment = Alignment.Center) {
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+                    Column(modifier = Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
                         Text("Trade", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold)
                         Text("اتصال اپ بدون واردکردن توکن")
-                        Card(
-                            colors = CardDefaults.cardColors(containerColor = androidx.compose.ui.graphics.Color(0xFFEEF5FF)),
-                            shape = RoundedCornerShape(16.dp),
-                        ) {
+                        Card(colors = CardDefaults.cardColors(containerColor = androidx.compose.ui.graphics.Color(0xFFEEF5FF)), shape = RoundedCornerShape(16.dp)) {
                             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Text("روش پیشنهادی", fontWeight = FontWeight.Bold)
-                                Text("۱) پنل مدیریت را باز کن.\n۲) در «اتصال خودکار اپ» یک کد بساز.\n۳) همان‌جا «اتصال خودکار به اپ» را بزن.\nتوکن جدید خودکار و رمزگذاری‌شده روی گوشی ذخیره می‌شود.")
+                                Text("۱) پنل مدیریت را باز کن.\n۲) در «دستگاه‌ها» یک کد Pairing بساز.\n۳) همان‌جا «اتصال مستقیم به اپ» را بزن.\nتوکن جدید خودکار و رمزگذاری‌شده روی گوشی ذخیره می‌شود.")
                             }
                         }
-                        Button(onClick = onOpenAdmin, modifier = Modifier.fillMaxWidth()) {
-                            Text("باز کردن پنل مدیریت")
-                        }
-                        OutlinedButton(onClick = onManualSetup, modifier = Modifier.fillMaxWidth()) {
-                            Text("ورود دستی توکن — فقط برای مواقع اضطراری")
-                        }
-                        Text(
-                            "API Key و Secret بیت‌پین وارد گوشی نمی‌شوند و روی سرور باقی می‌مانند.",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
+                        Button(onClick = onOpenAdmin, modifier = Modifier.fillMaxWidth()) { Text("باز کردن پنل مدیریت") }
+                        OutlinedButton(onClick = onManualSetup, modifier = Modifier.fillMaxWidth()) { Text("ورود دستی توکن — فقط برای مواقع اضطراری") }
+                        Text("API Key و Secret صرافی وارد گوشی نمی‌شوند و روی Backend باقی می‌مانند.", style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }
@@ -135,22 +104,9 @@ private fun SmartSetupScreen(onOpenAdmin: () -> Unit, onManualSetup: () -> Unit)
 @Composable
 private fun PairingStatusCard(title: String, error: String?, action: (() -> Unit)? = null) {
     Surface(modifier = Modifier.fillMaxSize(), color = androidx.compose.ui.graphics.Color(0xFFF5F7FB)) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .statusBarsPadding()
-                .navigationBarsPadding()
-                .padding(22.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(24.dp),
-            ) {
-                Column(
-                    modifier = Modifier.padding(22.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
+        Box(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(22.dp), contentAlignment = Alignment.Center) {
+            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
+                Column(modifier = Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("Trade", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold)
                     Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     if (error == null) {
@@ -158,11 +114,7 @@ private fun PairingStatusCard(title: String, error: String?, action: (() -> Unit
                         Text("کد یک‌بارمصرف از rado-taxi.sbs بررسی می‌شود و توکن اپ به‌صورت امن روی گوشی ذخیره خواهد شد.")
                     } else {
                         Text(error, color = MaterialTheme.colorScheme.error)
-                        if (action != null) {
-                            OutlinedButton(onClick = action, modifier = Modifier.fillMaxWidth()) {
-                                Text("بازگشت به اتصال هوشمند")
-                            }
-                        }
+                        if (action != null) OutlinedButton(onClick = action, modifier = Modifier.fillMaxWidth()) { Text("بازگشت به اتصال هوشمند") }
                     }
                 }
             }
