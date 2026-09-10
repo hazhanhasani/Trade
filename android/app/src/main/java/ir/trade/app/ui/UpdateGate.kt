@@ -32,6 +32,10 @@ data class UpdateUiState(
     val checking: Boolean = false,
     val message: String = "",
     val lastResult: String = "هنوز بررسی نشده",
+    val installedVersion: String = "-",
+    val backendVersion: String = "-",
+    val releaseVersion: String = "-",
+    val versionsSynchronized: Boolean = false,
 )
 
 val LocalUpdateUiState = compositionLocalOf { UpdateUiState() }
@@ -44,39 +48,63 @@ fun UpdateGate(
 ) {
     val context = LocalContext.current
     var trigger by remember { mutableIntStateOf(0) }
-    var state by remember { mutableStateOf(UpdateUiState(checking = true, message = "در حال بررسی نسخه جدید…")) }
+    var state by remember { mutableStateOf(UpdateUiState(checking = true, message = "در حال بررسی نسخه مشترک اپ و Backend…")) }
 
     LaunchedEffect(trigger) {
-        state = state.copy(checking = true, message = "در حال بررسی نسخه جدید…")
+        state = state.copy(checking = true, message = "در حال بررسی نسخه مشترک اپ و Backend…")
         try {
-            val info = AppUpdateManager.check(context)
+            val result = AppUpdateManager.checkRelease(context)
+            val info = result.update
+            val release = result.status
+            val backend = release.backendVersion ?: "نامشخص"
+            val stable = release.releaseVersion ?: "نامشخص"
+
             if (info != null) {
                 state = UpdateUiState(
                     checking = true,
-                    message = "نسخه ${info.versionName} پیدا شد؛ در حال دانلود امن…",
-                    lastResult = "نسخه ${info.versionName} آماده دریافت است",
+                    message = "نسخه هماهنگ ${info.versionName} پیدا شد؛ در حال دانلود امن…",
+                    lastResult = "اپ ${release.installedVersion} → ${info.versionName} • Backend $backend",
+                    installedVersion = release.installedVersion,
+                    backendVersion = backend,
+                    releaseVersion = stable,
+                    versionsSynchronized = false,
                 )
                 val apk = AppUpdateManager.download(context, info)
-                state = UpdateUiState(
+                state = state.copy(
                     checking = false,
                     message = "نسخه ${info.versionName} دانلود شد؛ نصب را تأیید کن.",
-                    lastResult = "آپدیت ${info.versionName} دانلود شد",
+                    lastResult = "آپدیت ${info.versionName} دانلود شد • Backend $backend",
                 )
                 onInstallReady(apk)
-            } else {
+            } else if (release.synchronized) {
+                val version = release.releaseVersion ?: release.installedVersion
                 state = UpdateUiState(
                     checking = false,
-                    message = "برنامه به‌روز است.",
-                    lastResult = "آخرین نسخه نصب است",
+                    message = "اپ و Backend هماهنگ‌اند • v$version",
+                    lastResult = "هماهنگ • اپ و Backend v$version",
+                    installedVersion = release.installedVersion,
+                    backendVersion = backend,
+                    releaseVersion = stable,
+                    versionsSynchronized = true,
                 )
                 delay(2200)
                 state = state.copy(message = "")
+            } else {
+                state = UpdateUiState(
+                    checking = false,
+                    message = "نسخه‌ها در حال همگام‌سازی‌اند؛ اپ ${release.installedVersion} • Backend $backend • Release $stable",
+                    lastResult = "نیاز به همگام‌سازی • اپ ${release.installedVersion} • Backend $backend • Release $stable",
+                    installedVersion = release.installedVersion,
+                    backendVersion = backend,
+                    releaseVersion = stable,
+                    versionsSynchronized = false,
+                )
             }
         } catch (e: Exception) {
-            state = UpdateUiState(
+            state = state.copy(
                 checking = false,
                 message = "بررسی آپدیت ناموفق بود: ${e.message ?: "خطای نامشخص"}",
-                lastResult = "خطا در بررسی آپدیت",
+                lastResult = "خطا در بررسی نسخه مشترک",
             )
         }
     }
