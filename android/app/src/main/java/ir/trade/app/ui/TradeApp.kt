@@ -108,7 +108,7 @@ private fun SetupScreen(prefs: TradePreferences, onSaved: () -> Unit) {
             Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 BrandHeader(subtitle = "اتصال امن به موتور معاملات")
                 InfoCard(
-                    icon = Security,
+                    icon = Icons.Rounded.Security,
                     title = "کلید صرافی داخل گوشی نیست",
                     text = "اپ فقط به Backend شخصی وصل می‌شود. کلیدهای Nobitex و Bitpin روی سرور باقی می‌مانند.",
                 )
