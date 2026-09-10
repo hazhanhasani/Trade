@@ -33,10 +33,12 @@ telemetryAssert(!str_contains($engine, "'global_portfolio_model'=>'global_quote_
 telemetryAssert(str_contains($engine, 'NobitexRuntimeModels::DECISION'), 'AutoTrader is not using canonical decision telemetry.');
 telemetryAssert(str_contains($engine, 'NobitexRuntimeModels::GLOBAL_PORTFOLIO'), 'AutoTrader is not using canonical global portfolio telemetry.');
 telemetryAssert(str_contains($engine, 'NobitexRuntimeModels::EXECUTION_LEARNING'), 'AutoTrader is missing Execution Learning runtime telemetry.');
+telemetryAssert(str_contains($engine, 'NobitexRuntimeModels::ADAPTIVE_EXECUTION'), 'AutoTrader is missing Adaptive Execution runtime telemetry.');
 telemetryAssert(str_contains($orderService, 'NobitexAdaptiveExecutionPolicy'), 'Live Nobitex BUY path is not using Adaptive Execution Policy.');
 telemetryAssert(str_contains($orderService, "'_trade_adaptive_execution'"), 'Adaptive execution assessment is not persisted in the order request log.');
 telemetryAssert(str_contains($cron, 'NobitexRuntimeModels::SELECTION'), 'Cron summary is not using canonical selection telemetry.');
 telemetryAssert(str_contains($cron, 'NobitexRuntimeModels::EXECUTION_LEARNING'), 'Cron summary is missing Execution Learning telemetry.');
+telemetryAssert(str_contains($cron, 'NobitexRuntimeModels::ADAPTIVE_EXECUTION'), 'Cron summary is missing Adaptive Execution telemetry.');
 telemetryAssert(str_contains($cron, 'NobitexRuntimeModels::ORDER_VALUE_GUARD'), 'Cron summary is missing the active order-value guard model.');
 
 echo "Nobitex runtime telemetry regression tests passed.\n";
