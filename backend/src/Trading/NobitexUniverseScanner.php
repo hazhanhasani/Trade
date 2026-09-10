@@ -16,7 +16,10 @@ final class NobitexUniverseScanner
     private const QUOTES = ['IRT', 'USDT'];
     private const EXCLUDED_BASES = ['IRT','RLS','USDT','USDC','DAI','TUSD','BUSD','FDUSD'];
 
-    public function __construct(private readonly SignalEngine $signals = new SignalEngine()) {}
+    public function __construct(
+        private readonly SignalEngine $signals = new SignalEngine(),
+        private readonly TradingViewSignalService $tradingView = new TradingViewSignalService(),
+    ) {}
 
     public function rankedCandidates(
         NobitexClient $client,
@@ -52,6 +55,7 @@ final class NobitexUniverseScanner
             }
             $market['prices'] = array_slice($prices, -96);
             $signal = $this->signals->analyze($market, $threshold);
+            $signal = $this->tradingView->fuse($market, $signal, $threshold);
             $market['signal'] = $signal;
 
             $liquidityBonus = min(15.0, max(0.0, log10(max(1.0, (float) $market['depth_quote'])) * 2.0));
@@ -99,7 +103,8 @@ final class NobitexUniverseScanner
         } catch (\Throwable) {}
         if ($prices === [] || abs((float) end($prices) - (float) $market['price']) > 0.00000001) $prices[] = (float) $market['price'];
         $market['prices'] = array_slice($prices, -96);
-        $market['signal'] = $this->signals->analyze($market, $threshold);
+        $localSignal = $this->signals->analyze($market, $threshold);
+        $market['signal'] = $this->tradingView->fuse($market, $localSignal, $threshold);
         return $market;
     }
 
