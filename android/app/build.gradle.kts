@@ -23,8 +23,8 @@ android {
         applicationId = "ir.trade.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "1.1.1"
+        versionCode = 9
+        versionName = "1.2.0"
     }
 
     if (hasPermanentSigning) {
@@ -66,6 +66,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -78,6 +79,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
