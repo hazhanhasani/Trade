@@ -86,7 +86,7 @@ final class NobitexClient
             if($raw===false){$networkErrors[]=(parse_url($base,PHP_URL_HOST)?:$base).': '.$errno.' '.$error;if(!$authenticated)continue;throw new \RuntimeException('Nobitex network error ('.$errno.'): '.$error);}
             $decoded=json_decode((string)$raw,true);if(!is_array($decoded))$decoded=['raw'=>mb_substr((string)$raw,0,2000)];
             if($status<200||$status>=300)throw new NobitexHttpException($status,$decoded);
-            if($requireStatusOk){$apiStatus=strtolower(trim((string)($decoded['status']??$ecoded['s']??'ok')));if(in_array($apiStatus,['failed','error'],true))throw new NobitexHttpException($status,$decoded);}
+            if($requireStatusOk){$apiStatus=strtolower(trim((string)($decoded['status']??$decoded['s']??'ok')));if(in_array($apiStatus,['failed','error'],true))throw new NobitexHttpException($status,$decoded);}
             return$decoded;
         }
 
