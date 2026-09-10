@@ -113,12 +113,15 @@ final class NobitexOrderService
             if($price===null||$price<=0) throw new \RuntimeException('Automated BUY has no safe execution price bound.');
         }
 
-        // max_order_value is checked only after Execution Quality has resolved its
-        // final market hard-limit / maker limit. This closes the old `amount`
-        // alias bypass and prevents a planner-adjusted price from bypassing the cap.
+        // Entry/API order caps are enforced after Execution Quality has resolved
+        // its final price. Automated SELLs are reduction-only safety exits and
+        // must never be trapped by a cap that exists to limit fresh exposure.
         $maxOrderValue=(float)Config::get('trading.max_order_value',0);
         $guardPrice=NobitexOrderValueGuard::priceBound($mode,$price,$input);
-        $orderValueGuard=NobitexOrderValueGuard::assertWithinLimit($amount,$guardPrice,$maxOrderValue);
+        $reductionOnlyExit=$side==='sell'&&str_starts_with($source,'autotrade_nobitex');
+        $orderValueGuard=$reductionOnlyExit
+            ? NobitexOrderValueGuard::reductionOnlyExitAssessment($amount,$guardPrice,$maxOrderValue)
+            : NobitexOrderValueGuard::assertWithinLimit($amount,$guardPrice,$maxOrderValue);
 
         if($side==='buy'&&str_starts_with($source,'autotrade_nobitex')){
             $client??=$this->client();
@@ -254,10 +257,13 @@ final class NobitexOrderService
     {
         $this->assertEnabled();
         $pdo=Database::connection();
-        $kill=(string)($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn()?:'0');
-        if($kill==='1') throw new \RuntimeException('Kill switch is enabled.');
-
         $side=strtolower(trim((string)($order['side']??$order['type']??'')));
+
+        // Emergency/risk stop blocks new exposure, not reduction-only exits.
+        // An already-open position must retain its stop-loss/profit-lock path.
+        $kill=(string)($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn()?:'0');
+        if($kill==='1'&&$side==='buy') throw new \RuntimeException('Kill switch is enabled for new BUY entries.');
+
         if($side==='buy'){
             // A bounded reprice replaces a confirmed-cancelled order and is not
             // a fresh portfolio entry, so it does not consume the hourly entry
