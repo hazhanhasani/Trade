@@ -63,7 +63,8 @@ final class NobitexExecutionRepriceService
             if($claim->rowCount()!==1){$results[]=['position_id'=>$positionId,'status'=>'state_changed_before_reprice'];continue;}
 
             try{
-                $created=$orders->create(['symbol'=>$p['symbol'],'amount1'=>(float)$p['amount'],'price'=>(float)$plan['limit_price'],'mode'=>'limit','type'=>'buy','identifier'=>$newIdentifier],'autotrade_nobitex_reprice');
+                $request=json_decode((string)($p['request_json']??''),true);$entryContext=is_array($request)&&is_array($request['_trade_entry_context']??null)?$request['_trade_entry_context']:[];
+                $created=$orders->create(['symbol'=>$p['symbol'],'amount1'=>(float)$p['amount'],'price'=>(float)$plan['limit_price'],'mode'=>'limit','type'=>'buy','identifier'=>$newIdentifier,'_trade_entry_context'=>$entryContext],'autotrade_nobitex_reprice');
                 $newRemote=is_array($created['order']??null)?$created['order']:[];
                 $stmt=$pdo->prepare("UPDATE nobitex_autotrade_positions SET status='pending_open',entry_identifier=:i,entry_order_local_id=:l,entry_exchange_order_id=:x,entry_price=:price,created_at=UTC_TIMESTAMP(),updated_at=UTC_TIMESTAMP() WHERE id=:id AND status='replacing'");
                 $stmt->execute([':i'=>$newIdentifier,':l'=>$created['local_id']??null,':x'=>$this->exchangeId($newRemote),':price'=>(float)$plan['limit_price'],':id'=>$positionId]);
@@ -88,7 +89,7 @@ final class NobitexExecutionRepriceService
     {
         $states=$allowReplacing?"('pending_open','replacing')":"('pending_open')";$pdo->prepare("UPDATE nobitex_autotrade_positions SET status='failed',updated_at=UTC_TIMESTAMP() WHERE id=:id AND status IN {$states}")->execute([':id'=>$id]);
     }
-    private function fillAmount(array $order,float $fallback):float{foreach(['matchedAmount','matched_amount','filledAmount','amount']as$key){$v=$this->number($order[$key]??0);if($v>0)return$v;}return$fallback;}
+    private function fillAmount(array $order,float $fallback):float{return NobitexOrderFill::matchedAmount($order,$fallback);}
     private function exchangeId(array $order):?string{$id=trim((string)($order['id']??''));return$id!==''?$id:null;}
     private function number(mixed $v):float{return is_numeric($v)&&is_finite((float)$v)?(float)$v:0.0;}
     private function settingInt(PDO $pdo,string $key,int $default,int $min,int $max):int{$s=$pdo->prepare('SELECT value_text FROM settings WHERE key_name=:k LIMIT 1');$s->execute([':k'=>$key]);$v=$s->fetchColumn();return is_numeric($v)?max($min,min($max,(int)$v)):$default;}
