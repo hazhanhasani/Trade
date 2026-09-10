@@ -23,6 +23,7 @@ final class ReleaseContract
         'trading.dynamic_position_sizing',
         'trading.execution_quality_v5',
         'trading.execution_quality_v2',
+        'trading.multi_strategy_regime_router_v1',
         'trading.global_portfolio_exposure_v1',
         'trading.adaptive_exit_v2',
         'trading.portfolio_rotation_v1',
