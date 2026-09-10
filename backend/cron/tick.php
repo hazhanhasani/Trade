@@ -101,6 +101,7 @@ try {
         'selection_model' => NobitexRuntimeModels::SELECTION,
         'execution_model' => NobitexRuntimeModels::EXECUTION,
         'execution_learning_model' => NobitexRuntimeModels::EXECUTION_LEARNING,
+        'adaptive_execution_model' => NobitexRuntimeModels::ADAPTIVE_EXECUTION,
         'global_portfolio_model' => NobitexRuntimeModels::GLOBAL_PORTFOLIO,
         'strategy_learning_model' => NobitexRuntimeModels::STRATEGY_LEARNING,
         'edge_calibration_model' => NobitexRuntimeModels::EDGE_CALIBRATION,
