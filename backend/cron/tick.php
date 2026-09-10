@@ -25,10 +25,12 @@ $update = Updater::autoUpdateIfDue();
 
 $baseSummary = [
     'run_id' => $runId,
-    'strategy_mode' => 'nobitex_internal_mtf_portfolio',
-    'nobitex_universe' => 'all_eligible_spot_markets',
-    'universe_awareness' => 'full_orderbook_prescan_each_tick',
-    'deep_analysis' => 'top_20_liquid_markets',
+    'strategy_mode' => 'nobitex_profit_first_full_universe',
+    'nobitex_universe' => 'all_executable_irt_usdt_spot_markets',
+    'universe_awareness' => 'full_orderbook_scan_each_tick',
+    'deep_analysis' => 'all_executable_markets_no_top_n_gate',
+    'selection_model' => 'positive_expected_net_profit_after_costs',
+    'score_based_selection' => false,
     'signal_source' => 'nobitex_internal_1m_5m_15m',
     'tradingview_dependency' => false,
     'analysis_interval_target_seconds' => 60,
@@ -74,8 +76,11 @@ $runExchange = static function (string $exchange, callable $runner) use (&$resul
 $runExchange('bitpin', static fn(): array => (new AutoTraderEngine())->run());
 $runExchange('nobitex', static function (): array {
     $engine = new NobitexAutoTraderEngine();
-    $first = $engine->runBootstrapIfPending();
-    if (($first['status'] ?? '') !== 'not_pending') return $first;
+
+    // Older installs may still carry the former score-gated first-buy flag.
+    // The compatibility call now retires that flag and always lets this same
+    // cron cycle proceed into the score-free profit-first engine.
+    $engine->runBootstrapIfPending();
     return $engine->run();
 });
 
