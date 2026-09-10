@@ -23,45 +23,47 @@ final class BotController
         $quote = (string) $settings['quote_asset'];
         $kill = (string) ($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn() ?: '0') === '1';
 
-        $bitpinPosition = $pdo->query("SELECT * FROM autotrade_positions WHERE status IN ('pending_open','open','pending_close') ORDER BY id DESC LIMIT 1")->fetch() ?: null;
-        $nobitexPosition = $pdo->query("SELECT * FROM nobitex_autotrade_positions WHERE status IN ('pending_open','open','pending_close') ORDER BY id DESC LIMIT 1")->fetch() ?: null;
+        $bitpinPositions = $this->activePositions($pdo, 'bitpin');
+        $nobitexPositions = $this->activePositions($pdo, 'nobitex');
         $lastRun = $pdo->query('SELECT run_id,status,summary_json,started_at,finished_at FROM bot_runs ORDER BY id DESC LIMIT 1')->fetch() ?: null;
         if ($lastRun && isset($lastRun['summary_json'])) {
             $lastRun['summary'] = json_decode((string) $lastRun['summary_json'], true);
             unset($lastRun['summary_json']);
         }
+        $cronHealth = $this->cronHealth($lastRun);
 
         $exchanges = [
-            'bitpin' => [
-                'name' => 'Bitpin',
-                'credentials_configured' => $this->credentialExists($pdo, 'bitpin'),
-                'bot_enabled' => NobitexSchema::botEnabled('bitpin'),
-                'live_execution_enabled' => $this->bitpin->liveEnabled(),
-                'position' => $bitpinPosition,
-                'performance' => $this->performance($pdo, 'bitpin', $quote),
-            ],
-            'nobitex' => [
-                'name' => 'Nobitex',
-                'credentials_configured' => $this->credentialExists($pdo, 'nobitex'),
-                'bot_enabled' => NobitexSchema::botEnabled('nobitex'),
-                'live_execution_enabled' => $this->nobitex->liveEnabled(),
-                'sodium_available' => function_exists('sodium_crypto_sign_detached'),
-                'position' => $nobitexPosition,
-                'performance' => $this->performance($pdo, 'nobitex', $quote),
-            ],
+            'bitpin' => $this->exchangeStatus(
+                $pdo,
+                'bitpin',
+                $quote,
+                $bitpinPositions,
+                $lastRun,
+                $this->bitpin->liveEnabled()
+            ),
+            'nobitex' => $this->exchangeStatus(
+                $pdo,
+                'nobitex',
+                $quote,
+                $nobitexPositions,
+                $lastRun,
+                $this->nobitex->liveEnabled()
+            ) + ['sodium_available'=>function_exists('sodium_crypto_sign_detached')],
         ];
 
         return [
-            'asset'=>'GRAM',
-            'legacy_alias'=>'TON',
+            'asset'=>'MULTI',
+            'capital_asset'=>'IRT/USDT',
+            'quote_priority'=>['IRT','USDT'],
             'execution_mode'=>'live_only',
             // Legacy fields map to Bitpin so older Android versions keep working.
             'bot_enabled'=>$exchanges['bitpin']['bot_enabled'],
             'live_execution_enabled'=>$exchanges['bitpin']['live_execution_enabled'],
             'kill_switch'=>$kill,
             'settings'=>$settings,
-            'position'=>$bitpinPosition,
+            'position'=>$bitpinPositions[0] ?? null,
             'last_run'=>$lastRun,
+            'cron_health'=>$cronHealth,
             'exchanges'=>$exchanges,
             'performance'=>$exchanges['bitpin']['performance'],
         ];
@@ -147,7 +149,7 @@ final class BotController
     public function runNow(string $exchange = 'bitpin'): array
     {
         $exchange = $this->exchange($exchange);
-        if (!NobitexSchema::botEnabled($exchange)) return ['status'=>'disabled','exchange'=>$exchange,'asset'=>'GRAM'];
+        if (!NobitexSchema::botEnabled($exchange)) return ['status'=>'disabled','exchange'=>$exchange,'asset'=>'MULTI'];
         return $exchange === 'nobitex' ? (new NobitexAutoTraderEngine())->run() : (new AutoTraderEngine())->run();
     }
 
@@ -158,15 +160,81 @@ final class BotController
         $limit = max(1,min(100,$limit));
         return [
             'bitpin'=>[
-                'signals'=>$pdo->query("SELECT id,symbol,action,score,price,executed,order_local_id,created_at FROM autotrade_signals ORDER BY id DESC LIMIT {$limit}")->fetchAll(),
-                'positions'=>$pdo->query("SELECT id,symbol,amount,entry_price,stop_loss,take_profit,status,exit_price,realized_pnl,opened_at,closed_at,created_at FROM autotrade_positions ORDER BY id DESC LIMIT {$limit}")->fetchAll(),
+                'signals'=>$pdo->query("SELECT id,symbol,action,score,price,details_json,executed,order_local_id,created_at FROM autotrade_signals ORDER BY id DESC LIMIT {$limit}")->fetchAll(),
+                'positions'=>$pdo->query("SELECT id,symbol,asset,quote_asset,amount,entry_price,stop_loss,take_profit,status,exit_price,realized_pnl,opened_at,closed_at,created_at FROM autotrade_positions ORDER BY id DESC LIMIT {$limit}")->fetchAll(),
                 'pnl'=>$pdo->query("SELECT id,position_id,pnl,pnl_percent,quote_asset,entry_price,exit_price,amount,created_at FROM autotrade_pnl ORDER BY id DESC LIMIT {$limit}")->fetchAll(),
             ],
             'nobitex'=>[
-                'signals'=>$pdo->query("SELECT id,symbol,action,score,price,executed,order_local_id,created_at FROM nobitex_autotrade_signals ORDER BY id DESC LIMIT {$limit}")->fetchAll(),
-                'positions'=>$pdo->query("SELECT id,symbol,amount,entry_price,stop_loss,take_profit,status,exit_price,realized_pnl,opened_at,closed_at,created_at FROM nobitex_autotrade_positions ORDER BY id DESC LIMIT {$limit}")->fetchAll(),
+                'signals'=>$pdo->query("SELECT id,symbol,action,score,price,details_json,executed,order_local_id,created_at FROM nobitex_autotrade_signals ORDER BY id DESC LIMIT {$limit}")->fetchAll(),
+                'positions'=>$pdo->query("SELECT id,symbol,asset,quote_asset,amount,entry_price,stop_loss,take_profit,status,exit_price,realized_pnl,opened_at,closed_at,created_at FROM nobitex_autotrade_positions ORDER BY id DESC LIMIT {$limit}")->fetchAll(),
                 'pnl'=>$pdo->query("SELECT id,position_id,pnl,pnl_percent,quote_asset,entry_price,exit_price,amount,created_at FROM nobitex_autotrade_pnl ORDER BY id DESC LIMIT {$limit}")->fetchAll(),
             ],
+        ];
+    }
+
+    private function exchangeStatus(PDO $pdo, string $exchange, string $quote, array $positions, ?array $lastRun, bool $live): array
+    {
+        return [
+            'name'=>$exchange === 'nobitex' ? 'Nobitex' : 'Bitpin',
+            'credentials_configured'=>$this->credentialExists($pdo, $exchange),
+            'bot_enabled'=>NobitexSchema::botEnabled($exchange),
+            'live_execution_enabled'=>$live,
+            'position'=>$positions[0] ?? null,
+            'active_positions'=>$positions,
+            'active_position_count'=>count($positions),
+            'latest_signal'=>$this->latestSignal($pdo, $exchange),
+            'latest_order'=>$this->latestOrder($pdo, $exchange),
+            'last_decision'=>$this->lastDecision($lastRun, $exchange),
+            'performance'=>$this->performance($pdo, $exchange, $quote),
+        ];
+    }
+
+    private function activePositions(PDO $pdo, string $exchange): array
+    {
+        $table = $exchange === 'nobitex' ? 'nobitex_autotrade_positions' : 'autotrade_positions';
+        return $pdo->query("SELECT id,symbol,asset,quote_asset,amount,entry_price,stop_loss,take_profit,status,opened_at,updated_at FROM {$table} WHERE status IN ('pending_open','open','pending_close') ORDER BY id DESC LIMIT 10")->fetchAll();
+    }
+
+    private function latestSignal(PDO $pdo, string $exchange): ?array
+    {
+        $table = $exchange === 'nobitex' ? 'nobitex_autotrade_signals' : 'autotrade_signals';
+        $row = $pdo->query("SELECT id,symbol,action,score,price,details_json,executed,created_at FROM {$table} ORDER BY id DESC LIMIT 1")->fetch() ?: null;
+        if (!$row) return null;
+        if (isset($row['details_json'])) {
+            $decoded = json_decode((string)$row['details_json'], true);
+            if (is_array($decoded)) $row['details'] = $decoded;
+            unset($row['details_json']);
+        }
+        return $row;
+    }
+
+    private function latestOrder(PDO $pdo, string $exchange): ?array
+    {
+        $stmt = $pdo->prepare("SELECT local_id,exchange_order_id,identifier,market_code,side,order_mode,amount,price,status,source,error_text,created_at,updated_at FROM orders WHERE exchange_name=:exchange ORDER BY id DESC LIMIT 1");
+        $stmt->execute([':exchange'=>$exchange]);
+        return $stmt->fetch() ?: null;
+    }
+
+    private function lastDecision(?array $lastRun, string $exchange): ?array
+    {
+        $summary = is_array($lastRun['summary'] ?? null) ? $lastRun['summary'] : [];
+        $exchanges = is_array($summary['exchanges'] ?? null) ? $summary['exchanges'] : [];
+        return is_array($exchanges[$exchange] ?? null) ? $exchanges[$exchange] : null;
+    }
+
+    private function cronHealth(?array $lastRun): array
+    {
+        if (!$lastRun) return ['status'=>'unknown','healthy'=>false,'age_seconds'=>null,'message'=>'No cron run has been recorded yet.'];
+        $time = (string)($lastRun['finished_at'] ?: $lastRun['started_at'] ?: '');
+        $ts = $time !== '' ? strtotime($time . ' UTC') : false;
+        $age = $ts === false ? null : max(0, time() - $ts);
+        $healthy = $age !== null && $age <= 180 && (string)$lastRun['status'] !== 'failed';
+        return [
+            'status'=>$healthy ? 'healthy' : (($age !== null && $age > 180) ? 'stale' : (string)$lastRun['status']),
+            'healthy'=>$healthy,
+            'age_seconds'=>$age,
+            'last_status'=>(string)$lastRun['status'],
+            'message'=>$healthy ? 'Cron is running normally.' : (($age !== null && $age > 180) ? 'Cron has not completed in the expected window.' : 'The latest cron run needs attention.'),
         ];
     }
 
@@ -174,11 +242,16 @@ final class BotController
     {
         $table = $exchange === 'nobitex' ? 'nobitex_autotrade_pnl' : 'autotrade_pnl';
         $positions = $exchange === 'nobitex' ? 'nobitex_autotrade_positions' : 'autotrade_positions';
-        $stmt=$pdo->prepare("SELECT COALESCE(SUM(pnl),0) FROM {$table} WHERE quote_asset=:q AND created_at>=UTC_DATE()");$stmt->execute([':q'=>$quote]);$today=(float)$stmt->fetchColumn();
-        $stmt=$pdo->prepare("SELECT COALESCE(SUM(pnl),0) FROM {$table} WHERE quote_asset=:q");$stmt->execute([':q'=>$quote]);$total=(float)$stmt->fetchColumn();
-        $closed=(int)$pdo->query("SELECT COUNT(*) FROM {$positions} WHERE status='closed'")->fetchColumn();
-        $wins=(int)$pdo->query("SELECT COUNT(*) FROM {$positions} WHERE status='closed' AND realized_pnl>0")->fetchColumn();
-        return ['quote_asset'=>$quote,'today_realized_pnl'=>$today,'total_realized_pnl'=>$total,'closed_positions'=>$closed,'winning_positions'=>$wins,'win_rate_percent'=>$closed>0?round(($wins/$closed)*100,2):0.0];
+        $byQuote = [];
+        foreach (['IRT','USDT'] as $q) {
+            $stmt=$pdo->prepare("SELECT COALESCE(SUM(pnl),0) FROM {$table} WHERE quote_asset=:q AND created_at>=UTC_DATE()");$stmt->execute([':q'=>$q]);$today=(float)$stmt->fetchColumn();
+            $stmt=$pdo->prepare("SELECT COALESCE(SUM(pnl),0) FROM {$table} WHERE quote_asset=:q");$stmt->execute([':q'=>$q]);$total=(float)$stmt->fetchColumn();
+            $stmt=$pdo->prepare("SELECT COUNT(*) FROM {$positions} WHERE status='closed' AND quote_asset=:q");$stmt->execute([':q'=>$q]);$closed=(int)$stmt->fetchColumn();
+            $stmt=$pdo->prepare("SELECT COUNT(*) FROM {$positions} WHERE status='closed' AND quote_asset=:q AND realized_pnl>0");$stmt->execute([':q'=>$q]);$wins=(int)$stmt->fetchColumn();
+            $byQuote[$q]=['today_realized_pnl'=>$today,'total_realized_pnl'=>$total,'closed_positions'=>$closed,'winning_positions'=>$wins,'win_rate_percent'=>$closed>0?round(($wins/$closed)*100,2):0.0];
+        }
+        $selected = $byQuote[$quote] ?? $byQuote['IRT'];
+        return ['quote_asset'=>$quote] + $selected + ['by_quote'=>$byQuote];
     }
 
     private function credentialExists(PDO $pdo,string $exchange):bool{$s=$pdo->prepare('SELECT EXISTS(SELECT 1 FROM exchange_credentials WHERE exchange_name=:e)');$s->execute([':e'=>$exchange]);return(bool)$s->fetchColumn();}
