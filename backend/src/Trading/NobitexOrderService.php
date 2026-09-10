@@ -273,7 +273,17 @@ final class NobitexOrderService
 
     public function normalizedOrder(array $response):array
     {
-        return$this->firstOrder($response);
+        $order=$this->firstOrder($response);
+        if($order===[]||NobitexOrderFill::isDone($order)) return$order;
+
+        // Preserve the requested quantity separately, but never expose it as a
+        // matched fill for Active/Canceled/Rejected orders. Older portfolio code
+        // scans `amount` after `matchedAmount`; zeroing it here prevents a
+        // zero-fill cancellation from being adopted as a real position.
+        $requested=NobitexOrderFill::requestedAmount($order,0.0);
+        if($requested>0.0) $order['requestedAmount']=$requested;
+        $order['amount']=0;
+        return$order;
     }
 
     private function assertAllowed(array $order,string $source='api'):void
