@@ -10,9 +10,10 @@ use Trade\Database;
 /**
  * Score-free Nobitex orchestration entry point.
  *
- * PortfolioEngine remains responsible for risk controls and order state. This
- * coordinator lets one cron cycle continue through multiple immediately-filled
- * profitable actions while reusing the same full-universe analysis cache.
+ * PortfolioEngine remains responsible for ordinary entries/exits, risk controls
+ * and order reconciliation. When the portfolio is full, the guarded rotation
+ * engine may release one weak incumbent only when a materially superior same-
+ * quote opportunity clears explicit hold-time, loss and friction guards.
  *
  * Fee accounting runs before and after trading so exits see the latest entry fee,
  * mark price and trailing-profit floor, while completed orders are converted from
@@ -41,6 +42,30 @@ final class NobitexAutoTraderEngine
                 $actions[] = $this->stripLegacyScores($last);
                 continue;
             }
+
+            if ($status === 'portfolio_full') {
+                try {
+                    $rotation = (new NobitexPortfolioRotation())->attempt();
+                } catch (\Throwable $e) {
+                    $rotation = [
+                        'status'=>'no_rotation',
+                        'exchange'=>'nobitex',
+                        'reason'=>'rotation_engine_error',
+                        'error'=>mb_substr($e->getMessage(), 0, 240),
+                    ];
+                }
+
+                $rotationStatus = (string)($rotation['status'] ?? 'no_rotation');
+                if ($rotationStatus === 'sell_submitted') {
+                    $actions[] = $this->stripLegacyScores($rotation);
+                    $last = $rotation;
+                    $accountingAfter = $this->safeAccountingSync($accounting);
+                    continue;
+                }
+
+                $last['rotation'] = $this->stripLegacyScores($rotation);
+            }
+
             break;
         }
 
@@ -57,6 +82,7 @@ final class NobitexAutoTraderEngine
         if (count($actions) === 1 && is_array($last) && in_array((string) ($last['status'] ?? ''), ['waiting_order','portfolio_full'], true)) {
             $one = $actions[0];
             $one['continuation_status'] = $last['status'];
+            if (isset($last['rotation'])) $one['rotation'] = $last['rotation'];
             $one['accounting'] = ['before'=>$accountingBefore,'after'=>$accountingAfter];
             return $one;
         }
@@ -64,7 +90,8 @@ final class NobitexAutoTraderEngine
         return [
             'status'=>'profit_actions_processed',
             'exchange'=>'nobitex',
-            'decision_model'=>'net_edge_after_costs_and_adaptive_forecast_buffer',
+            'decision_model'=>'net_edge_after_execution_quality_and_adaptive_forecast_buffer_v5',
+            'rotation_model'=>'guarded_opportunity_replacement_v1',
             'score_based_selection'=>false,
             'actions_count'=>count($actions),
             'actions'=>$actions,
@@ -90,14 +117,14 @@ final class NobitexAutoTraderEngine
         Database::transaction(function (PDO $tx): void {
             $this->writeSetting($tx, 'nobitex_bootstrap_first_buy_pending', '0');
             $this->writeSetting($tx, 'nobitex_bootstrap_retired_at', gmdate('Y-m-d H:i:s'));
-            $this->writeSetting($tx, 'nobitex_selection_model', 'net_edge_after_costs_and_adaptive_forecast_buffer');
+            $this->writeSetting($tx, 'nobitex_selection_model', 'net_edge_after_execution_quality_and_adaptive_forecast_buffer_v5');
         });
 
         return [
             'status'=>'not_pending',
             'exchange'=>'nobitex',
             'bootstrap'=>'retired_score_gate',
-            'selection_model'=>'net_edge_after_costs_and_adaptive_forecast_buffer',
+            'selection_model'=>'net_edge_after_execution_quality_and_adaptive_forecast_buffer_v5',
         ];
     }
 
