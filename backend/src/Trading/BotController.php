@@ -6,6 +6,7 @@ namespace Trade\Trading;
 
 use PDO;
 use Trade\Database;
+use Trade\Support\IranClock;
 
 final class BotController
 {
@@ -37,6 +38,8 @@ final class BotController
         if ($lastRun && isset($lastRun['summary_json'])) {
             $lastRun['summary'] = json_decode((string) $lastRun['summary_json'], true);
             unset($lastRun['summary_json']);
+            $stamp=(string)($lastRun['finished_at'] ?: $lastRun['started_at'] ?: '');
+            if($stamp!=='')$lastRun['time_iran']=IranClock::fromUtc($stamp);
         }
         $cronHealth = $this->cronHealth($lastRun);
 
@@ -63,6 +66,7 @@ final class BotController
             'cron_health'=>$cronHealth,
             'exchanges'=>$exchanges,
             'performance'=>$exchanges['bitpin']['performance'],
+            'time_iran'=>IranClock::nowPayload(),
         ];
     }
 
@@ -134,21 +138,11 @@ final class BotController
             ':score'=>$n['min_signal_score'], ':cooldown'=>$n['cooldown_minutes'],
         ]);
 
-        if (array_key_exists('nobitex_max_positions', $input)) {
-            $this->writeSetting($pdo, 'nobitex_max_positions', (string)$this->boundedInt($input['nobitex_max_positions'], 1, 20, 5));
-        }
-        if (array_key_exists('nobitex_scan_limit', $input)) {
-            $this->writeSetting($pdo, 'nobitex_scan_limit', (string)$this->boundedInt($input['nobitex_scan_limit'], 3, 20, 12));
-        }
-        if (array_key_exists('nobitex_portfolio_exposure_percent', $input)) {
-            $this->writeSetting($pdo, 'nobitex_portfolio_exposure_percent', (string)$this->boundedFloat($input['nobitex_portfolio_exposure_percent'], 10.0, 90.0, 60.0));
-        }
-        if (array_key_exists('nobitex_max_pending_orders', $input)) {
-            $this->writeSetting($pdo, 'nobitex_max_pending_orders', (string)$this->boundedInt($input['nobitex_max_pending_orders'], 1, 5, 3));
-        }
-        if (array_key_exists('nobitex_pending_timeout_seconds', $input)) {
-            $this->writeSetting($pdo, 'nobitex_pending_timeout_seconds', (string)$this->boundedInt($input['nobitex_pending_timeout_seconds'], 30, 300, 60));
-        }
+        if (array_key_exists('nobitex_max_positions', $input)) $this->writeSetting($pdo, 'nobitex_max_positions', (string)$this->boundedInt($input['nobitex_max_positions'], 1, 20, 5));
+        if (array_key_exists('nobitex_scan_limit', $input)) $this->writeSetting($pdo, 'nobitex_scan_limit', (string)$this->boundedInt($input['nobitex_scan_limit'], 3, 20, 12));
+        if (array_key_exists('nobitex_portfolio_exposure_percent', $input)) $this->writeSetting($pdo, 'nobitex_portfolio_exposure_percent', (string)$this->boundedFloat($input['nobitex_portfolio_exposure_percent'], 10.0, 90.0, 60.0));
+        if (array_key_exists('nobitex_max_pending_orders', $input)) $this->writeSetting($pdo, 'nobitex_max_pending_orders', (string)$this->boundedInt($input['nobitex_max_pending_orders'], 1, 5, 3));
+        if (array_key_exists('nobitex_pending_timeout_seconds', $input)) $this->writeSetting($pdo, 'nobitex_pending_timeout_seconds', (string)$this->boundedInt($input['nobitex_pending_timeout_seconds'], 30, 300, 60));
 
         $this->audit('autotrade.shared_settings_updated', $n + ['quote_asset'=>$quote]);
         return $this->status()['settings'];
@@ -177,6 +171,7 @@ final class BotController
                 'positions'=>$pdo->query("SELECT id,symbol,asset,quote_asset,amount,entry_price,stop_loss,take_profit,status,exit_price,realized_pnl,opened_at,closed_at,created_at FROM nobitex_autotrade_positions ORDER BY id DESC LIMIT {$limit}")->fetchAll(),
                 'pnl'=>$pdo->query("SELECT id,position_id,pnl,pnl_percent,quote_asset,entry_price,exit_price,amount,created_at FROM nobitex_autotrade_pnl ORDER BY id DESC LIMIT {$limit}")->fetchAll(),
             ],
+            'time_iran'=>IranClock::nowPayload(),
         ];
     }
 
@@ -214,9 +209,7 @@ final class BotController
         foreach ($positions as $position) {
             if (in_array((string)($position['status'] ?? ''), ['pending_open','pending_close'], true)) $pending++;
             $q = strtoupper((string)($position['quote_asset'] ?? ''));
-            if (array_key_exists($q, $notional)) {
-                $notional[$q] += max(0.0, (float)($position['amount'] ?? 0)) * max(0.0, (float)($position['entry_price'] ?? 0));
-            }
+            if (array_key_exists($q, $notional)) $notional[$q] += max(0.0, (float)($position['amount'] ?? 0)) * max(0.0, (float)($position['entry_price'] ?? 0));
         }
         return [
             'active_positions'=>count($positions),
@@ -229,10 +222,9 @@ final class BotController
             'effective_position_percent'=>round($effectivePosition, 4),
             'portfolio_exposure_limit_percent'=>round($exposureLimit, 4),
             'planned_full_capacity_percent'=>round(min($exposureLimit, $effectivePosition * $maxPositions), 4),
-            'active_notional_by_quote'=>[
-                'IRT'=>round($notional['IRT'], 8),
-                'USDT'=>round($notional['USDT'], 8),
-            ],
+            'active_notional_by_quote'=>['IRT'=>round($notional['IRT'],8),'USDT'=>round($notional['USDT'],8)],
+            'active_notional_display_by_quote'=>['IRT'=>round(NobitexDisplayMoney::quoteValue($notional['IRT'],'IRT'),8),'USDT'=>round($notional['USDT'],8)],
+            'display_units'=>['IRT'=>'TOMAN','USDT'=>'USDT'],
         ];
     }
 
@@ -241,11 +233,8 @@ final class BotController
         $table = $exchange === 'nobitex' ? 'nobitex_autotrade_signals' : 'autotrade_signals';
         $row = $pdo->query("SELECT id,symbol,action,score,price,details_json,executed,created_at FROM {$table} ORDER BY id DESC LIMIT 1")->fetch() ?: null;
         if (!$row) return null;
-        if (isset($row['details_json'])) {
-            $decoded = json_decode((string)$row['details_json'], true);
-            if (is_array($decoded)) $row['details'] = $decoded;
-            unset($row['details_json']);
-        }
+        if (isset($row['details_json'])) { $decoded = json_decode((string)$row['details_json'], true); if (is_array($decoded)) $row['details'] = $decoded; unset($row['details_json']); }
+        if(isset($row['created_at']))$row['time_iran']=IranClock::fromUtc((string)$row['created_at']);
         return $row;
     }
 
@@ -253,7 +242,9 @@ final class BotController
     {
         $stmt = $pdo->prepare("SELECT local_id,exchange_order_id,identifier,market_code,side,order_mode,amount,price,status,source,error_text,created_at,updated_at FROM orders WHERE exchange_name=:exchange ORDER BY id DESC LIMIT 1");
         $stmt->execute([':exchange'=>$exchange]);
-        return $stmt->fetch() ?: null;
+        $row=$stmt->fetch() ?: null;
+        if($row&&isset($row['created_at']))$row['time_iran']=IranClock::fromUtc((string)$row['created_at']);
+        return$row;
     }
 
     private function lastDecision(?array $lastRun, string $exchange): ?array
@@ -276,6 +267,7 @@ final class BotController
             'age_seconds'=>$age,
             'last_status'=>(string)$lastRun['status'],
             'message'=>$healthy ? 'Cron is running normally.' : (($age !== null && $age > 180) ? 'Cron has not completed in the expected window.' : 'The latest cron run needs attention.'),
+            'last_time_iran'=>$time!==''?IranClock::fromUtc($time):null,
         ];
     }
 
@@ -283,16 +275,18 @@ final class BotController
     {
         $table = $exchange === 'nobitex' ? 'nobitex_autotrade_pnl' : 'autotrade_pnl';
         $positions = $exchange === 'nobitex' ? 'nobitex_autotrade_positions' : 'autotrade_positions';
+        [$dayStart,$dayEnd]=IranClock::todayUtcRange();
         $byQuote = [];
         foreach (['IRT','USDT'] as $q) {
-            $stmt=$pdo->prepare("SELECT COALESCE(SUM(pnl),0) FROM {$table} WHERE quote_asset=:q AND created_at>=UTC_DATE()");$stmt->execute([':q'=>$q]);$today=(float)$stmt->fetchColumn();
-            $stmt=$pdo->prepare("SELECT COALESCE(SUM(pnl),0) FROM {$table} WHERE quote_asset=:q");$stmt->execute([':q'=>$q]);$total=(float)$stmt->fetchColumn();
+            $stmt=$pdo->prepare("SELECT COALESCE(SUM(COALESCE(net_pnl,pnl)),0) FROM {$table} WHERE quote_asset=:q AND created_at>=:start AND created_at<:end");$stmt->execute([':q'=>$q,':start'=>$dayStart,':end'=>$dayEnd]);$today=(float)$stmt->fetchColumn();
+            $stmt=$pdo->prepare("SELECT COALESCE(SUM(COALESCE(net_pnl,pnl)),0) FROM {$table} WHERE quote_asset=:q");$stmt->execute([':q'=>$q]);$total=(float)$stmt->fetchColumn();
             $stmt=$pdo->prepare("SELECT COUNT(*) FROM {$positions} WHERE status='closed' AND quote_asset=:q");$stmt->execute([':q'=>$q]);$closed=(int)$stmt->fetchColumn();
             $stmt=$pdo->prepare("SELECT COUNT(*) FROM {$positions} WHERE status='closed' AND quote_asset=:q AND realized_pnl>0");$stmt->execute([':q'=>$q]);$wins=(int)$stmt->fetchColumn();
-            $byQuote[$q]=['today_realized_pnl'=>$today,'total_realized_pnl'=>$total,'closed_positions'=>$closed,'winning_positions'=>$wins,'win_rate_percent'=>$closed>0?round(($wins/$closed)*100,2):0.0];
+            if($exchange==='nobitex'&&$q==='IRT'){$today=NobitexDisplayMoney::quoteValue($today,$q);$total=NobitexDisplayMoney::quoteValue($total,$q);}
+            $byQuote[$q]=['today_realized_pnl'=>$today,'total_realized_pnl'=>$total,'closed_positions'=>$closed,'winning_positions'=>$wins,'win_rate_percent'=>$closed>0?round(($wins/$closed)*100,2):0.0,'display_unit'=>($exchange==='nobitex'?NobitexDisplayMoney::quoteUnit($q):$q)];
         }
         $selected = $byQuote[$quote] ?? $byQuote['IRT'];
-        return ['quote_asset'=>$quote] + $selected + ['by_quote'=>$byQuote];
+        return ['quote_asset'=>$quote,'display_unit'=>$selected['display_unit']??$quote,'day_timezone'=>'Asia/Tehran'] + $selected + ['by_quote'=>$byQuote];
     }
 
     private function settingNumber(PDO $pdo, string $key, float $default): float
