@@ -9,6 +9,10 @@ final class RiskManager
     private const STRATEGY_MIN_HOLD_SECONDS = 180;
     private const STRATEGY_MIN_NET_PROFIT_PERCENT = 0.15;
     private const STRATEGY_REVERSAL_NET_LOSS_PERCENT = 0.75;
+    private const STRATEGY_PROFIT_GIVEBACK_ARM_PERCENT = 0.60;
+    private const STRATEGY_PROFIT_GIVEBACK_PERCENT = 0.45;
+    private const STRATEGY_STALE_RELEASE_SECONDS = 21600; // 6 hours
+    private const STRATEGY_STALE_MAX_NET_PERCENT = 0.10;
     private const IRT_TAKER_FEE_PERCENT = 0.25;
     private const USDT_TAKER_FEE_PERCENT = 0.13;
 
@@ -114,10 +118,15 @@ final class RiskManager
     /**
      * Exit logic is evaluated on net economics, not the chart move alone.
      *
-     * Spread/slippage are already reflected by real fill prices once an order is
-     * executed. Before exit, exchange fees are deducted from the projected PnL.
-     * If NobitexTradeAccounting has an actual entry fee or a live exit-fee mark,
-     * those values are used; otherwise conservative base-tier taker fees apply.
+     * v2 adds two capital-efficiency exits on top of hard SL/TP and the existing
+     * trailing lock:
+     * - profit giveback: a confirmed sell reversal cannot give back most of a
+     *   previously meaningful net gain while the trailing mark is not yet enough;
+     * - stale capital release: after six hours, a sell reversal can release a
+     *   position sitting near break-even instead of keeping a dead slot occupied.
+     *
+     * Neither rule can widen the configured hard stop or force a loss larger than
+     * STRATEGY_REVERSAL_NET_LOSS_PERCENT; the hard stop remains unconditional.
      */
     public function exitReason(float $price, array $position, string $signalAction): ?string
     {
@@ -162,16 +171,47 @@ final class RiskManager
 
         if ($signalAction !== 'sell') return null;
 
+        $heldSeconds = 0;
         $openedAt = trim((string) ($position['opened_at'] ?? ''));
         if ($openedAt !== '') {
             $opened = strtotime($openedAt . ' UTC');
-            if ($opened !== false && time() - $opened < self::STRATEGY_MIN_HOLD_SECONDS) return null;
+            if ($opened !== false) {
+                $heldSeconds = max(0, time() - $opened);
+                if ($heldSeconds < self::STRATEGY_MIN_HOLD_SECONDS) return null;
+            }
         }
 
         // A reversal signal may capture a small but genuinely positive NET gain;
         // it may not churn a position that is only visually green before fees.
         if ($netMovePercent >= self::STRATEGY_MIN_NET_PROFIT_PERCENT) {
             return 'strategy_net_profit_capture';
+        }
+
+        // If the position previously produced a meaningful net gain and that gain
+        // has now retraced sharply under a confirmed sell signal, release it. This
+        // complements the price trailing stop and operates in fee-aware net terms.
+        $highestNetPercent = isset($position['highest_net_pnl_percent']) && is_numeric($position['highest_net_pnl_percent'])
+            ? (float)$position['highest_net_pnl_percent']
+            : $netMovePercent;
+        $giveback = $highestNetPercent - $netMovePercent;
+        if (
+            $highestNetPercent >= self::STRATEGY_PROFIT_GIVEBACK_ARM_PERCENT
+            && $giveback >= self::STRATEGY_PROFIT_GIVEBACK_PERCENT
+            && $netMovePercent > -self::STRATEGY_REVERSAL_NET_LOSS_PERCENT
+        ) {
+            return 'strategy_profit_giveback_exit';
+        }
+
+        // A 1m/5m/15m strategy should not hold a near-flat position indefinitely
+        // after its forward edge has reversed. Six hours is deliberately long
+        // relative to the signal horizons and only applies while a sell signal is
+        // present, so quiet positions are not churned by time alone.
+        if (
+            $heldSeconds >= self::STRATEGY_STALE_RELEASE_SECONDS
+            && $netMovePercent <= self::STRATEGY_STALE_MAX_NET_PERCENT
+            && $netMovePercent > -self::STRATEGY_REVERSAL_NET_LOSS_PERCENT
+        ) {
+            return 'strategy_stale_capital_release';
         }
 
         // If the forward signal reverses hard enough, accept a controlled NET
