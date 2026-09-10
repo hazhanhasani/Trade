@@ -1,0 +1,171 @@
+name: Android Signing Bootstrap
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/src/Security/AndroidSigningService.php'
+      - 'backend/src/Security/GitHubOidcVerifier.php'
+      - 'backend/public/internal/android-signing.php'
+      - 'android/**'
+      - '.github/workflows/android-signing-bootstrap.yml'
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: trade-android-signing-bootstrap
+  cancel-in-progress: true
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+
+      - name: Wait for cPanel signer and fetch permanent identity
+        id: signing
+        shell: bash
+        run: |
+          set -u
+          normalize_fp() { printf '%s' "$1" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]'; }
+          PREVIOUS_CERT=$(curl -fsSL --connect-timeout 5 --max-time 10 \
+            'https://github.com/hazhanhasani/Trade/releases/download/trade-latest/latest.json' 2>/dev/null \
+            | jq -r '.android.signing.cert_sha256 // empty' 2>/dev/null || true)
+          PREVIOUS_CERT=$(normalize_fp "$PREVIOUS_CERT")
+
+          SUCCESS=false
+          for ATTEMPT in $(seq 1 18); do
+            echo "Attempt $ATTEMPT/18 to obtain the cPanel permanent signer..."
+            OIDC_URL="$ACTIONS_ID_TOKEN_REQUEST_URL"
+            if [[ "$OIDC_URL" == *'?'* ]]; then SEP='&'; else SEP='?'; fi
+            OIDC=$(curl -fsS --connect-timeout 5 --max-time 15 \
+              -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${OIDC_URL}${SEP}audience=trade-android-signing" 2>/dev/null \
+              | jq -r '.value // empty' 2>/dev/null || true)
+
+            if [[ -n "$OIDC" ]]; then
+              CODE=$(curl -sS --connect-timeout 5 --max-time 20 \
+                -o "$RUNNER_TEMP/cpanel-signing.json" -w '%{http_code}' \
+                -X POST -H "Authorization: Bearer $OIDC" -H 'Accept: application/json' \
+                'https://rado-taxi.sbs/internal/android-signing.php' || true)
+              if [[ "$CODE" == '200' ]] && jq -e '.ok == true' "$RUNNER_TEMP/cpanel-signing.json" >/dev/null 2>&1; then
+                SUCCESS=true
+                break
+              fi
+              MESSAGE=$(jq -r '.message // .error // empty' "$RUNNER_TEMP/cpanel-signing.json" 2>/dev/null || true)
+              echo "cPanel signer not ready yet (HTTP $CODE${MESSAGE:+ - $MESSAGE})."
+            fi
+            sleep 30
+          done
+
+          if [[ "$SUCCESS" != 'true' ]]; then
+            echo "::error::cPanel permanent signer did not become available within the bootstrap window."
+            exit 1
+          fi
+
+          PASSWORD=$(jq -r '.signing.password' "$RUNNER_TEMP/cpanel-signing.json")
+          ALIAS=$(jq -r '.signing.alias' "$RUNNER_TEMP/cpanel-signing.json")
+          EXPECTED=$(normalize_fp "$(jq -r '.signing.cert_sha256' "$RUNNER_TEMP/cpanel-signing.json")")
+          echo "::add-mask::$PASSWORD"
+          jq -r '.signing.pkcs12_base64' "$RUNNER_TEMP/cpanel-signing.json" | base64 --decode > "$RUNNER_TEMP/Trade-release.p12"
+          test -s "$RUNNER_TEMP/Trade-release.p12"
+
+          CERT=$(keytool -list -v -storetype PKCS12 -keystore "$RUNNER_TEMP/Trade-release.p12" -storepass "$PASSWORD" -alias "$ALIAS" 2>/dev/null \
+            | sed -n 's/^[[:space:]]*SHA256: //p' | head -n1)
+          CERT=$(normalize_fp "$CERT")
+          if [[ -z "$CERT" || "$CERT" != "$EXPECTED" ]]; then
+            echo "::error::cPanel signing bundle fingerprint verification failed."
+            exit 1
+          fi
+          if [[ -n "$PREVIOUS_CERT" && "$CERT" != "$PREVIOUS_CERT" ]]; then
+            echo "::error::A different Android signer is already established. Refusing key rotation."
+            exit 1
+          fi
+
+          {
+            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/Trade-release.p12"
+            echo "ANDROID_KEYSTORE_PASSWORD=$PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$ALIAS"
+            echo "ANDROID_KEY_PASSWORD=$PASSWORD"
+            echo "ANDROID_KEYSTORE_TYPE=PKCS12"
+          } >> "$GITHUB_ENV"
+          echo "cert_sha256=$CERT" >> "$GITHUB_OUTPUT"
+
+      - name: Build permanently signed APK
+        working-directory: android
+        run: |
+          keytool -list -storetype "$ANDROID_KEYSTORE_TYPE" -keystore "$ANDROID_KEYSTORE_PATH" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" >/dev/null
+          gradle :app:assembleRelease --stacktrace
+          mkdir -p ../dist
+          cp app/build/outputs/apk/release/app-release.apk ../dist/Trade.apk
+
+      - name: Verify final APK signer
+        id: apk
+        env:
+          EXPECTED_CERT: ${{ steps.signing.outputs.cert_sha256 }}
+        shell: bash
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n1)
+          if [[ -z "$APKSIGNER" ]]; then echo "::error::apksigner was not found."; exit 1; fi
+          "$APKSIGNER" verify --verbose --print-certs dist/Trade.apk | tee "$RUNNER_TEMP/apksigner.txt"
+          CERT=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/apksigner.txt" | head -n1 | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
+          EXPECTED=$(printf '%s' "$EXPECTED_CERT" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
+          if [[ -z "$CERT" || "$CERT" != "$EXPECTED" ]]; then echo "::error::APK signer mismatch."; exit 1; fi
+          echo "cert_sha256=$CERT" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum dist/Trade.apk | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Update stable Android release asset and manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CERT_SHA256: ${{ steps.apk.outputs.cert_sha256 }}
+          APK_SHA256: ${{ steps.apk.outputs.sha256 }}
+        shell: bash
+        run: |
+          ANDROID_VERSION_NAME=$(grep -m1 'versionName = ' android/app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          ANDROID_VERSION_CODE=$(grep -m1 'versionCode = ' android/app/build.gradle.kts | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+
+          for ATTEMPT in $(seq 1 20); do
+            if curl -fsSL --connect-timeout 5 --max-time 15 \
+              'https://github.com/hazhanhasani/Trade/releases/download/trade-latest/latest.json' \
+              -o dist/latest.json; then
+              RELEASE_ANDROID_VERSION=$(jq -r '.android.version_name // empty' dist/latest.json)
+              if [[ "$RELEASE_ANDROID_VERSION" == "$ANDROID_VERSION_NAME" ]]; then break; fi
+            fi
+            echo "Waiting for Publish Latest to expose the current manifest..."
+            sleep 15
+          done
+
+          if [[ ! -s dist/latest.json ]]; then
+            echo "::error::Stable latest.json was not available."
+            exit 1
+          fi
+
+          jq \
+            --arg version "$ANDROID_VERSION_NAME" \
+            --argjson code "$ANDROID_VERSION_CODE" \
+            --arg sha "$APK_SHA256" \
+            --arg cert "$CERT_SHA256" \
+            --arg publishedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.published_at=$publishedAt | .android.available=true | .android.version_name=$version | .android.version_code=$code | .android.url="https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade.apk" | .android.sha256=$sha | .android.signing={status:"permanent",source:"cpanel-oidc",cert_sha256:$cert}' \
+            dist/latest.json > dist/latest.new.json
+          mv dist/latest.new.json dist/latest.json
+
+          gh release upload trade-latest dist/Trade.apk dist/latest.json --clobber
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Trade-permanent-signed-apk
+          path: dist/Trade.apk
+          if-no-files-found: error
