@@ -95,13 +95,15 @@ final class NobitexOrderService
         $pdo=Database::connection();
         $executionPlan=null;
         $executionLearning=null;
+        $adaptiveExecution=null;
         $entryContext=is_array($input['_trade_entry_context']??null)?$input['_trade_entry_context']:[];
         $globalRisk=null;
         $client=null;
 
-        // Execution Quality + Execution Learning are fresh-entry guards only.
-        // Reduction-only SELLs and a confirmed-cancel reprice keep their own
-        // dedicated safety paths and are never delayed by new-entry learning.
+        // Fresh automated BUYs are revalidated at submit time. The adaptive
+        // policy combines current strategy/regime, realized strategy learning,
+        // calibrated edge and real execution history. It may only make entry
+        // harder; reduction-only exits and confirmed-cancel reprices bypass it.
         if($side==='buy'&&str_starts_with($source,'autotrade_nobitex')){
             $client=$this->client();
             if($source!=='autotrade_nobitex_reprice'&&in_array($mode,['market','limit'],true)){
@@ -110,26 +112,35 @@ final class NobitexOrderService
                 if(($signal['ready']??false)!==true||(string)($signal['action']??'hold')!=='buy'){
                     throw new NobitexCandidateRejectedException($symbol,'execution_signal_expired',['signal'=>$signal]);
                 }
-                $executionLearning=(new NobitexExecutionLearning())->assessSignal($pdo,$signal,['quote_asset'=>$quote]);
-                $rawEdge=is_numeric($signal['tradable_net_edge_percent']??null)?(float)$signal['tradable_net_edge_percent']:0.0;
-                $executionPenalty=max(0.0,(float)($executionLearning['execution_penalty_percent']??0.0));
-                $postExecutionEdge=$rawEdge-$executionPenalty;
-                $executionLearning['raw_tradable_net_edge_percent']=round($rawEdge,4);
-                $executionLearning['post_execution_learning_edge_percent']=round($postExecutionEdge,4);
-                if($rawEdge>0.0&&$executionPenalty>0.0&&$postExecutionEdge<=0.0){
-                    throw new NobitexCandidateRejectedException($symbol,'execution_learning_below_required_margin',$executionLearning);
-                }
+
                 $executionPlan=(new NobitexExecutionPlanner())->plan($market,$signal,$amount,'buy');
-                $mode=(string)$executionPlan['mode'];
-                $price=(float)($mode==='market'?$executionPlan['hard_price_limit']:$executionPlan['limit_price']);
+                $adaptiveExecution=(new NobitexAdaptiveExecutionPolicy())->apply($pdo,$market,$signal,$executionPlan);
+                if(!($adaptiveExecution['allowed']??false)){
+                    throw new NobitexCandidateRejectedException(
+                        $symbol,
+                        (string)($adaptiveExecution['reason']??'adaptive_execution_blocked'),
+                        $adaptiveExecution
+                    );
+                }
+
+                $executionPlan=is_array($adaptiveExecution['plan']??null)?$adaptiveExecution['plan']:$executionPlan;
+                $executionLearning=is_array($adaptiveExecution['execution_learning']??null)?$adaptiveExecution['execution_learning']:null;
+                $mode=(string)($executionPlan['mode']??'limit');
+                $price=(float)($mode==='market'
+                    ? ($executionPlan['hard_price_limit']??0.0)
+                    : ($executionPlan['limit_price']??0.0));
+
                 $entryContext=[
                     'strategy_key'=>NobitexStrategyLearning::strategyKey($signal),
                     'market_regime'=>NobitexStrategyLearning::regimeKey($signal),
                     'quote_asset'=>$quote,
                     'reference_price'=>(float)($executionPlan['reference_price']??0.0),
-                    'tradable_net_edge_percent'=>$rawEdge,
-                    'execution_learning_penalty_percent'=>$executionPenalty,
-                    'post_execution_learning_edge_percent'=>$postExecutionEdge,
+                    'tradable_net_edge_percent'=>(float)($adaptiveExecution['raw_tradable_net_edge_percent']??0.0),
+                    'calibrated_tradable_net_edge_percent'=>(float)($adaptiveExecution['calibrated_tradable_net_edge_percent']??0.0),
+                    'execution_learning_penalty_percent'=>(float)($adaptiveExecution['execution_penalty_percent']??0.0),
+                    'effective_tradable_net_edge_percent'=>(float)($adaptiveExecution['effective_tradable_net_edge_percent']??0.0),
+                    'adaptive_execution_model'=>NobitexAdaptiveExecutionPolicy::MODEL,
+                    'learning_forced_limit'=>(bool)($adaptiveExecution['forced_limit']??false),
                 ];
             }
             if($price===null||$price<=0) throw new \RuntimeException('Automated BUY has no safe execution price bound.');
@@ -178,6 +189,7 @@ final class NobitexOrderService
         $requestLog['_trade_order_value_guard']=$orderValueGuard;
         if($executionPlan!==null) $requestLog['_trade_execution_plan']=$executionPlan;
         if($executionLearning!==null) $requestLog['_trade_execution_learning']=$executionLearning;
+        if($adaptiveExecution!==null) $requestLog['_trade_adaptive_execution']=$adaptiveExecution;
         if($entryContext!==[]) $requestLog['_trade_entry_context']=$entryContext;
         if($globalRisk!==null) $requestLog['_trade_global_risk']=$globalRisk;
         if($replacePositionId>0) $requestLog['_trade_replace_position_id']=$replacePositionId;
@@ -219,6 +231,7 @@ final class NobitexOrderService
                 'order_value_guard'=>$orderValueGuard,
                 'execution_plan'=>$executionPlan,
                 'execution_learning'=>$executionLearning,
+                'adaptive_execution'=>$adaptiveExecution,
                 'global_risk'=>$globalRisk,
                 'replace_position_id'=>$replacePositionId?:null,
             ]);
@@ -239,6 +252,7 @@ final class NobitexOrderService
                 'order_value_guard'=>$orderValueGuard,
                 'execution_plan'=>$executionPlan,
                 'execution_learning'=>$executionLearning,
+                'adaptive_execution'=>$adaptiveExecution,
                 'global_risk'=>$globalRisk,
             ];
         }catch(\Throwable $e){
