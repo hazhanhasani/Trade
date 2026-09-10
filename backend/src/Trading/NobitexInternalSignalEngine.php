@@ -7,18 +7,21 @@ namespace Trade\Trading;
 /**
  * Profit-first, score-free Nobitex signal engine.
  *
- * Markets are evaluated using expected move minus explicit execution costs and
- * an explicit adaptive forecast-error buffer. The buffer is not a score and is
- * returned in every signal so a positive raw Net Edge can never be silently
- * treated as tradable when its margin is too small for current market noise.
+ * v5 evaluates expected move against explicit fees, spread, volatility noise,
+ * visible-liquidity pressure, adverse order-book flow and an adaptive forecast
+ * error buffer. Quality/confidence values remain diagnostics only: the actual
+ * entry gate is positive tradable Net Edge after all modeled execution costs.
  */
 final class NobitexInternalSignalEngine
 {
     private const IRT_ROUNDTRIP_TAKER_FEE_PERCENT = 0.50;
     private const USDT_ROUNDTRIP_TAKER_FEE_PERCENT = 0.26;
     private const MAX_EXECUTABLE_SPREAD_PERCENT = 1.50;
+    private const MIN_DYNAMIC_SPREAD_PERCENT = 0.35;
+    private const MIN_LIQUIDITY_MULTIPLE = 4.0;
+    private const TARGET_LIQUIDITY_MULTIPLE = 16.0;
     private const MIN_EDGE_BUFFER_PERCENT = 0.20;
-    private const MAX_EDGE_BUFFER_PERCENT = 0.85;
+    private const MAX_EDGE_BUFFER_PERCENT = 1.10;
 
     public function __construct(private readonly SignalEngine $base = new SignalEngine()) {}
 
@@ -44,6 +47,16 @@ final class NobitexInternalSignalEngine
 
         $spread = max(0.0, (float) ($market['spread_percent'] ?? 0.0));
         $imbalance = $this->clamp((float) ($market['orderbook_imbalance'] ?? 0.0), -1.0, 1.0);
+        $depthQuote = max(0.0, (float) ($market['depth_quote'] ?? 0.0));
+        $minimumOrder = max(0.0, (float) ($market['min_order_quote'] ?? 0.0));
+        $liquidityMultiple = $minimumOrder > 0.0 ? $depthQuote / $minimumOrder : self::TARGET_LIQUIDITY_MULTIPLE;
+        $liquidityReady = $minimumOrder <= 0.0 || $liquidityMultiple >= self::MIN_LIQUIDITY_MULTIPLE;
+        $liquidityCoverage = $this->clamp(
+            ($liquidityMultiple - self::MIN_LIQUIDITY_MULTIPLE)
+                / (self::TARGET_LIQUIDITY_MULTIPLE - self::MIN_LIQUIDITY_MULTIPLE),
+            0.0,
+            1.0
+        );
 
         $m1 = $this->clamp((float) ($i1['momentum_5_percent'] ?? 0.0), -2.0, 2.0);
         $m5 = $this->clamp((float) ($i5['momentum_5_percent'] ?? 0.0), -4.0, 4.0);
@@ -81,9 +94,9 @@ final class NobitexInternalSignalEngine
             + $flowBias
             - $rsiPenalty;
 
-        // Penalize contradictory short/medium-term regimes instead of using a
-        // binary trend gate. Strong opportunities can still pass if their edge
-        // remains positive after this explicitly reported reversal risk.
+        // Contradictory short/medium-term regimes reduce the forecast instead of
+        // being a binary gate. This keeps the engine profit-first while preventing
+        // a fast 1m spike from overpowering a clearly negative 5m/15m structure.
         $regimePenalty = 0.0;
         if ($m1 < 0.0 && $m5 < 0.0) {
             $regimePenalty += min(0.25, (abs($m1) * 0.08) + (abs($m5) * 0.03));
@@ -94,38 +107,68 @@ final class NobitexInternalSignalEngine
         if ($trend < 0.0) {
             $regimePenalty += min(0.20, abs($trend) * 0.08);
         }
-        $gross = $rawGross - $regimePenalty;
+
+        $direction1 = $this->direction($m1);
+        $direction5 = $this->direction($m5);
+        $direction15 = $this->direction($m15);
+        $agreementCount = ($direction1 > 0 ? 1 : 0) + ($direction5 > 0 ? 1 : 0) + ($direction15 > 0 ? 1 : 0);
+        $disagreementPenalty = 0.0;
+        if ($direction1 !== 0 && $direction5 !== 0 && $direction1 !== $direction5) $disagreementPenalty += 0.12;
+        if ($direction5 !== 0 && $direction15 !== 0 && $direction5 !== $direction15) $disagreementPenalty += 0.16;
+        if ($direction1 > 0 && $direction5 < 0 && $direction15 < 0) $disagreementPenalty += 0.12;
+
+        $exhaustionPenalty = 0.0;
+        if ($rsi1 >= 76.0 && $m1 >= 1.0) $exhaustionPenalty += min(0.30, 0.10 + (($rsi1 - 76.0) * 0.025));
+        if ($rsi5 >= 72.0 && $m5 >= 1.5) $exhaustionPenalty += min(0.20, 0.08 + (($rsi5 - 72.0) * 0.02));
+
+        $gross = $rawGross - $regimePenalty - $disagreementPenalty - $exhaustionPenalty;
 
         $vol1 = max(0.0, (float) ($i1['volatility_percent'] ?? 0.0));
         $vol5 = max(0.0, (float) ($i5['volatility_percent'] ?? 0.0));
         $volatility = ($vol1 * 0.65) + ($vol5 * 0.35);
+        $dynamicSpreadLimit = $this->clamp(
+            self::MIN_DYNAMIC_SPREAD_PERCENT + ($volatility * 0.65),
+            self::MIN_DYNAMIC_SPREAD_PERCENT,
+            self::MAX_EXECUTABLE_SPREAD_PERCENT
+        );
 
         $baseFee = $this->baseRoundtripFeePercent($market);
         $spreadCost = min(self::MAX_EXECUTABLE_SPREAD_PERCENT, $spread);
-        $slippageNoiseReserve = min(1.25, $volatility * 0.15);
-        $estimatedCost = $baseFee + $spreadCost + $slippageNoiseReserve;
+        $volatilitySlippageReserve = min(1.25, $volatility * 0.15);
+        $liquiditySlippageReserve = $liquidityReady
+            ? (1.0 - $liquidityCoverage) * 0.35
+            : 0.75;
+        $adverseFlowReserve = $imbalance < 0.0 ? min(0.20, abs($imbalance) * 0.20) : 0.0;
+        $estimatedCost = $baseFee
+            + $spreadCost
+            + $volatilitySlippageReserve
+            + $liquiditySlippageReserve
+            + $adverseFlowReserve;
 
         $netEdge = $gross - $estimatedCost;
 
-        // Forecast error grows with both transaction friction and observed
-        // volatility. This is intentionally visible in the returned signal.
+        // Forecast error grows with friction, volatility and timeframe conflict.
+        // Every component is returned below so a rejection remains explainable.
         $edgeBuffer = $this->clamp(
-            0.20 + min(0.30, $estimatedCost * 0.30) + min(0.35, $volatility * 0.08),
+            0.20
+                + min(0.30, $estimatedCost * 0.30)
+                + min(0.35, $volatility * 0.08)
+                + min(0.20, $disagreementPenalty * 0.60),
             self::MIN_EDGE_BUFFER_PERCENT,
             self::MAX_EDGE_BUFFER_PERCENT
         );
         $tradableNetEdge = $netEdge - $edgeBuffer;
         $expectedNetProfit = $tradableNetEdge > 0.0;
 
-        $ready = $spread <= self::MAX_EXECUTABLE_SPREAD_PERCENT
+        $ready = $liquidityReady
+            && $spread <= $dynamicSpreadLimit
             && is_finite($gross)
             && is_finite($estimatedCost)
             && is_finite($netEdge)
             && is_finite($tradableNetEdge);
 
         $buyGate = $ready && $expectedNetProfit;
-
-        $estimatedExitCost = $estimatedCost * 0.50;
+        $estimatedExitCost = max($baseFee * 0.50, ($spreadCost * 0.50) + ($volatilitySlippageReserve * 0.50));
         $sellGate = $ready && $gross < -max(0.05, $estimatedExitCost);
 
         $action = 'hold';
@@ -137,15 +180,31 @@ final class NobitexInternalSignalEngine
             $action = 'sell';
             $reason = 'expected_forward_move_negative_after_exit_cost';
         } elseif (!$ready) {
-            $reason = $spread > self::MAX_EXECUTABLE_SPREAD_PERCENT
-                ? 'spread_not_executable'
-                : 'market_quality_not_ready';
+            if (!$liquidityReady) $reason = 'liquidity_not_executable';
+            elseif ($spread > $dynamicSpreadLimit) $reason = 'spread_not_executable';
+            else $reason = 'market_quality_not_ready';
         }
 
+        $spreadQuality = $dynamicSpreadLimit > 0.0
+            ? 1.0 - $this->clamp($spread / $dynamicSpreadLimit, 0.0, 1.0)
+            : 0.0;
+        $flowQuality = 1.0 - max(0.0, -$imbalance);
+        $agreementQuality = $agreementCount / 3.0;
+        $qualityScore = (int) round(100.0 * $this->clamp(
+            ($liquidityCoverage * 0.35)
+                + ($spreadQuality * 0.30)
+                + ($flowQuality * 0.15)
+                + ($trendConsistency * 0.10)
+                + ($agreementQuality * 0.10),
+            0.0,
+            1.0
+        ));
+
         $edgeToCost = $estimatedCost > 0.0 ? $tradableNetEdge / $estimatedCost : $tradableNetEdge;
-        $confidence = $ready
+        $edgeConfidence = $ready
             ? min(100, max(0, (int) round(50.0 + ($edgeToCost * 35.0))))
             : 0;
+        $confidence = $ready ? (int) round(($edgeConfidence * 0.75) + ($qualityScore * 0.25)) : 0;
 
         $reasons = [];
         foreach ([$one, $fiveSignal, $fifteenSignal] as $signal) {
@@ -159,29 +218,45 @@ final class NobitexInternalSignalEngine
             'score'=>0,
             'confidence'=>$confidence,
             'confidence_is_gate'=>false,
+            'execution_quality_score'=>$qualityScore,
             'action'=>$action,
             'reason'=>$reason,
-            'decision_model'=>'net_edge_after_costs_and_adaptive_forecast_buffer',
+            'decision_model'=>'net_edge_after_execution_quality_and_adaptive_forecast_buffer_v5',
             'expected_net_profit'=>$ready && $expectedNetProfit,
             'expected_gross_move_percent'=>round($gross, 4),
             'raw_expected_gross_move_percent'=>round($rawGross, 4),
             'regime_risk_penalty_percent'=>round($regimePenalty, 4),
+            'timeframe_disagreement_penalty_percent'=>round($disagreementPenalty, 4),
+            'exhaustion_penalty_percent'=>round($exhaustionPenalty, 4),
             'estimated_roundtrip_cost_percent'=>round($estimatedCost, 4),
             'estimated_exit_cost_percent'=>round($estimatedExitCost, 4),
             'expected_net_edge_percent'=>round($netEdge, 4),
             'required_edge_buffer_percent'=>round($edgeBuffer, 4),
             'tradable_net_edge_percent'=>round($tradableNetEdge, 4),
             'minimum_net_edge_percent'=>round($edgeBuffer, 4),
+            'execution_quality'=>[
+                'depth_quote'=>round($depthQuote, 8),
+                'minimum_order_quote'=>round($minimumOrder, 8),
+                'liquidity_multiple'=>round($liquidityMultiple, 4),
+                'minimum_liquidity_multiple'=>self::MIN_LIQUIDITY_MULTIPLE,
+                'target_liquidity_multiple'=>self::TARGET_LIQUIDITY_MULTIPLE,
+                'liquidity_coverage'=>round($liquidityCoverage, 4),
+                'dynamic_max_spread_percent'=>round($dynamicSpreadLimit, 4),
+                'positive_timeframe_count'=>$agreementCount,
+                'orderbook_imbalance'=>round($imbalance, 4),
+            ],
             'cost_model'=>[
                 'quote_asset'=>strtoupper((string) ($market['quote_asset'] ?? 'IRT')),
                 'base_roundtrip_taker_fee_percent'=>round($baseFee, 4),
                 'spread_cost_percent'=>round($spreadCost, 4),
-                'slippage_noise_reserve_percent'=>round($slippageNoiseReserve, 4),
+                'volatility_slippage_reserve_percent'=>round($volatilitySlippageReserve, 4),
+                'liquidity_slippage_reserve_percent'=>round($liquiditySlippageReserve, 4),
+                'adverse_flow_reserve_percent'=>round($adverseFlowReserve, 4),
                 'adaptive_forecast_buffer_percent'=>round($edgeBuffer, 4),
                 'volatility_hard_gate'=>false,
             ],
             'reasons'=>array_values(array_unique($reasons)),
-            'source'=>'nobitex_internal_profit_first_full_universe_v4',
+            'source'=>'nobitex_internal_profit_first_full_universe_v5',
             'timeframes'=>[
                 '1m'=>[
                     'momentum_percent'=>round($m1,4),
@@ -214,6 +289,8 @@ final class NobitexInternalSignalEngine
                 'spread_percent'=>round($spread,6),
                 'rsi_penalty_percent'=>round($rsiPenalty,4),
                 'regime_risk_penalty_percent'=>round($regimePenalty,4),
+                'timeframe_disagreement_penalty_percent'=>round($disagreementPenalty,4),
+                'exhaustion_penalty_percent'=>round($exhaustionPenalty,4),
             ],
             'tradingview'=>['enabled'=>false,'used'=>false,'required'=>false],
         ];
@@ -234,22 +311,26 @@ final class NobitexInternalSignalEngine
             'score'=>0,
             'confidence'=>0,
             'confidence_is_gate'=>false,
+            'execution_quality_score'=>0,
             'action'=>'hold',
             'reason'=>$reason,
-            'decision_model'=>'net_edge_after_costs_and_adaptive_forecast_buffer',
+            'decision_model'=>'net_edge_after_execution_quality_and_adaptive_forecast_buffer_v5',
             'expected_net_profit'=>false,
             'expected_gross_move_percent'=>0.0,
             'raw_expected_gross_move_percent'=>0.0,
             'regime_risk_penalty_percent'=>0.0,
+            'timeframe_disagreement_penalty_percent'=>0.0,
+            'exhaustion_penalty_percent'=>0.0,
             'estimated_roundtrip_cost_percent'=>0.0,
             'estimated_exit_cost_percent'=>0.0,
             'expected_net_edge_percent'=>0.0,
             'required_edge_buffer_percent'=>0.0,
             'tradable_net_edge_percent'=>0.0,
             'minimum_net_edge_percent'=>0.0,
+            'execution_quality'=>[],
             'cost_model'=>[],
             'reasons'=>[],
-            'source'=>'nobitex_internal_profit_first_full_universe_v4',
+            'source'=>'nobitex_internal_profit_first_full_universe_v5',
             'timeframes'=>[
                 '1m'=>['samples'=>count($minute)],
                 '5m'=>['samples'=>count($five)],
@@ -282,6 +363,13 @@ final class NobitexInternalSignalEngine
             $out[] = (float) $aligned[$i];
         }
         return $out;
+    }
+
+    private function direction(float $value): int
+    {
+        if ($value > 0.03) return 1;
+        if ($value < -0.03) return -1;
+        return 0;
     }
 
     private function clamp(float $value, float $min, float $max): float
