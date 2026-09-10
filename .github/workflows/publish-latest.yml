@@ -34,16 +34,58 @@ jobs:
         with:
           gradle-version: '9.6.0'
 
-      - name: Read versions
+      - name: Resolve unified release version
         id: versions
         shell: bash
         run: |
+          set -euo pipefail
           BACKEND_VERSION=$(php -r "echo require 'backend/version.php';")
-          ANDROID_VERSION_NAME=$(grep -m1 'versionName = ' android/app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
-          ANDROID_VERSION_CODE=$(grep -m1 'versionCode = ' android/app/build.gradle.kts | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+          if [[ ! "$BACKEND_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::backend/version.php must contain a semantic version like 1.3.2"
+            exit 1
+          fi
+
+          MAJOR=$((10#${BASH_REMATCH[1]}))
+          MINOR=$((10#${BASH_REMATCH[2]}))
+          PATCH=$((10#${BASH_REMATCH[3]}))
+          if (( MINOR > 999 || PATCH > 999 )); then
+            echo "::error::Version minor/patch must be <= 999 for deterministic Android versionCode generation."
+            exit 1
+          fi
+          ANDROID_VERSION_CODE=$((MAJOR * 1000000 + MINOR * 1000 + PATCH))
+          if (( ANDROID_VERSION_CODE < 1 || ANDROID_VERSION_CODE > 2100000000 )); then
+            echo "::error::Generated Android versionCode is outside the supported range."
+            exit 1
+          fi
+
+          PREVIOUS_JSON=$(curl -fsSL --connect-timeout 5 --max-time 10 \
+            'https://github.com/hazhanhasani/Trade/releases/download/trade-latest/latest.json' 2>/dev/null || true)
+          PREVIOUS_VERSION=$(printf '%s' "$PREVIOUS_JSON" | jq -r '.release.version // .backend.version // empty' 2>/dev/null || true)
+          PREVIOUS_CODE=$(printf '%s' "$PREVIOUS_JSON" | jq -r '.android.version_code // 0' 2>/dev/null || echo 0)
+
+          if [[ -n "$PREVIOUS_VERSION" ]]; then
+            if [[ "$BACKEND_VERSION" == "$PREVIOUS_VERSION" ]]; then
+              PREVIOUS_SHA=$(git rev-list -n1 trade-latest 2>/dev/null || true)
+              if [[ "$PREVIOUS_SHA" != "$GITHUB_SHA" ]]; then
+                echo "::error::Code changed without a coordinated version bump. Update backend/version.php before publishing."
+                exit 1
+              fi
+            else
+              if ! php -r "exit(version_compare('$BACKEND_VERSION', '$PREVIOUS_VERSION', '>') ? 0 : 1);"; then
+                echo "::error::Release version must move forward from $PREVIOUS_VERSION to a newer semantic version."
+                exit 1
+              fi
+              if (( ANDROID_VERSION_CODE <= PREVIOUS_CODE )); then
+                echo "::error::Android versionCode must increase monotonically."
+                exit 1
+              fi
+            fi
+          fi
+
           echo "backend=$BACKEND_VERSION" >> "$GITHUB_OUTPUT"
-          echo "android_name=$ANDROID_VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "android_name=$BACKEND_VERSION" >> "$GITHUB_OUTPUT"
           echo "android_code=$ANDROID_VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "Unified release: $BACKEND_VERSION (Android code $ANDROID_VERSION_CODE)"
 
       - name: Validate PHP
         run: find backend -type f -name '*.php' -print0 | xargs -0 -n1 php -l
@@ -51,6 +93,7 @@ jobs:
       - name: Package cPanel backend
         shell: bash
         run: |
+          set -euo pipefail
           rm -rf dist
           mkdir -p dist/backend
           cp -a backend/. dist/backend/
@@ -65,6 +108,7 @@ jobs:
             zip -qr ../Trade-cPanel.zip .
           )
           rm -rf dist/backend
+          test -s dist/Trade-cPanel.zip
 
       - name: Resolve permanent Android signing
         id: signing
@@ -159,13 +203,14 @@ jobs:
           echo "ready=false" >> "$GITHUB_OUTPUT"
           echo "source=missing" >> "$GITHUB_OUTPUT"
           echo "cert_sha256=" >> "$GITHUB_OUTPUT"
-          echo "::warning::Permanent signing is not available yet. Backend publishing continues; the bootstrap workflow will retry after cPanel updates."
+          echo "::error::Atomic release blocked: permanent Android signing is required so Backend and APK publish together."
+          exit 1
 
       - name: Build permanently signed Android APK
-        if: steps.signing.outputs.ready == 'true'
         working-directory: android
         shell: bash
         run: |
+          set -euo pipefail
           test -s "$ANDROID_KEYSTORE_PATH"
           keytool -list \
             -storetype "$ANDROID_KEYSTORE_TYPE" \
@@ -174,14 +219,15 @@ jobs:
             -alias "$ANDROID_KEY_ALIAS" >/dev/null
           gradle :app:assembleRelease --stacktrace
           cp app/build/outputs/apk/release/app-release.apk ../dist/Trade.apk
+          test -s ../dist/Trade.apk
 
       - name: Verify Android signature
         id: apk_signature
-        if: steps.signing.outputs.ready == 'true'
         shell: bash
         env:
           EXPECTED_CERT_SHA256: ${{ steps.signing.outputs.cert_sha256 }}
         run: |
+          set -euo pipefail
           APK="$GITHUB_WORKSPACE/dist/Trade.apk"
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n1)
           if [ -z "$APKSIGNER" ]; then
@@ -197,68 +243,61 @@ jobs:
           fi
           echo "cert_sha256=$CERT_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Build update manifest
+      - name: Build coordinated update manifest
         env:
-          BACKEND_VERSION: ${{ steps.versions.outputs.backend }}
-          ANDROID_VERSION_NAME: ${{ steps.versions.outputs.android_name }}
+          RELEASE_VERSION: ${{ steps.versions.outputs.backend }}
           ANDROID_VERSION_CODE: ${{ steps.versions.outputs.android_code }}
-          ANDROID_READY: ${{ steps.signing.outputs.ready }}
           ANDROID_SIGNING_SOURCE: ${{ steps.signing.outputs.source }}
           ANDROID_CERT_SHA256: ${{ steps.apk_signature.outputs.cert_sha256 }}
         shell: bash
         run: |
+          set -euo pipefail
+          test -s dist/Trade-cPanel.zip
+          test -s dist/Trade.apk
           BACKEND_SHA=$(sha256sum dist/Trade-cPanel.zip | awk '{print $1}')
-          if [ "$ANDROID_READY" = "true" ] && [ -f dist/Trade.apk ]; then
-            ANDROID_SHA=$(sha256sum dist/Trade.apk | awk '{print $1}')
-            ANDROID_AVAILABLE=true
-            ANDROID_URL='https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade.apk'
-            SIGNING_STATUS='permanent'
-          else
-            ANDROID_SHA=''
-            ANDROID_AVAILABLE=false
-            ANDROID_URL=''
-            ANDROID_CERT_SHA256=''
-            ANDROID_SIGNING_SOURCE='missing'
-            SIGNING_STATUS='missing'
-          fi
+          ANDROID_SHA=$(sha256sum dist/Trade.apk | awk '{print $1}')
+          ANDROID_URL='https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade.apk'
+
           jq -n \
-            --arg backendVersion "$BACKEND_VERSION" \
+            --arg releaseVersion "$RELEASE_VERSION" \
             --arg backendSha "$BACKEND_SHA" \
-            --arg androidVersion "$ANDROID_VERSION_NAME" \
             --argjson androidCode "$ANDROID_VERSION_CODE" \
             --arg androidSha "$ANDROID_SHA" \
-            --argjson androidAvailable "$ANDROID_AVAILABLE" \
             --arg androidUrl "$ANDROID_URL" \
-            --arg signingStatus "$SIGNING_STATUS" \
             --arg signingSource "$ANDROID_SIGNING_SOURCE" \
             --arg signingCertSha256 "$ANDROID_CERT_SHA256" \
             --arg publishedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{schema:1,published_at:$publishedAt,backend:{version:$backendVersion,url:"https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade-cPanel.zip",sha256:$backendSha},android:{available:$androidAvailable,version_code:$androidCode,version_name:$androidVersion,url:$androidUrl,sha256:$androidSha,signing:{status:$signingStatus,source:$signingSource,cert_sha256:$signingCertSha256}}}' \
+            '{schema:2,published_at:$publishedAt,release:{version:$releaseVersion,coordinated:true},backend:{version:$releaseVersion,url:"https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade-cPanel.zip",sha256:$backendSha},android:{available:true,version_code:$androidCode,version_name:$releaseVersion,required_backend_version:$releaseVersion,url:$androidUrl,sha256:$androidSha,signing:{status:"permanent",source:$signingSource,cert_sha256:$signingCertSha256}}}' \
             > dist/latest.json
 
-      - name: Publish stable release assets
+          jq -e '.release.coordinated == true and .release.version == .backend.version and .backend.version == .android.version_name and .android.required_backend_version == .backend.version and .android.available == true' dist/latest.json >/dev/null
+
+      - name: Publish stable release assets atomically
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          set -euo pipefail
+          test -s dist/Trade-cPanel.zip
+          test -s dist/Trade.apk
+          test -s dist/latest.json
+
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git tag -f trade-latest "$GITHUB_SHA"
           git push origin refs/tags/trade-latest --force
           if gh release view trade-latest >/dev/null 2>&1; then
-            gh release edit trade-latest --title "Trade Latest" --notes "Automatically published stable update channel." --target "$GITHUB_SHA"
+            gh release edit trade-latest --title "Trade Latest" --notes "Coordinated Backend + Android stable release." --target "$GITHUB_SHA"
           else
-            gh release create trade-latest --title "Trade Latest" --notes "Automatically published stable update channel." --target "$GITHUB_SHA"
+            gh release create trade-latest --title "Trade Latest" --notes "Coordinated Backend + Android stable release." --target "$GITHUB_SHA"
           fi
-          gh release upload trade-latest dist/Trade-cPanel.zip dist/latest.json --clobber
-          if [ -f dist/Trade.apk ]; then
-            gh release upload trade-latest dist/Trade.apk --clobber
-          else
-            echo "No newly signed APK was produced; preserving any previously published Trade.apk asset."
-          fi
+          gh release upload trade-latest dist/Trade-cPanel.zip dist/Trade.apk dist/latest.json --clobber
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Trade-latest-manifest
-          path: dist/latest.json
+          name: Trade-latest-coordinated-release
+          path: |
+            dist/latest.json
+            dist/Trade-cPanel.zip
+            dist/Trade.apk
           if-no-files-found: error
