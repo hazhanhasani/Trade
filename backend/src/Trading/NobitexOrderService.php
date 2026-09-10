@@ -221,7 +221,7 @@ final class NobitexOrderService
                         'reason'=>$reason,
                         'assessment'=>$assessment,
                     ]);
-                    throw new \RuntimeException('Portfolio intelligence blocked automated BUY: ' . $reason);
+                    throw new NobitexCandidateRejectedException($symbol, $reason, $assessment);
                 }
             }
         }
