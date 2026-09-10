@@ -11,6 +11,7 @@ use Trade\Security\AppAccess;
 use Trade\Trading\BotController;
 use Trade\Trading\NobitexAutoTraderEngine;
 use Trade\Trading\NobitexOrderService;
+use Trade\Trading\NobitexRotationMonitor;
 use Trade\Trading\NobitexSchema;
 use Trade\Trading\OrderService;
 use Trade\Trading\TradingViewSignalService;
@@ -89,6 +90,7 @@ try{
     if($method==='GET'&&$path==='/api/tradingview')respond(['ok'=>true,'data'=>(new TradingViewSignalService())->publicStatus()]);
     if($method==='GET'&&$path==='/api/bot')respond(['ok'=>true,'data'=>$controller->status()]);
     if($method==='GET'&&$path==='/api/bot/recent')respond(['ok'=>true,'data'=>$controller->recentData(isset($_GET['limit'])?(int)$_GET['limit']:25)]);
+    if($method==='GET'&&$path==='/api/bot/rotation')respond(['ok'=>true,'data'=>(new NobitexRotationMonitor())->snapshot(isset($_GET['limit'])?(int)$_GET['limit']:20)]);
     if($method==='POST'&&$path==='/api/bot/settings'){$controller->updateSettings(jsonBody());respond(['ok'=>true,'data'=>$controller->status()]);}
     if($method==='POST'&&$path==='/api/bot/enabled'){$b=jsonBody();$controller->setExchangeEnabled('bitpin',boolValue($b['enabled']??null));respond(['ok'=>true,'data'=>$controller->status()]);}
     if($method==='POST'&&$path==='/api/bot/live'){$b=jsonBody();$controller->setExchangeLive('bitpin',boolValue($b['enabled']??null));respond(['ok'=>true,'data'=>$controller->status()]);}
