@@ -60,6 +60,13 @@ final class NobitexAutoTraderEngine
                     $actions[] = $this->stripLegacyScores($rotation);
                     $last = $rotation;
                     $accountingAfter = $this->safeAccountingSync($accounting);
+
+                    // A remote sell may already exist even if the local position
+                    // failed its optimistic transition to pending_close. Never
+                    // loop and risk submitting a duplicate sell in that state.
+                    if ((string)($rotation['reason'] ?? '') === 'rotation_state_reconcile_required') {
+                        break;
+                    }
                     continue;
                 }
 
