@@ -341,10 +341,13 @@ jobs:
 
           git tag -f trade-latest "$RELEASE_COMMIT"
           git push origin refs/tags/trade-latest --force
-          if gh release view trade-latest >/dev/null 2>&1; then
-            gh release edit trade-latest --title "Trade Latest" --notes "Coordinated Backend + Android stable release. Source: $GITHUB_SHA • Runtime snapshot: $RELEASE_COMMIT" --target "$RELEASE_COMMIT"
-          else
-            gh release create trade-latest --title "Trade Latest" --notes "Coordinated Backend + Android stable release. Source: $GITHUB_SHA • Runtime snapshot: $RELEASE_COMMIT" --target "$RELEASE_COMMIT"
+
+          # The long-lived release object already exists. Editing its metadata is
+          # unnecessary and can be denied to an installation token even when
+          # release-asset uploads are permitted. The moved tag is authoritative;
+          # only create metadata on a first-ever release, then replace assets.
+          if ! gh release view trade-latest >/dev/null 2>&1; then
+            gh release create trade-latest --title "Trade Latest" --notes "Coordinated Backend + Android stable release." --target "$RELEASE_COMMIT"
           fi
           gh release upload trade-latest dist/Trade-cPanel.zip dist/Trade.apk dist/latest.json --clobber
 
