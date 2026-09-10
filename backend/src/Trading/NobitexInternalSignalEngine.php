@@ -91,21 +91,24 @@ final class NobitexInternalSignalEngine
         $vol5 = max(0.0, (float) ($i5['volatility_percent'] ?? 0.0));
         $volatility = ($vol1 * 0.65) + ($vol5 * 0.35);
 
-        // Economic cost only: two-sided taker fee + observed spread + a bounded
-        // slippage/noise reserve. No arbitrary "model uncertainty" percentage is
-        // subtracted from profitability, because that becomes a hidden entry gate.
+        // Economic cost only: two-sided taker fee + observed spread + a
+        // volatility/slippage reserve. Volatility is priced into the trade once;
+        // it is not also used as a hidden hard gate after Net Edge is positive.
         $baseFee = $this->baseRoundtripFeePercent($market);
         $spreadCost = min(self::MAX_EXECUTABLE_SPREAD_PERCENT, $spread);
-        $slippageNoiseReserve = min(0.35, $volatility * 0.20);
+        $slippageNoiseReserve = min(1.25, $volatility * 0.15);
         $estimatedCost = $baseFee + $spreadCost + $slippageNoiseReserve;
 
         $netEdge = $gross - $estimatedCost;
         $expectedNetProfit = $netEdge > 0.0;
 
-        $ready = (bool) ($one['ready'] ?? false)
-            && (bool) ($fiveSignal['ready'] ?? false)
-            && (bool) ($fifteenSignal['ready'] ?? false)
-            && $spread <= self::MAX_EXECUTABLE_SPREAD_PERCENT;
+        // The MTF histories were already validated above. SignalEngine is only
+        // an indicator calculator for Nobitex, so its generic volatility gate
+        // must not override this engine's profitability decision.
+        $ready = $spread <= self::MAX_EXECUTABLE_SPREAD_PERCENT
+            && is_finite($gross)
+            && is_finite($estimatedCost)
+            && is_finite($netEdge);
 
         // Entry is purely economic after the market is executable.
         $buyGate = $ready && $expectedNetProfit;
@@ -162,9 +165,10 @@ final class NobitexInternalSignalEngine
                 'spread_cost_percent'=>round($spreadCost, 4),
                 'slippage_noise_reserve_percent'=>round($slippageNoiseReserve, 4),
                 'hidden_model_margin_percent'=>0.0,
+                'volatility_hard_gate'=>false,
             ],
             'reasons'=>array_values(array_unique($reasons)),
-            'source'=>'nobitex_internal_profit_first_full_universe_v2',
+            'source'=>'nobitex_internal_profit_first_full_universe_v3',
             'timeframes'=>[
                 '1m'=>[
                     'momentum_percent'=>round($m1,4),
@@ -227,7 +231,7 @@ final class NobitexInternalSignalEngine
             'minimum_net_edge_percent'=>0.0,
             'cost_model'=>[],
             'reasons'=>[],
-            'source'=>'nobitex_internal_profit_first_full_universe_v2',
+            'source'=>'nobitex_internal_profit_first_full_universe_v3',
             'timeframes'=>[
                 '1m'=>['samples'=>count($minute)],
                 '5m'=>['samples'=>count($five)],
