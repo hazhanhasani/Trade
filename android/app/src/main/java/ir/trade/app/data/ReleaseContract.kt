@@ -3,6 +3,7 @@ package ir.trade.app.data
 object ReleaseContract {
     const val API_CONTRACT = 1
 
+    // Runtime capability parity is validated against Backend in CI before release.
     val REQUIRED_RUNTIME_CAPABILITIES: Set<String> = setOf(
         "api.capability_contract",
         "trading.live_only",
