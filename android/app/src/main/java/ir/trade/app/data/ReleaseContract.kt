@@ -1,0 +1,25 @@
+package ir.trade.app.data
+
+object ReleaseContract {
+    const val API_CONTRACT = 1
+
+    val REQUIRED_RUNTIME_CAPABILITIES: Set<String> = setOf(
+        "api.capability_contract",
+        "trading.live_only",
+        "trading.live_execution_controls",
+        "trading.nobitex_spot",
+        "trading.irt_usdt_markets",
+        "trading.manual_orders",
+        "trading.auto_trading",
+        "trading.dynamic_position_sizing",
+        "trading.multi_pending",
+        "trading.pending_watchdog",
+        "trading.kill_switch",
+        "updates.coordinated_backend_android",
+        "updates.sha256_verified_apk",
+        "updates.permanent_android_signing",
+    )
+
+    fun missingCapabilities(available: Set<String>): Set<String> =
+        REQUIRED_RUNTIME_CAPABILITIES - available
+}
