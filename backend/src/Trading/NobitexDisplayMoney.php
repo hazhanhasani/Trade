@@ -26,6 +26,10 @@ final class NobitexDisplayMoney
         return strtoupper(trim($quote)) === 'IRT' ? 'TOMAN' : strtoupper(trim($quote));
     }
 
+    /**
+     * Convert the dedicated public wallet response to the same Toman unit the
+     * Nobitex UI shows. Raw exchange values are retained under raw_* keys.
+     */
     public static function walletResponse(array $response): array
     {
         $decorate = static function (array $row): array {
@@ -43,8 +47,25 @@ final class NobitexDisplayMoney
                 $rawRial = self::firstNumeric($row, ['rialValue','rial_value','valueRls','value_rls']);
                 if ($rawRial !== null) $valueToman = $rawRial / self::RLS_PER_TOMAN;
             }
-            if ($currency === 'RLS' && $valueToman === null && $balance !== null) {
-                $valueToman = $balance / self::RLS_PER_TOMAN;
+            if ($currency === 'RLS' && $valueToman === null && $balance !== null) $valueToman = $balance / self::RLS_PER_TOMAN;
+
+            // Make legacy app consumers correct too: they currently read these
+            // fields directly. Preserve exact exchange-native values first.
+            foreach (['rialValue','rial_value','valueRls','value_rls'] as $field) {
+                if (isset($row[$field]) && is_numeric($row[$field])) {
+                    $row['raw_'.$field] = $row[$field];
+                    $row[$field] = round(((float)$row[$field]) / self::RLS_PER_TOMAN, 8);
+                }
+            }
+            if ($currency === 'RLS') {
+                if (isset($row['currency'])) { $row['raw_currency']=$row['currency']; $row['currency']='IRT'; }
+                if (isset($row['currencyCode'])) { $row['raw_currencyCode']=$row['currencyCode']; $row['currencyCode']='IRT'; }
+                foreach (['activeBalance','available','free','balance'] as $field) {
+                    if (isset($row[$field]) && is_numeric($row[$field])) {
+                        $row['raw_'.$field] = $row[$field];
+                        $row[$field] = round(((float)$row[$field]) / self::RLS_PER_TOMAN, 12);
+                    }
+                }
             }
 
             $row['display_currency'] = $displayCurrency;
@@ -54,23 +75,15 @@ final class NobitexDisplayMoney
             return $row;
         };
 
-        if (isset($response['wallets']) && is_array($response['wallets'])) {
-            $response['wallets'] = array_map($decorate, $response['wallets']);
-        }
+        if (isset($response['wallets']) && is_array($response['wallets'])) $response['wallets'] = array_map($decorate, $response['wallets']);
         if (isset($response['data']) && is_array($response['data'])) {
-            if (array_is_list($response['data'])) {
-                $response['data'] = array_map(static fn($r) => is_array($r) ? $decorate($r) : $r, $response['data']);
-            } elseif (isset($response['data']['wallets']) && is_array($response['data']['wallets'])) {
-                $response['data']['wallets'] = array_map($decorate, $response['data']['wallets']);
-            }
+            if (array_is_list($response['data'])) $response['data'] = array_map(static fn($r) => is_array($r) ? $decorate($r) : $r, $response['data']);
+            elseif (isset($response['data']['wallets']) && is_array($response['data']['wallets'])) $response['data']['wallets'] = array_map($decorate, $response['data']['wallets']);
         }
 
         $response['_trade_display'] = [
-            'logical_quote'=>'IRT',
-            'exchange_native_quote'=>'RLS',
-            'display_unit'=>'TOMAN',
-            'rls_per_toman'=>self::RLS_PER_TOMAN,
-            'raw_fields_preserved'=>true,
+            'logical_quote'=>'IRT','exchange_native_quote'=>'RLS','display_unit'=>'TOMAN','rls_per_toman'=>self::RLS_PER_TOMAN,
+            'legacy_public_fields_normalized'=>true,'raw_exchange_values_available_under'=>'raw_*',
         ];
         return $response;
     }
@@ -78,19 +91,13 @@ final class NobitexDisplayMoney
     public static function moneyFields(array $row, string $quote, array $fields): array
     {
         if (strtoupper(trim($quote)) !== 'IRT') return $row;
-        foreach ($fields as $field) {
-            if (array_key_exists($field, $row) && is_numeric($row[$field])) {
-                $row[$field] = round(((float)$row[$field]) / self::RLS_PER_TOMAN, 8);
-            }
-        }
+        foreach ($fields as $field) if (array_key_exists($field, $row) && is_numeric($row[$field])) $row[$field] = round(((float)$row[$field]) / self::RLS_PER_TOMAN, 8);
         return $row;
     }
 
     private static function firstNumeric(array $row, array $keys): ?float
     {
-        foreach ($keys as $key) {
-            if (array_key_exists($key, $row) && is_numeric($row[$key])) return (float)$row[$key];
-        }
+        foreach ($keys as $key) if (array_key_exists($key, $row) && is_numeric($row[$key])) return (float)$row[$key];
         return null;
     }
 }
