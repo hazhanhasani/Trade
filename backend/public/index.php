@@ -10,6 +10,7 @@ use Trade\ReleaseContract;
 use Trade\Security\AppAccess;
 use Trade\Trading\BotController;
 use Trade\Trading\NobitexAutoTraderEngine;
+use Trade\Trading\NobitexEdgeCalibration;
 use Trade\Trading\NobitexOrderService;
 use Trade\Trading\NobitexPerformanceAnalytics;
 use Trade\Trading\NobitexPortfolioValuation;
@@ -90,6 +91,7 @@ try{
     if($method==='GET'&&$path==='/api/bot/recent')respond(['ok'=>true,'data'=>$controller->recentData(isset($_GET['limit'])?(int)$_GET['limit']:25)]);
     if($method==='GET'&&$path==='/api/bot/rotation')respond(['ok'=>true,'data'=>(new NobitexRotationMonitor())->snapshot(isset($_GET['limit'])?(int)$_GET['limit']:20)]);
     if($method==='GET'&&$path==='/api/bot/strategy-learning')respond(['ok'=>true,'data'=>(new NobitexStrategyLearning())->snapshot(null,isset($_GET['limit'])?(int)$_GET['limit']:240)]);
+    if($method==='GET'&&$path==='/api/bot/edge-calibration')respond(['ok'=>true,'data'=>(new NobitexEdgeCalibration())->snapshot()]);
     if($method==='GET'&&$path==='/api/portfolio/global')respond(['ok'=>true,'data'=>globalPortfolioSnapshot()]);
     if($method==='GET'&&$path==='/api/analytics')respond(['ok'=>true,'data'=>(new NobitexPerformanceAnalytics())->snapshot(null,isset($_GET['days'])?(int)$_GET['days']:30)]);
     if($method==='GET'&&$path==='/api/notifications'){
@@ -112,7 +114,7 @@ try{
         $exchange=exchangeName();if($exchange==='nobitex'){$client=(new NobitexOrderService())->client();respond(['ok'=>true,'exchange'=>'nobitex','data'=>$client->wallets()]);}$service=new OrderService();$client=$service->client();$query=$_GET;unset($query['exchange']);$data=$client->wallets($query);$service->syncTokens($client);respond(['ok'=>true,'exchange'=>'bitpin','data'=>$data]);
     }
     if($method==='GET'&&$path==='/api/orders'){
-        $exchange=exchangeName();if($exchange==='nobitex'){$client=(new NobitexOrderService())->client();$query=$_GET;unset($query['exchange']);respond(['ok'=>true,'exchange'=>'nobitex','data'=>$client->orders($query)]);}$service=new OrderService();$client=$service->client();$query=$_GET;unset($query['exchange']);$data=$client->orders($query);$service->syncTokens($client);respond(['ok'=>true,'exchange'=>'bitpin','data'=>$data]);
+        $exchange=exchangeName();if($exchange==='nobitex'){$client=(new NobitexOrderService())->client();$query=$_GET;unset($query['exchange']);respond(['ok'=>true,'exchange'=>'nobitex','data'=>$client->orders($query)]);}$service=new OrderService();$client=$service->client();$query=$_GET;unset($query['exchange']);$data=$client->orders($query);$service->syncTokens($client);respond(['ok'=>true,'exchange'=>$exchange,'data'=>$data]);
     }
     if($method==='POST'&&$path==='/api/orders'){
         $body=jsonBody();$exchange=exchangeName($body);unset($body['exchange']);$data=$exchange==='nobitex'?(new NobitexOrderService())->create($body,'android_or_api'):(new OrderService())->create($body,'android_or_api');respond(['ok'=>true,'exchange'=>$exchange,'data'=>$data],201);
