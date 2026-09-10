@@ -11,9 +11,9 @@ use Trade\Exchange\NobitexClient;
 /**
  * Multi-asset live portfolio engine for Nobitex spot markets.
  *
- * It scans the complete IRT/USDT universe, ranks liquid markets, opens at most
- * one new position per cron tick, manages several positions concurrently and
- * keeps one global kill switch plus per-exchange Bot/Live gates.
+ * It scans the complete IRT/USDT universe, ranks liquid markets, manages
+ * several positions concurrently, adapts entry sizing to the configured
+ * portfolio capacity and keeps one global kill switch plus per-exchange gates.
  */
 final class NobitexPortfolioEngine
 {
@@ -89,8 +89,15 @@ final class NobitexPortfolioEngine
             return $this->summary('sell_submitted', ['position'=>$result,'exit_reason'=>$reason,'active_positions'=>count($positions)]);
         }
 
-        if ($this->hasPendingPosition($positions)) {
-            return $this->summary('waiting_order', ['active_positions'=>count($positions)]);
+        $maxPending = $this->intSetting($pdo, 'nobitex_max_pending_orders', 3, 1, 5);
+        $pendingCount = $this->pendingPositionCount($positions);
+        if ($pendingCount >= $maxPending) {
+            return $this->summary('waiting_order', [
+                'active_positions'=>count($positions),
+                'pending_orders'=>$pendingCount,
+                'max_pending_orders'=>$maxPending,
+                'reason'=>'pending_order_capacity_reached',
+            ]);
         }
 
         $maxPositions = $this->intSetting($pdo, 'nobitex_max_positions', 5, 1, 20);
@@ -138,7 +145,13 @@ final class NobitexPortfolioEngine
             $dailyPnl = $this->dailyPnl($pdo, $quoteAsset);
             $decision = $this->entryBudget($pdo, $market, $settings, $quoteAvailable, $portfolio, $exposure, $dailyPnl);
             if (!($decision['allowed'] ?? false)) {
-                $rejections[] = ['symbol'=>$symbol,'reason'=>$decision['reason'] ?? 'risk_blocked','score'=>$signal['score'] ?? 0];
+                $rejections[] = [
+                    'symbol'=>$symbol,
+                    'reason'=>$decision['reason'] ?? 'risk_blocked',
+                    'effective_position_percent'=>$decision['effective_position_percent'] ?? null,
+                    'portfolio_exposure_percent'=>$decision['portfolio_exposure_percent'] ?? null,
+                    'exposure_capacity'=>$decision['exposure_capacity'] ?? null,
+                ];
                 continue;
             }
 
@@ -166,14 +179,27 @@ final class NobitexPortfolioEngine
                     'spread_percent'=>$market['spread_percent'] ?? null,
                 ],
                 'order'=>$result,
+                'allocation'=>[
+                    'budget'=>$decision['budget'] ?? null,
+                    'configured_position_percent'=>$decision['configured_position_percent'] ?? null,
+                    'effective_position_percent'=>$decision['effective_position_percent'] ?? null,
+                    'portfolio_exposure_percent'=>$decision['portfolio_exposure_percent'] ?? null,
+                    'portfolio_exposure_limit_percent'=>$decision['portfolio_exposure_limit_percent'] ?? null,
+                    'exposure_capacity'=>$decision['exposure_capacity'] ?? null,
+                ],
                 'active_positions_before'=>count($positions),
+                'pending_orders_before'=>$pendingCount,
                 'max_positions'=>$maxPositions,
+                'max_pending_orders'=>$maxPending,
             ]);
         }
 
         return $this->summary('no_trade', [
             'reason'=>'no_candidate_passed_signal_and_risk_filters',
             'active_positions'=>count($positions),
+            'pending_orders'=>$pendingCount,
+            'max_positions'=>$maxPositions,
+            'max_pending_orders'=>$maxPending,
             'top_candidates'=>$this->candidateSummary($candidates),
             'rejections'=>array_slice($rejections, 0, 12),
         ]);
@@ -280,20 +306,32 @@ final class NobitexPortfolioEngine
         }
 
         $portfolioMaxPct = $this->floatSetting($pdo, 'nobitex_portfolio_exposure_percent', 60.0, 10.0, 90.0);
+        $maxPositions = $this->intSetting($pdo, 'nobitex_max_positions', 5, 1, 20);
         $capacity = max(0.0, ($portfolio * ($portfolioMaxPct / 100.0)) - $exposure);
-        if ($capacity <= 0) return ['allowed'=>false,'reason'=>'portfolio_exposure_limit_reached'];
+        $exposurePct = $portfolio > 0 ? ($exposure / $portfolio) * 100.0 : 0.0;
+        $configuredPerPositionPct = min((float) $settings['position_percent'], (float) $settings['max_position_percent']);
+        $slotAlignedPct = $portfolioMaxPct / max(1, $maxPositions);
+        $effectivePerPositionPct = min($configuredPerPositionPct, $slotAlignedPct);
+        $context = [
+            'configured_position_percent'=>round($configuredPerPositionPct, 4),
+            'effective_position_percent'=>round($effectivePerPositionPct, 4),
+            'portfolio_exposure_percent'=>round($exposurePct, 4),
+            'portfolio_exposure_limit_percent'=>$portfolioMaxPct,
+            'exposure_capacity'=>$capacity,
+            'max_positions'=>$maxPositions,
+        ];
+        if ($capacity <= 0) return ['allowed'=>false,'reason'=>'portfolio_exposure_limit_reached'] + $context;
 
-        $perPositionPct = min((float) $settings['position_percent'], (float) $settings['max_position_percent']);
-        $desired = $portfolio * ($perPositionPct / 100.0);
+        $desired = $portfolio * ($effectivePerPositionPct / 100.0);
         $perPositionCap = $portfolio * ((float) $settings['max_position_percent'] / 100.0);
         $minimum = max(0.0, (float) ($market['min_order_quote'] ?? 0));
         $minimumWithMargin = $minimum > 0 ? $minimum * 1.03 : 0.0;
         $budget = min(max($desired, $minimumWithMargin), $perPositionCap, $capacity, $quoteAvailable * 0.985);
         if ($minimum > 0 && $budget + 0.000001 < $minimum) {
-            return ['allowed'=>false,'reason'=>'minimum_order_exceeds_budget','minimum_order'=>$minimum,'budget'=>$budget,'available_quote'=>$quoteAvailable];
+            return ['allowed'=>false,'reason'=>'minimum_order_exceeds_budget','minimum_order'=>$minimum,'budget'=>$budget,'available_quote'=>$quoteAvailable] + $context;
         }
-        if ($budget <= 0) return ['allowed'=>false,'reason'=>'insufficient_balance'];
-        return ['allowed'=>true,'reason'=>'ok','budget'=>$budget,'portfolio'=>$portfolio,'exposure'=>$exposure,'portfolio_exposure_limit_percent'=>$portfolioMaxPct];
+        if ($budget <= 0) return ['allowed'=>false,'reason'=>'insufficient_balance'] + $context;
+        return ['allowed'=>true,'reason'=>'ok','budget'=>$budget,'portfolio'=>$portfolio,'exposure'=>$exposure] + $context;
     }
 
     private function submitEntry(PDO $pdo, array $market, float $amount, float $priceCeiling, array $settings, ?string $identifier = null, string $source = 'autotrade_nobitex_portfolio'): array
@@ -337,6 +375,7 @@ final class NobitexPortfolioEngine
     private function reconcile(PDO $pdo, NobitexClient $client, array $settings): void
     {
         $rows = $pdo->query("SELECT * FROM nobitex_autotrade_positions WHERE status IN ('pending_open','pending_close') ORDER BY id ASC LIMIT 30")->fetchAll();
+        $timeoutSeconds = $this->intSetting($pdo, 'nobitex_pending_timeout_seconds', 60, 30, 300);
         foreach ($rows as $p) {
             $remoteId = (string) ($p['status'] === 'pending_open' ? ($p['entry_exchange_order_id'] ?? '') : ($p['exit_exchange_order_id'] ?? ''));
             $identifier = (string) ($p['status'] === 'pending_open' ? ($p['entry_identifier'] ?? '') : ($p['exit_identifier'] ?? ''));
@@ -350,8 +389,37 @@ final class NobitexPortfolioEngine
             if ($order === []) continue;
             $state = strtolower(trim((string) ($order['status'] ?? '')));
             $matched = $this->fillAmount($order, 0.0);
+
+            $startedAt = (string) ($p['status'] === 'pending_close' ? ($p['updated_at'] ?? '') : ($p['created_at'] ?? $p['updated_at'] ?? ''));
+            $startedTs = $startedAt !== '' ? strtotime($startedAt . ' UTC') : false;
+            $pendingAge = $startedTs === false ? 0 : max(0, time() - $startedTs);
+            $terminal = $this->isDone($order) || in_array($state, ['canceled','cancelled','rejected','failed'], true);
+            if (!$terminal && $pendingAge >= $timeoutSeconds) {
+                try {
+                    if ($remoteId !== '') $client->cancelOrder($remoteId);
+                    else $client->cancelOrder(null, $identifier);
+                    $this->event($pdo, 'warning', 'nobitex.pending.timeout_cancel_requested', [
+                        'position_id'=>$p['id'],
+                        'status'=>$p['status'],
+                        'age_seconds'=>$pendingAge,
+                        'timeout_seconds'=>$timeoutSeconds,
+                    ]);
+                    $response = $remoteId !== '' ? $client->orderStatus($remoteId) : $client->orderStatus(null, $identifier);
+                    $order = $this->orders->normalizedOrder($response);
+                    $state = strtolower(trim((string) ($order['status'] ?? '')));
+                    $matched = $this->fillAmount($order, 0.0);
+                } catch (\Throwable $e) {
+                    $this->event($pdo, 'warning', 'nobitex.pending.timeout_cancel_failed', [
+                        'position_id'=>$p['id'],
+                        'status'=>$p['status'],
+                        'error'=>$e->getMessage(),
+                    ]);
+                    continue;
+                }
+            }
+
             if ($p['status'] === 'pending_open') {
-                if ($this->isDone($order) || (in_array($state,['canceled','cancelled'],true) && $matched > 0)) {
+                if ($this->isDone($order) || (in_array($state,['canceled','cancelled','rejected','failed'],true) && $matched > 0)) {
                     $price = $this->fillPrice($order, (float) $p['entry_price']);
                     $amount = $matched > 0 ? $matched : (float) $p['amount'];
                     $stmt = $pdo->prepare("UPDATE nobitex_autotrade_positions SET status='open',amount=:a,entry_price=:e,stop_loss=:sl,take_profit=:tp,entry_exchange_order_id=:x,opened_at=UTC_TIMESTAMP(),updated_at=UTC_TIMESTAMP() WHERE id=:id");
@@ -362,7 +430,7 @@ final class NobitexPortfolioEngine
             } else {
                 if ($this->isDone($order)) {
                     $this->closePosition($pdo, (int) $p['id'], $order, (float) $p['entry_price']);
-                } elseif (in_array($state,['canceled','cancelled'],true)) {
+                } elseif (in_array($state,['canceled','cancelled','rejected','failed'],true)) {
                     if ($matched > 0) $this->closePosition($pdo, (int) $p['id'], $order, (float) $p['entry_price'], true);
                     else $pdo->prepare("UPDATE nobitex_autotrade_positions SET status='open',exit_identifier=NULL,exit_order_local_id=NULL,exit_exchange_order_id=NULL,updated_at=UTC_TIMESTAMP() WHERE id=:id")->execute([':id'=>$p['id']]);
                 }
@@ -431,10 +499,13 @@ final class NobitexPortfolioEngine
         return $pdo->query("SELECT * FROM nobitex_autotrade_positions WHERE status IN ('pending_open','open','pending_close') ORDER BY id ASC LIMIT 30")->fetchAll();
     }
 
-    private function hasPendingPosition(array $positions): bool
+    private function pendingPositionCount(array $positions): int
     {
-        foreach ($positions as $p) if (in_array((string) $p['status'], ['pending_open','pending_close'], true)) return true;
-        return false;
+        $count = 0;
+        foreach ($positions as $p) {
+            if (in_array((string) ($p['status'] ?? ''), ['pending_open','pending_close'], true)) $count++;
+        }
+        return $count;
     }
 
     private function managedExposure(array $positions, string $quoteAsset): float
