@@ -14,6 +14,8 @@ use Trade\Database;
  * Breakout and Mean Reversion entries. Learning is reduction-only: it may keep
  * or reduce the next entry size for the same strategy/regime profile, and may
  * block a persistently bad mature profile. It can never enlarge configured risk.
+ * Adaptive Edge Calibration is applied on top of that profile-specific history
+ * and may only tighten the entry margin; it can never relax the raw signal gate.
  */
 final class NobitexStrategyLearning
 {
@@ -133,6 +135,7 @@ final class NobitexStrategyLearning
             'model'=>self::MODEL,
             'learning_source'=>'realized_fee_aware_trade_returns',
             'risk_policy'=>'reduction_only_never_increase',
+            'edge_calibration_model'=>NobitexEdgeCalibration::MODEL,
             'minimum_learning_trades'=>5,
             'minimum_block_trades'=>12,
             'strategies'=>$strategySummary,
@@ -165,7 +168,7 @@ final class NobitexStrategyLearning
                 'regime'=>$regime,
                 'size_multiplier'=>1.0,
                 'stats'=>null,
-            ];
+            ] + self::calibrationContext($signal, null);
         }
 
         $snapshot = self::$runtimeSnapshot ?? $this->activateRuntime($pdo);
@@ -185,7 +188,7 @@ final class NobitexStrategyLearning
                 'regime'=>$regime,
                 'size_multiplier'=>1.0,
                 'stats'=>$stats,
-            ];
+            ] + self::calibrationContext($signal, $stats);
         }
 
         if ((bool)($stats['blocked'] ?? false)) {
@@ -196,19 +199,39 @@ final class NobitexStrategyLearning
                 'regime'=>$regime,
                 'size_multiplier'=>(float)($stats['size_multiplier'] ?? 0.55),
                 'stats'=>$stats,
-            ];
+            ] + self::calibrationContext($signal, $stats);
+        }
+
+        $calibration = self::calibrationContext($signal, $stats);
+        if ((float)$calibration['raw_tradable_net_edge_percent'] > 0.0
+            && (float)$calibration['calibrated_tradable_net_edge_percent'] <= 0.0) {
+            return [
+                'allowed'=>false,
+                'reason'=>'edge_calibration_below_required_margin',
+                'strategy_key'=>$strategy,
+                'regime'=>$regime,
+                'size_multiplier'=>max(0.55, min(1.0, (float)($stats['size_multiplier'] ?? 1.0))),
+                'stats'=>$stats,
+            ] + $calibration;
+        }
+
+        $learningReason = (float)($stats['size_multiplier'] ?? 1.0) < 0.9999
+            ? 'strategy_learning_reduced_size'
+            : 'strategy_learning_neutral';
+        if ((float)$calibration['edge_calibration_penalty_percent'] > 0.000001) {
+            $learningReason = $learningReason === 'strategy_learning_reduced_size'
+                ? 'strategy_learning_reduced_size_with_edge_calibration'
+                : 'edge_calibration_extra_margin_applied';
         }
 
         return [
             'allowed'=>true,
-            'reason'=>(float)($stats['size_multiplier'] ?? 1.0) < 0.9999
-                ? 'strategy_learning_reduced_size'
-                : 'strategy_learning_neutral',
+            'reason'=>$learningReason,
             'strategy_key'=>$strategy,
             'regime'=>$regime,
             'size_multiplier'=>max(0.55, min(1.0, (float)($stats['size_multiplier'] ?? 1.0))),
             'stats'=>$stats,
-        ];
+        ] + $calibration;
     }
 
     public static function strategyKey(array $signal): string
@@ -221,6 +244,27 @@ final class NobitexStrategyLearning
     {
         $regime = trim((string)($signal['market_regime']['regime'] ?? $signal['regime'] ?? ''));
         return $regime !== '' ? $regime : 'unknown';
+    }
+
+    /** @return array<string,mixed> */
+    private static function calibrationContext(array $signal, ?array $profile): array
+    {
+        $rawEdge = is_numeric($signal['tradable_net_edge_percent'] ?? null)
+            ? (float)$signal['tradable_net_edge_percent']
+            : 0.0;
+        $baseBuffer = is_numeric($signal['required_edge_buffer_percent'] ?? null)
+            ? max(0.0, (float)$signal['required_edge_buffer_percent'])
+            : 0.0;
+        $penalty = $profile === null ? 0.0 : NobitexEdgeCalibration::penaltyFromProfile($profile);
+
+        return [
+            'edge_calibration_model'=>NobitexEdgeCalibration::MODEL,
+            'edge_calibration_penalty_percent'=>round($penalty, 4),
+            'raw_tradable_net_edge_percent'=>round($rawEdge, 4),
+            'calibrated_tradable_net_edge_percent'=>round($rawEdge - $penalty, 4),
+            'base_required_edge_buffer_percent'=>round($baseBuffer, 4),
+            'calibrated_required_edge_buffer_percent'=>round($baseBuffer + $penalty, 4),
+        ];
     }
 
     /**
