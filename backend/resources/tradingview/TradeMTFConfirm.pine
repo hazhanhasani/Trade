@@ -3,6 +3,9 @@ indicator("Trade MTF Confirm v1.0", overlay=true, max_labels_count=100)
 
 // Designed for a 1-minute chart. Higher-timeframe states use the last confirmed
 // HTF bar with lookahead_on + [1], avoiding future leakage/repainting.
+if barstate.isfirst and timeframe.in_seconds() > 60
+    runtime.error("Trade MTF Confirm must run on a 1-minute chart for the intended timing model.")
+
 minVotes      = input.int(3, "Minimum confirmations", minval=2, maxval=4)
 heartbeatBars = input.int(2, "Webhook heartbeat bars", minval=1, maxval=10)
 rsiLow        = input.float(45.0, "Bull RSI floor", minval=20, maxval=60)
@@ -64,5 +67,5 @@ if shouldSend
 if action == "hold"
     lastSentAction := "hold"
 
-plotchar(bullVotes, "Bull confirmations", "", location=location.top, display=display.data_window)
-plotchar(bearVotes, "Bear confirmations", "", location=location.top, display=display.data_window)
+plot(bullVotes, "Bull confirmations", display=display.data_window)
+plot(bearVotes, "Bear confirmations", display=display.data_window)
