@@ -20,29 +20,38 @@ function tradeAdminNav(string $active, string $version): void
     ];
     ?>
     <style id="trade-mobile-overflow-guard">
-    @media (max-width: 720px) {
+    html, body {
+        max-width: 100% !important;
+        overflow-x: clip !important;
+    }
+    .admin-shell,
+    .admin-shell > * {
+        max-width: 100% !important;
+        min-width: 0 !important;
+    }
+    @media (max-width: 1100px) {
         html, body {
             width: 100% !important;
             max-width: 100% !important;
-            overflow-x: hidden !important;
+            overflow-x: clip !important;
         }
         .admin-shell {
             width: 100% !important;
             max-width: 100% !important;
-            overflow-x: hidden !important;
-            padding: 10px !important;
+            min-width: 0 !important;
+            overflow-x: clip !important;
         }
         .admin-topbar {
-            position: static !important;
             width: 100% !important;
             max-width: 100% !important;
-            margin: 0 0 14px !important;
-            padding: 10px !important;
+            margin-left: 0 !important;
+            margin-right: 0 !important;
         }
         .admin-toprow,
         .admin-brand,
         .admin-nav,
         .page-head,
+        .hero-panel,
         .panel-grid,
         .panel,
         .stat-grid,
@@ -57,28 +66,11 @@ function tradeAdminNav(string $active, string $version): void
         form,
         fieldset,
         details {
-            width: 100% !important;
             max-width: 100% !important;
             min-width: 0 !important;
-        }
-        .admin-nav {
-            display: grid !important;
-            grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-            gap: 6px !important;
-            overflow: hidden !important;
-        }
-        .admin-nav a,
-        .subnav a,
-        .btn,
-        .badge,
-        .hero-pill {
-            max-width: 100% !important;
-            min-width: 0 !important;
-            white-space: normal !important;
-            overflow-wrap: anywhere !important;
-            word-break: break-word !important;
         }
         .table-wrap {
+            width: 100% !important;
             overflow-x: hidden !important;
             overflow-y: visible !important;
             -webkit-overflow-scrolling: auto !important;
@@ -90,16 +82,25 @@ function tradeAdminNav(string $active, string $version): void
             min-width: 0 !important;
             table-layout: fixed !important;
         }
-        thead, tbody, tr {
+        thead, tbody, tr, th, td {
             max-width: 100% !important;
             min-width: 0 !important;
         }
         th, td {
-            width: auto !important;
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+            word-break: break-word !important;
+        }
+        .admin-nav a,
+        .subnav a,
+        .btn,
+        .badge,
+        .hero-pill,
+        .notice,
+        .metric,
+        .stat-card {
+            max-width: 100% !important;
             min-width: 0 !important;
-            max-width: none !important;
-            padding: 7px 4px !important;
-            font-size: 9px !important;
             white-space: normal !important;
             overflow-wrap: anywhere !important;
             word-break: break-word !important;
@@ -108,15 +109,24 @@ function tradeAdminNav(string $active, string $version): void
             max-width: 100% !important;
             min-width: 0 !important;
         }
-        pre, code, .code {
+        pre, code, .code, .mono {
             white-space: pre-wrap !important;
             word-break: break-all !important;
             overflow-x: hidden !important;
         }
-        .page-head *, .panel *, .stat-card *, .metric *, .notice *, .field * {
-            max-width: 100%;
-            overflow-wrap: anywhere;
+    }
+    @media (max-width: 720px) {
+        .admin-topbar {
+            position: static !important;
+            margin: 0 0 14px !important;
         }
+        .admin-nav {
+            display: grid !important;
+            grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+            gap: 6px !important;
+            overflow: hidden !important;
+        }
+        .admin-nav a { width: 100% !important; }
     }
     @media (max-width: 380px) {
         .admin-nav,
