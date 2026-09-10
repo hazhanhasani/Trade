@@ -5,58 +5,41 @@ declare(strict_types=1);
 namespace Trade\Trading;
 
 /**
- * Exchange-native multi-timeframe profitability engine for Nobitex.
+ * Profit-first, score-free Nobitex signal engine.
  *
- * Decisions are NOT gated by an arbitrary signal score. The engine estimates
- * the expected directional move from 1m/5m/15m trend, momentum, MACD, RSI,
- * order-book flow and volatility, then subtracts a conservative round-trip
- * execution-cost estimate (fees + spread + slippage/noise buffer).
+ * A market is bought when the expected move remains positive after a
+ * conservative estimate of round-trip fees, spread, slippage/noise and model
+ * uncertainty. There is no point score, voting threshold or top-N gate.
  *
- * The legacy `score` field is kept at zero only because older DB/UI code still
- * expects that column. It is not used to decide BUY or SELL.
+ * `score` is returned as zero only for legacy database compatibility.
  */
 final class NobitexInternalSignalEngine
 {
-    private const BASE_ROUNDTRIP_COST_PERCENT = 0.55;
-    private const MIN_EXPECTED_NET_EDGE_PERCENT = 0.18;
-    private const MAX_ENTRY_SPREAD_PERCENT = 0.85;
+    /**
+     * Conservative reserve inherited from the previous production model.
+     * This is deliberately an execution-cost reserve, not a claim about the
+     * user's exact Nobitex fee tier.
+     */
+    private const BASE_ROUNDTRIP_EXECUTION_RESERVE_PERCENT = 0.55;
+    private const MODEL_UNCERTAINTY_RESERVE_PERCENT = 0.15;
+    private const MAX_EXECUTABLE_SPREAD_PERCENT = 1.50;
 
     public function __construct(private readonly SignalEngine $base = new SignalEngine()) {}
 
     public function analyze(array $market, array $minutePrices, int $legacyThreshold = 60): array
     {
-        // $legacyThreshold is intentionally ignored for trade decisions. It is
-        // retained only to keep the existing scanner method signature stable.
+        unset($legacyThreshold);
+
         $minute = $this->clean($minutePrices, 480);
         $five = $this->aggregate($minute, 5);
         $fifteen = $this->aggregate($minute, 15);
 
         if (count($minute) < 60 || count($five) < 30 || count($fifteen) < 26) {
-            return [
-                'ready'=>false,
-                'score'=>0,
-                'confidence'=>0,
-                'action'=>'hold',
-                'reason'=>'insufficient_internal_mtf_history',
-                'decision_model'=>'expected_net_edge',
-                'expected_gross_move_percent'=>0.0,
-                'estimated_roundtrip_cost_percent'=>0.0,
-                'expected_net_edge_percent'=>0.0,
-                'minimum_net_edge_percent'=>self::MIN_EXPECTED_NET_EDGE_PERCENT,
-                'reasons'=>[],
-                'source'=>'nobitex_internal_profit_edge',
-                'timeframes'=>[
-                    '1m'=>['samples'=>count($minute)],
-                    '5m'=>['samples'=>count($five)],
-                    '15m'=>['samples'=>count($fifteen)],
-                ],
-                'indicators'=>['samples'=>count($minute)],
-                'tradingview'=>['enabled'=>false,'used'=>false,'required'=>false],
-            ];
+            return $this->notReady($minute, $five, $fifteen, 'insufficient_internal_mtf_history');
         }
 
-        // SignalEngine is used only as an indicator calculator here. Its score
-        // and BUY/SELL threshold are not consumed by this engine.
+        // SignalEngine is used only to calculate indicators. Its score/action
+        // thresholds are deliberately ignored.
         $one = $this->base->analyze($market + ['prices'=>$minute], 60);
         $fiveSignal = $this->base->analyze($market + ['prices'=>$five], 60);
         $fifteenSignal = $this->base->analyze($market + ['prices'=>$fifteen], 60);
@@ -68,6 +51,8 @@ final class NobitexInternalSignalEngine
         $spread = max(0.0, (float) ($market['spread_percent'] ?? 0.0));
         $imbalance = $this->clamp((float) ($market['orderbook_imbalance'] ?? 0.0), -1.0, 1.0);
 
+        // Multi-timeframe directional estimate. Each feature remains continuous;
+        // there are no "four out of seven votes" or synthetic scores.
         $m1 = $this->clamp((float) ($i1['momentum_5_percent'] ?? 0.0), -2.0, 2.0);
         $m5 = $this->clamp((float) ($i5['momentum_5_percent'] ?? 0.0), -4.0, 4.0);
         $m15 = $this->clamp((float) ($i15['momentum_5_percent'] ?? 0.0), -6.0, 6.0);
@@ -97,6 +82,7 @@ final class NobitexInternalSignalEngine
         if ($rsi1 <= 22.0 && $m1 < 0.0) $rsiPenalty += 0.20;
 
         $flowBias = $imbalance * 0.35;
+
         $gross = ($momentum * 0.52)
             + ($trend * 0.34)
             + ($macdPressure * 0.75)
@@ -107,65 +93,53 @@ final class NobitexInternalSignalEngine
         $vol1 = max(0.0, (float) ($i1['volatility_percent'] ?? 0.0));
         $vol5 = max(0.0, (float) ($i5['volatility_percent'] ?? 0.0));
         $volatility = ($vol1 * 0.65) + ($vol5 * 0.35);
-        $volatilityBuffer = min(0.60, $volatility * 0.35);
+
+        // Cost model: a trade is "profitable" only after these costs are
+        // subtracted. The uncertainty reserve is included inside cost so there
+        // is no separate arbitrary minimum-score/minimum-edge gate afterward.
         $spreadCost = min(1.50, $spread * 1.25);
-        $estimatedCost = self::BASE_ROUNDTRIP_COST_PERCENT + $spreadCost + $volatilityBuffer;
+        $slippageNoiseReserve = min(0.60, $volatility * 0.35);
+        $estimatedCost = self::BASE_ROUNDTRIP_EXECUTION_RESERVE_PERCENT
+            + $spreadCost
+            + $slippageNoiseReserve
+            + self::MODEL_UNCERTAINTY_RESERVE_PERCENT;
+
         $netEdge = $gross - $estimatedCost;
+        $expectedNetProfit = $netEdge > 0.0;
 
         $ready = (bool) ($one['ready'] ?? false)
             && (bool) ($fiveSignal['ready'] ?? false)
             && (bool) ($fifteenSignal['ready'] ?? false)
-            && $spread <= 1.5;
+            && $spread <= self::MAX_EXECUTABLE_SPREAD_PERCENT;
 
-        $bullishVotes = 0;
-        if ($m1 > 0.05) $bullishVotes++;
-        if ($m5 > 0.10) $bullishVotes++;
-        if ($e5 > 0.0) $bullishVotes++;
-        if ($e15 > -0.05) $bullishVotes++;
-        if ($h5 >= 0.0) $bullishVotes++;
-        if ($trendConsistency >= 0.50) $bullishVotes++;
-        if ($imbalance > -0.20) $bullishVotes++;
+        // Entry is purely economic: after full analysis and conservative costs,
+        // a positive expected net result is eligible. Risk/capital checks remain
+        // separate in PortfolioEngine.
+        $buyGate = $ready && $expectedNetProfit;
 
-        $bearishVotes = 0;
-        if ($m1 < -0.08) $bearishVotes++;
-        if ($m5 < -0.12) $bearishVotes++;
-        if ($e5 < 0.0) $bearishVotes++;
-        if ($e15 < -0.05) $bearishVotes++;
-        if ($h5 < 0.0) $bearishVotes++;
-        if ($trendConsistency < 0.44) $bearishVotes++;
-        if ($imbalance < -0.18) $bearishVotes++;
-
-        $buyGate = $ready
-            && $spread <= self::MAX_ENTRY_SPREAD_PERCENT
-            && $netEdge >= self::MIN_EXPECTED_NET_EDGE_PERCENT
-            && $bullishVotes >= 4
-            && $m1 > -0.05
-            && $rsi1 < 78.0;
-
-        // Strategy exits are based on a deteriorating expected move, not a
-        // negative score. Hard stop-loss/take-profit remain independent.
-        $sellGate = $ready
-            && $gross <= -0.15
-            && $bearishVotes >= 4;
+        // Spot exits cannot short. A sell signal means the expected move from
+        // here has turned materially negative relative to one-way exit friction.
+        $estimatedExitCost = ($estimatedCost - self::MODEL_UNCERTAINTY_RESERVE_PERCENT) * 0.50;
+        $sellGate = $ready && $gross < -max(0.05, $estimatedExitCost);
 
         $action = 'hold';
-        $reason = 'expected_edge_not_positive_enough';
+        $reason = 'expected_net_profit_not_positive';
         if ($buyGate) {
             $action = 'buy';
-            $reason = 'positive_expected_net_edge';
+            $reason = 'positive_expected_net_profit_after_costs';
         } elseif ($sellGate) {
             $action = 'sell';
-            $reason = 'expected_edge_reversal';
+            $reason = 'expected_forward_move_negative_after_exit_cost';
         } elseif (!$ready) {
-            $reason = 'market_quality_not_ready';
-        } elseif ($spread > self::MAX_ENTRY_SPREAD_PERCENT) {
-            $reason = 'spread_cost_too_high';
-        } elseif ($netEdge > 0.0) {
-            $reason = 'positive_edge_below_cost_safety_margin';
+            $reason = $spread > self::MAX_EXECUTABLE_SPREAD_PERCENT
+                ? 'spread_not_executable'
+                : 'market_quality_not_ready';
         }
 
+        // Confidence is descriptive only; it never gates an order.
+        $edgeToCost = $estimatedCost > 0.0 ? $netEdge / $estimatedCost : 0.0;
         $confidence = $ready
-            ? min(100, max(0, (int) round((abs($netEdge) * 45.0) + (max($bullishVotes, $bearishVotes) * 5.0))))
+            ? min(100, max(0, (int) round(50.0 + ($edgeToCost * 35.0))))
             : 0;
 
         $reasons = [];
@@ -179,17 +153,24 @@ final class NobitexInternalSignalEngine
             'ready'=>$ready,
             'score'=>0,
             'confidence'=>$confidence,
+            'confidence_is_gate'=>false,
             'action'=>$action,
             'reason'=>$reason,
-            'decision_model'=>'expected_net_edge',
+            'decision_model'=>'positive_expected_net_profit',
+            'expected_net_profit'=>$ready && $expectedNetProfit,
             'expected_gross_move_percent'=>round($gross, 4),
             'estimated_roundtrip_cost_percent'=>round($estimatedCost, 4),
+            'estimated_exit_cost_percent'=>round($estimatedExitCost, 4),
             'expected_net_edge_percent'=>round($netEdge, 4),
-            'minimum_net_edge_percent'=>self::MIN_EXPECTED_NET_EDGE_PERCENT,
-            'bullish_confirmations'=>$bullishVotes,
-            'bearish_confirmations'=>$bearishVotes,
+            'minimum_net_edge_percent'=>0.0,
+            'cost_model'=>[
+                'base_roundtrip_execution_reserve_percent'=>self::BASE_ROUNDTRIP_EXECUTION_RESERVE_PERCENT,
+                'spread_cost_percent'=>round($spreadCost, 4),
+                'slippage_noise_reserve_percent'=>round($slippageNoiseReserve, 4),
+                'model_uncertainty_reserve_percent'=>self::MODEL_UNCERTAINTY_RESERVE_PERCENT,
+            ],
             'reasons'=>array_values(array_unique($reasons)),
-            'source'=>'nobitex_internal_profit_edge',
+            'source'=>'nobitex_internal_profit_first_full_universe',
             'timeframes'=>[
                 '1m'=>[
                     'momentum_percent'=>round($m1,4),
@@ -222,6 +203,35 @@ final class NobitexInternalSignalEngine
                 'spread_percent'=>round($spread,6),
                 'rsi_penalty_percent'=>round($rsiPenalty,4),
             ],
+            'tradingview'=>['enabled'=>false,'used'=>false,'required'=>false],
+        ];
+    }
+
+    private function notReady(array $minute, array $five, array $fifteen, string $reason): array
+    {
+        return [
+            'ready'=>false,
+            'score'=>0,
+            'confidence'=>0,
+            'confidence_is_gate'=>false,
+            'action'=>'hold',
+            'reason'=>$reason,
+            'decision_model'=>'positive_expected_net_profit',
+            'expected_net_profit'=>false,
+            'expected_gross_move_percent'=>0.0,
+            'estimated_roundtrip_cost_percent'=>0.0,
+            'estimated_exit_cost_percent'=>0.0,
+            'expected_net_edge_percent'=>0.0,
+            'minimum_net_edge_percent'=>0.0,
+            'cost_model'=>[],
+            'reasons'=>[],
+            'source'=>'nobitex_internal_profit_first_full_universe',
+            'timeframes'=>[
+                '1m'=>['samples'=>count($minute)],
+                '5m'=>['samples'=>count($five)],
+                '15m'=>['samples'=>count($fifteen)],
+            ],
+            'indicators'=>['samples'=>count($minute)],
             'tradingview'=>['enabled'=>false,'used'=>false,'required'=>false],
         ];
     }
