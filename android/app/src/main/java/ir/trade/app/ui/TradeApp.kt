@@ -61,6 +61,13 @@ data class ExchangeUiState(
     val bot: Boolean = false,
     val live: Boolean = false,
     val activePositions: Int = 0,
+    val maxPositions: Int = 0,
+    val remainingPositionSlots: Int = 0,
+    val effectivePositionPercent: Double = 0.0,
+    val exposureLimitPercent: Double = 0.0,
+    val pendingOrders: Int = 0,
+    val maxPendingOrders: Int = 0,
+    val pendingTimeoutSeconds: Int = 0,
     val pnlToday: Double = 0.0,
     val pnlTotal: Double = 0.0,
     val winRate: Double = 0.0,
@@ -183,11 +190,19 @@ private fun DashboardShell(prefs: TradePreferences, onDisconnect: () -> Unit) {
     fun parseExchangeState(data: JSONObject, name: String): ExchangeUiState {
         val x = data.optJSONObject("exchanges")?.optJSONObject(name) ?: JSONObject()
         val performance = x.optJSONObject("performance") ?: JSONObject()
+        val capacity = x.optJSONObject("portfolio_capacity") ?: JSONObject()
         return ExchangeUiState(
             credentials = x.optBoolean("credentials_configured"),
             bot = x.optBoolean("bot_enabled"),
             live = x.optBoolean("live_execution_enabled"),
             activePositions = x.optInt("active_position_count", 0),
+            maxPositions = capacity.optInt("max_positions", 0),
+            remainingPositionSlots = capacity.optInt("remaining_position_slots", 0),
+            effectivePositionPercent = capacity.optDouble("effective_position_percent", 0.0),
+            exposureLimitPercent = capacity.optDouble("portfolio_exposure_limit_percent", 0.0),
+            pendingOrders = capacity.optInt("pending_orders", 0),
+            maxPendingOrders = capacity.optInt("max_pending_orders", 0),
+            pendingTimeoutSeconds = capacity.optInt("pending_timeout_seconds", 0),
             pnlToday = performance.optDouble("today_realized_pnl", 0.0),
             pnlTotal = performance.optDouble("total_realized_pnl", 0.0),
             winRate = performance.optDouble("win_rate_percent", 0.0),
@@ -550,7 +565,7 @@ private fun HomeScreen(
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         DarkChip(exchangeTitle)
-                        DarkChip("${current.activePositions} پوزیشن")
+                        DarkChip(if (current.maxPositions > 0) "${current.activePositions}/${current.maxPositions} پوزیشن" else "${current.activePositions} پوزیشن")
                         DarkChip(if (killSwitch) "متوقف" else "Live")
                     }
                 }
@@ -558,9 +573,24 @@ private fun HomeScreen(
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                MetricCard("پوزیشن", current.activePositions.toString(), true, Modifier.weight(1f))
+                MetricCard("پوزیشن", if (current.maxPositions > 0) "${current.activePositions}/${current.maxPositions}" else current.activePositions.toString(), true, Modifier.weight(1f))
                 MetricCard("Win Rate", "${formatOne(current.winRate)}%", current.winRate >= 50.0, Modifier.weight(1f))
                 MetricCard("Bot", if (current.bot) "ON" else "OFF", current.bot, Modifier.weight(1f))
+            }
+        }
+        if (exchangeTitle == "Nobitex" && current.maxPositions > 0) {
+            item {
+                Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = PrimarySoft)) {
+                    Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                        Text("ظرفیت هوشمند پرتفوی", fontWeight = FontWeight.Bold)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CapacityValue("ورود جدید", "${formatOne(current.effectivePositionPercent)}%", Modifier.weight(1f))
+                            CapacityValue("Exposure", "${formatOne(current.exposureLimitPercent)}%", Modifier.weight(1f))
+                            CapacityValue("Pending", "${current.pendingOrders}/${current.maxPendingOrders}", Modifier.weight(1f))
+                        }
+                        Text("${current.remainingPositionSlots} اسلات باقی‌مانده • Timeout سفارش Pending: ${current.pendingTimeoutSeconds} ثانیه", color = Muted, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
             }
         }
         item {
@@ -592,6 +622,16 @@ private fun HomeScreen(
             }
         }
         item { InsightCard("آخرین چرخه", lastRun) }
+    }
+}
+
+@Composable
+private fun CapacityValue(title: String, value: String, modifier: Modifier = Modifier) {
+    Surface(modifier = modifier, shape = RoundedCornerShape(14.dp), color = Color.White) {
+        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(title, color = Muted, style = MaterialTheme.typography.labelSmall)
+            Text(value, color = Primary, fontWeight = FontWeight.ExtraBold)
+        }
     }
 }
 
@@ -727,9 +767,24 @@ private fun BotScreen(
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                MetricCard("پوزیشن", current.activePositions.toString(), true, Modifier.weight(1f))
+                MetricCard("پوزیشن", if (current.maxPositions > 0) "${current.activePositions}/${current.maxPositions}" else current.activePositions.toString(), true, Modifier.weight(1f))
                 MetricCard("Win Rate", "${formatOne(current.winRate)}%", current.winRate >= 50, Modifier.weight(1f))
                 MetricCard("PnL ${current.quote}", formatCompact(current.pnlTotal), current.pnlTotal >= 0, Modifier.weight(1f))
+            }
+        }
+        if (name == "Nobitex" && current.maxPositions > 0) {
+            item {
+                Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = PrimarySoft)) {
+                    Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                        Text("مدیریت ظرفیت خودکار", fontWeight = FontWeight.Bold)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CapacityValue("ورود", "${formatOne(current.effectivePositionPercent)}%", Modifier.weight(1f))
+                            CapacityValue("Exposure", "${formatOne(current.exposureLimitPercent)}%", Modifier.weight(1f))
+                            CapacityValue("Pending", "${current.pendingOrders}/${current.maxPendingOrders}", Modifier.weight(1f))
+                        }
+                        Text("${current.remainingPositionSlots} اسلات خالی • Watchdog: ${current.pendingTimeoutSeconds} ثانیه", color = Muted, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
             }
         }
         item { InsightCard("آخرین تصمیم $name", current.lastDecision) }
@@ -756,7 +811,7 @@ private fun BotScreen(
                     Text("سلامت و صرافی‌ها", fontWeight = FontWeight.Bold)
                     Text(cronText, color = Muted)
                     HorizontalDivider(color = Stroke)
-                    Text("Nobitex • Bot ${onOff(nobitex.bot)} • Live ${onOff(nobitex.live)} • ${nobitex.activePositions} پوزیشن", color = Muted)
+                    Text("Nobitex • Bot ${onOff(nobitex.bot)} • Live ${onOff(nobitex.live)} • ${nobitex.activePositions}${if (nobitex.maxPositions > 0) "/${nobitex.maxPositions}" else ""} پوزیشن • Pending ${nobitex.pendingOrders}/${nobitex.maxPendingOrders}", color = Muted)
                     Text("Bitpin • Bot ${onOff(bitpin.bot)} • Live ${onOff(bitpin.live)} • ${bitpin.activePositions} پوزیشن", color = Muted)
                     HorizontalDivider(color = Stroke)
                     Text("آخرین چرخه: $lastRun", color = Muted, style = MaterialTheme.typography.bodySmall)
@@ -792,7 +847,7 @@ private fun SettingsScreen(
             Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = CardBg)) {
                 Column(Modifier.padding(17.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("آپدیت برنامه", fontWeight = FontWeight.Bold)
-                    Text("کانال رسمی Release مستقل از نسخه Backend بررسی می‌شود.", color = Muted)
+                    Text("نسخه اپ و Backend از یک Release هماهنگ بررسی و منتشر می‌شوند.", color = Muted)
                     Text(updateState.lastResult, color = if (updateState.lastResult.contains("خطا")) Danger else Success, fontWeight = FontWeight.SemiBold)
                     Button(onClick = onCheckUpdate, enabled = !updateState.checking, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
                         if (updateState.checking) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.Refresh, null)
@@ -1042,7 +1097,11 @@ private fun reasonFa(value: String): String = when (value) {
     "volatility_too_high" -> "نوسان کوتاه‌مدت زیاد است"
     "symbol_cooldown_active" -> "Cooldown بازار فعال است"
     "daily_loss_limit_reached" -> "حد زیان روزانه فعال شده"
+    "portfolio_exposure_limit_reached" -> "سقف سرمایه درگیر پرتفوی تکمیل است"
+    "pending_order_capacity_reached" -> "ظرفیت سفارش‌های Pending تکمیل است"
     "minimum_order_rounding" -> "مبلغ کمتر از حداقل سفارش است"
+    "minimum_order_exceeds_budget" -> "حداقل سفارش از بودجه این پوزیشن بیشتر است"
+    "already_positioned" -> "برای این دارایی پوزیشن فعال وجود دارد"
     "bot_disabled" -> "Bot خاموش است"
     "live_execution_disabled" -> "Live خاموش است"
     "kill_switch" -> "Kill Switch فعال است"
