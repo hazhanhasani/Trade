@@ -122,13 +122,13 @@ try{
     if($method==='POST'&&preg_match('#^/api/exchanges/(bitpin|nobitex)/run$#',$path,$m))respond(['ok'=>true,'data'=>$controller->runNow($m[1])]);
 
     if($method==='GET'&&$path==='/api/markets'){
-        $exchange=exchangeName();if($exchange==='nobitex'){$client=(new NobitexOrderService())->client();respond(['ok'=>true,'exchange'=>'nobitex','data'=>$client->allOrderBooks(),'unit_policy'=>['logical_irt'=>'TOMAN display','exchange_native'=>'RLS','rls_per_toman'=>10]]);}$service=new OrderService();$client=$service->client();$query=$_GET;unset($query['exchange']);respond(['ok'=>true,'exchange'=>'bitpin','data'=>$client->markets($query)]);
+        $exchange=exchangeName();if($exchange==='nobitex'){$client=(new NobitexOrderService())->client();respond(['ok'=>true,'exchange'=>'nobitex','data'=>NobitexDisplayMoney::orderBooksResponse($client->allOrderBooks()),'unit_policy'=>['logical_irt'=>'TOMAN display','exchange_native'=>'RLS','rls_per_toman'=>10],'time_iran'=>IranClock::nowPayload()]);}$service=new OrderService();$client=$service->client();$query=$_GET;unset($query['exchange']);respond(['ok'=>true,'exchange'=>'bitpin','data'=>$client->markets($query)]);
     }
     if($method==='GET'&&$path==='/api/wallets'){
         $exchange=exchangeName();if($exchange==='nobitex'){$client=(new NobitexOrderService())->client();respond(['ok'=>true,'exchange'=>'nobitex','data'=>NobitexDisplayMoney::walletResponse($client->wallets()),'time_iran'=>IranClock::nowPayload()]);}$service=new OrderService();$client=$service->client();$query=$_GET;unset($query['exchange']);$data=$client->wallets($query);$service->syncTokens($client);respond(['ok'=>true,'exchange'=>'bitpin','data'=>$data]);
     }
     if($method==='GET'&&$path==='/api/orders'){
-        $exchange=exchangeName();if($exchange==='nobitex'){$client=(new NobitexOrderService())->client();$query=$_GET;unset($query['exchange']);respond(['ok'=>true,'exchange'=>'nobitex','data'=>$client->orders($query),'time_iran'=>IranClock::nowPayload()]);}$service=new OrderService();$client=$service->client();$query=$_GET;unset($query['exchange']);$data=$client->orders($query);$service->syncTokens($client);respond(['ok'=>true,'exchange'=>$exchange,'data'=>$data]);
+        $exchange=exchangeName();if($exchange==='nobitex'){$client=(new NobitexOrderService())->client();$query=$_GET;unset($query['exchange']);respond(['ok'=>true,'exchange'=>'nobitex','data'=>NobitexDisplayMoney::ordersResponse($client->orders($query)),'time_iran'=>IranClock::nowPayload()]);}$service=new OrderService();$client=$service->client();$query=$_GET;unset($query['exchange']);$data=$client->orders($query);$service->syncTokens($client);respond(['ok'=>true,'exchange'=>$exchange,'data'=>$data]);
     }
     if($method==='POST'&&$path==='/api/orders'){
         $body=jsonBody();$exchange=exchangeName($body);unset($body['exchange']);$data=$exchange==='nobitex'?(new NobitexOrderService())->create($body,'android_or_api'):(new OrderService())->create($body,'android_or_api');respond(['ok'=>true,'exchange'=>$exchange,'data'=>$data,'time_iran'=>IranClock::nowPayload()],201);
