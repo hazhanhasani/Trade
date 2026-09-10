@@ -7,145 +7,211 @@ namespace Trade\Trading;
 use Trade\Exchange\NobitexClient;
 
 /**
- * Discovers the complete Nobitex spot universe every tick.
+ * Full-universe Nobitex spot scanner.
  *
- * Every IRT/USDT order book is pre-scanned each minute. Deep 1m/5m/15m analysis
- * is then applied to the most liquid executable markets. Final ranking is based
- * on expected net trading edge after estimated execution costs, not a signal
- * score threshold.
+ * No score, rank threshold or top-N shortlist is allowed to decide which asset
+ * gets analyzed. Every executable IRT/USDT market receives the same 1m/5m/15m
+ * profitability analysis. Sorting is only used to decide execution order when
+ * several markets are profitable at the same time.
  */
 final class NobitexUniverseScanner
 {
     private const QUOTES = ['IRT', 'USDT'];
     private const EXCLUDED_BASES = ['IRT','RLS','USDT','USDC','DAI','TUSD','BUSD','FDUSD'];
 
+    /** @var array<string,array> */
+    private static array $processSnapshotCache = [];
+    /** @var array<string,array> */
+    private static array $processUniverseCache = [];
+
     public function __construct(private readonly NobitexInternalSignalEngine $signals = new NobitexInternalSignalEngine()) {}
+
+    public static function resetProcessCache(): void
+    {
+        self::$processSnapshotCache = [];
+        self::$processUniverseCache = [];
+    }
 
     public function rankedCandidates(
         NobitexClient $client,
         string $preferredQuote = 'IRT',
-        int $limit = 20,
+        int $legacyLimit = 20,
         int $legacyThreshold = 60
     ): array {
+        // Both legacy arguments are intentionally ignored. They remain in the
+        // signature so old callers do not break while score/top-N behavior is gone.
+        unset($legacyLimit, $legacyThreshold);
+
         $preferredQuote = $this->quote($preferredQuote);
-        $limit = max(3, min(20, $limit));
+        $cacheKey = $preferredQuote;
+        if (isset(self::$processUniverseCache[$cacheKey])) {
+            return self::$processUniverseCache[$cacheKey];
+        }
+
         $all = $client->allOrderBooks();
         try { $stats = $client->stats(); } catch (\Throwable) { $stats = []; }
         try { $options = $client->options(); } catch (\Throwable) { $options = []; }
 
-        $markets = $this->marketsFromAll($all, $stats, $options, $preferredQuote);
+        $markets = $this->marketsFromAll($all, $stats, $options);
         $universeSize = count($markets);
-        usort($markets, static fn(array $a, array $b): int => ($b['pre_rank'] <=> $a['pre_rank']));
-        $markets = array_slice($markets, 0, $limit);
-        $deepScanSize = count($markets);
+        if ($markets === []) {
+            self::$processUniverseCache[$cacheKey] = [];
+            return [];
+        }
 
-        $ranked = [];
+        $symbols = array_values(array_map(
+            static fn(array $market): string => (string) $market['symbol'],
+            $markets
+        ));
+
+        // Concurrently request all histories. No market is dropped because it
+        // failed a liquidity score or was outside an arbitrary top-N limit.
+        $histories = $client->ohlcMany($symbols, '1', 480, 8);
+
+        $analyzed = [];
         foreach ($markets as $market) {
-            $minutePrices = $this->minuteHistory($client, (string) $market['symbol'], (float) $market['price']);
+            $symbol = (string) $market['symbol'];
+            $history = is_array($histories[$symbol] ?? null) ? $histories[$symbol] : [];
+            $minutePrices = $this->minutePricesFromResponse($history, (float) $market['price']);
             $market['prices'] = $minutePrices;
             $market['analysis_resolution'] = '1m';
             $market['universe_size'] = $universeSize;
-            $market['deep_scan_size'] = $deepScanSize;
-            $signal = $this->signals->analyze($market, $minutePrices, $legacyThreshold);
+            $market['deep_scan_size'] = $universeSize;
+            $market['full_universe_analysis'] = true;
+
+            $signal = $this->signals->analyze($market, $minutePrices);
             $market['signal'] = $signal;
+            $market['expected_gross_move_percent'] = round((float) ($signal['expected_gross_move_percent'] ?? 0.0), 4);
+            $market['estimated_roundtrip_cost_percent'] = round((float) ($signal['estimated_roundtrip_cost_percent'] ?? 0.0), 4);
+            $market['expected_net_edge_percent'] = round((float) ($signal['expected_net_edge_percent'] ?? 0.0), 4);
+            $market['expected_net_profit'] = (bool) ($signal['expected_net_profit'] ?? false);
 
-            $netEdge = (float) ($signal['expected_net_edge_percent'] ?? -999.0);
-            $gross = (float) ($signal['expected_gross_move_percent'] ?? 0.0);
-            $cost = (float) ($signal['estimated_roundtrip_cost_percent'] ?? 0.0);
-            $market['expected_gross_move_percent'] = round($gross, 4);
-            $market['estimated_roundtrip_cost_percent'] = round($cost, 4);
-            $market['expected_net_edge_percent'] = round($netEdge, 4);
-
-            // Backward-compatible field retained for older UI code. It now
-            // equals the estimated net edge percentage; it is not a score.
-            $market['opportunity_score'] = round($netEdge, 4);
-            $ranked[] = $market;
+            $analyzed[] = $market;
+            self::$processSnapshotCache[$symbol] = $market;
         }
 
-        usort($ranked, static function (array $a, array $b): int {
-            $aReady = (bool) ($a['signal']['ready'] ?? false);
-            $bReady = (bool) ($b['signal']['ready'] ?? false);
-            if ($aReady !== $bReady) return $bReady <=> $aReady;
-
+        // This sort does not decide eligibility. Every executable market above
+        // has already been analyzed. It only chooses which profitable order is
+        // submitted first if capital/risk limits prevent simultaneous entries.
+        usort($analyzed, static function (array $a, array $b) use ($preferredQuote): int {
             $aBuy = (($a['signal']['action'] ?? '') === 'buy') ? 1 : 0;
             $bBuy = (($b['signal']['action'] ?? '') === 'buy') ? 1 : 0;
             if ($aBuy !== $bBuy) return $bBuy <=> $aBuy;
+
+            $aReady = (bool) ($a['signal']['ready'] ?? false);
+            $bReady = (bool) ($b['signal']['ready'] ?? false);
+            if ($aReady !== $bReady) return $bReady <=> $aReady;
 
             $aEdge = (float) ($a['expected_net_edge_percent'] ?? -999.0);
             $bEdge = (float) ($b['expected_net_edge_percent'] ?? -999.0);
             if (abs($aEdge - $bEdge) > 0.000001) return $bEdge <=> $aEdge;
 
+            $aPreferred = (($a['quote_asset'] ?? '') === $preferredQuote) ? 1 : 0;
+            $bPreferred = (($b['quote_asset'] ?? '') === $preferredQuote) ? 1 : 0;
+            if ($aPreferred !== $bPreferred) return $bPreferred <=> $aPreferred;
+
             return ((float) ($b['depth_quote'] ?? 0.0)) <=> ((float) ($a['depth_quote'] ?? 0.0));
         });
-        return $ranked;
+
+        self::$processUniverseCache[$cacheKey] = $analyzed;
+        return $analyzed;
     }
 
     public function snapshotSymbol(NobitexClient $client, string $symbol, int $legacyThreshold = 60): array
     {
+        unset($legacyThreshold);
         $symbol = strtoupper(preg_replace('/[^A-Z0-9]/', '', $symbol) ?? '');
+        if (isset(self::$processSnapshotCache[$symbol])) {
+            return self::$processSnapshotCache[$symbol];
+        }
+
         [$base, $quote] = $this->parseSymbol($symbol);
         if ($base === '' || $quote === '') throw new \InvalidArgumentException('Invalid Nobitex market symbol.');
+
         $response = $client->orderBook($symbol);
         $book = $this->extractBook($response, $symbol);
         try { $stats = $client->stats(['srcCurrency'=>strtolower($base),'dstCurrency'=>strtolower($quote === 'IRT' ? 'rls' : $quote)]); } catch (\Throwable) { $stats = []; }
         try { $options = $client->options(); } catch (\Throwable) { $options = []; }
-        $market = $this->market($symbol, $book, $stats, $options, $quote);
+
+        $market = $this->market($symbol, $book, $stats, $options);
         if ($market === null) throw new \RuntimeException('Nobitex market is unavailable: ' . $symbol);
 
         $minutePrices = $this->minuteHistory($client, $symbol, (float) $market['price']);
         $market['prices'] = $minutePrices;
         $market['analysis_resolution'] = '1m';
-        $signal = $this->signals->analyze($market, $minutePrices, $legacyThreshold);
+        $market['full_universe_analysis'] = false;
+
+        $signal = $this->signals->analyze($market, $minutePrices);
         $market['signal'] = $signal;
         $market['expected_gross_move_percent'] = round((float) ($signal['expected_gross_move_percent'] ?? 0.0), 4);
         $market['estimated_roundtrip_cost_percent'] = round((float) ($signal['estimated_roundtrip_cost_percent'] ?? 0.0), 4);
         $market['expected_net_edge_percent'] = round((float) ($signal['expected_net_edge_percent'] ?? 0.0), 4);
-        $market['opportunity_score'] = $market['expected_net_edge_percent'];
+        $market['expected_net_profit'] = (bool) ($signal['expected_net_profit'] ?? false);
+
+        self::$processSnapshotCache[$symbol] = $market;
         return $market;
     }
 
     private function minuteHistory(NobitexClient $client, string $symbol, float $lastPrice): array
     {
-        $prices = [];
         try {
-            $history = $client->ohlc($symbol, '1', 480);
-            $closes = $history['c'] ?? [];
-            if (is_array($closes)) {
-                foreach ($closes as $close) {
-                    $n = $this->number($close);
-                    if ($n > 0) $prices[] = $n;
-                }
+            return $this->minutePricesFromResponse($client->ohlc($symbol, '1', 480), $lastPrice);
+        } catch (\Throwable) {
+            return $lastPrice > 0 ? [$lastPrice] : [];
+        }
+    }
+
+    private function minutePricesFromResponse(array $history, float $lastPrice): array
+    {
+        $prices = [];
+        $closes = $history['c'] ?? [];
+        if (is_array($closes)) {
+            foreach ($closes as $close) {
+                $n = $this->number($close);
+                if ($n > 0) $prices[] = $n;
             }
-        } catch (\Throwable) {}
-        if ($lastPrice > 0 && ($prices === [] || abs((float) end($prices) - $lastPrice) > 0.00000001)) $prices[] = $lastPrice;
+        }
+
+        if ($lastPrice > 0 && ($prices === [] || abs((float) end($prices) - $lastPrice) > 0.00000001)) {
+            $prices[] = $lastPrice;
+        }
         return array_slice($prices, -480);
     }
 
-    private function marketsFromAll(array $response, array $stats, array $options, string $preferredQuote): array
+    private function marketsFromAll(array $response, array $stats, array $options): array
     {
         $rows = $response;
         if (is_array($response['data'] ?? null)) $rows = $response['data'];
+
         $out = [];
         foreach ($rows as $rawSymbol => $book) {
             if (!is_string($rawSymbol) || !is_array($book)) continue;
             $symbol = strtoupper(preg_replace('/[^A-Z0-9]/', '', $rawSymbol) ?? '');
             [$base, $quote] = $this->parseSymbol($symbol);
             if ($base === '' || $quote === '' || in_array($base, self::EXCLUDED_BASES, true)) continue;
-            $market = $this->market($symbol, $book, $stats, $options, $preferredQuote);
+
+            $market = $this->market($symbol, $book, $stats, $options);
             if ($market !== null) $out[] = $market;
         }
         return $out;
     }
 
-    private function market(string $symbol, array $book, array $stats, array $options, string $preferredQuote): ?array
+    /**
+     * Executability filter only. It rejects malformed books, crossed/very-wide
+     * books and markets whose visible depth cannot cover even a minimal order.
+     * It does not rank assets by momentum, popularity or a synthetic score.
+     */
+    private function market(string $symbol, array $book, array $stats, array $options): ?array
     {
         [$base, $quote] = $this->parseSymbol($symbol);
         if ($base === '' || $quote === '') return null;
+
         $last = $this->number($book['lastTradePrice'] ?? $book['last_trade_price'] ?? $book['lastPrice'] ?? 0);
         $bestAsk = $this->levelPrice($book['asks'][0] ?? null);
         $bestBid = $this->levelPrice($book['bids'][0] ?? null);
         $price = $last > 0 ? $last : (($bestAsk > 0 && $bestBid > 0) ? (($bestAsk + $bestBid) / 2.0) : max($bestAsk, $bestBid));
         if ($price <= 0 || $bestAsk <= 0 || $bestBid <= 0) return null;
+
         $spread = (($bestAsk - $bestBid) / max($price, 0.00000001)) * 100.0;
         if ($spread < 0 || $spread > 3.0) return null;
 
@@ -153,14 +219,7 @@ final class NobitexUniverseScanner
         $askDepth = $this->depthQuote(is_array($book['asks'] ?? null) ? $book['asks'] : []);
         $depth = min($bidDepth, $askDepth);
         $minOrder = $this->minimumOrder($options, $quote);
-        if ($depth > 0 && $minOrder > 0 && $depth < ($minOrder * 2.0)) return null;
-
-        $change = $this->dayChange($stats, $base, $quote, $symbol);
-        $imbalance = $this->imbalance($book);
-        $liquidityComponent = log10(max(1.0, $depth)) * 3.0;
-        $trendComponent = max(-10.0, min(10.0, $change)) * 0.45;
-        $spreadPenalty = $spread * 12.0;
-        $preferredBonus = $quote === $preferredQuote ? 4.0 : 0.0;
+        if ($depth <= 0 || ($minOrder > 0 && $depth < ($minOrder * 2.0))) return null;
 
         return [
             'exchange'=>'nobitex',
@@ -174,11 +233,10 @@ final class NobitexUniverseScanner
             'best_bid'=>$bestBid,
             'spread_percent'=>round($spread, 6),
             'depth_quote'=>$depth,
-            'change_percent'=>$change,
-            'orderbook_imbalance'=>$imbalance,
+            'change_percent'=>$this->dayChange($stats, $base, $quote, $symbol),
+            'orderbook_imbalance'=>$this->imbalance($book),
             'base_precision'=>$this->amountPrecision($options, $symbol, 8),
             'min_order_quote'=>$minOrder,
-            'pre_rank'=>round($liquidityComponent + $trendComponent + $preferredBonus - $spreadPenalty, 4),
             'observed_at'=>gmdate(DATE_ATOM),
         ];
     }
@@ -196,10 +254,12 @@ final class NobitexUniverseScanner
         $rows = $stats['stats'] ?? $stats['data'] ?? $stats;
         if (!is_array($rows)) return 0.0;
         $wanted = [$symbol, $base . ($quote === 'IRT' ? 'RLS' : $quote)];
+
         foreach ($rows as $key => $row) {
             if (!is_array($row)) continue;
             $normalized = strtoupper(preg_replace('/[^A-Z0-9]/', '', (string) $key) ?? '');
             if ($normalized !== '' && !in_array($normalized, $wanted, true)) continue;
+
             foreach (['dayChange','day_change','change','percentChange'] as $field) {
                 if (!array_key_exists($field, $row)) continue;
                 $v = $this->number($row[$field]);
