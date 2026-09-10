@@ -48,21 +48,13 @@ object AppUpdateManager {
         val releaseVersion: String?,
         val requiredBackendVersion: String,
         val apiContract: Int?,
+        val requiredApiContract: Int?,
         val capabilities: Set<String>,
         val runtimePayload: Boolean,
     )
 
-    /** Backward-compatible shortcut for callers that only care about an APK update. */
     suspend fun check(context: Context): UpdateInfo? = checkRelease(context).update
 
-    /**
-     * Update safety rules:
-     * 1) stable release metadata must describe one coordinated backend+Android version;
-     * 2) the backend that is actually running must already be on that same version;
-     * 3) APK URL and SHA-256 must be valid before download;
-     * 4) runtime API contract compatibility is reported separately so the current app
-     *    can fail closed while still being able to upgrade to a newer contract later.
-     */
     suspend fun checkRelease(context: Context): CheckResult = withContext(Dispatchers.IO) {
         val currentCode = currentVersionCode(context)
         val installedVersion = currentVersionName(context)
@@ -74,7 +66,6 @@ object AppUpdateManager {
         var stableReleaseVersion: String? = null
         var stableReleaseContract: Int? = null
 
-        // Primary path: the backend currently running on cPanel.
         try {
             val response = TradeApi(SERVER, "").updateInfo()
             if (response.ok && response.body.isNotBlank()) {
@@ -90,12 +81,10 @@ object AppUpdateManager {
                 }
             }
         } catch (_: Exception) {
-            // Direct manifest is parsed below, but an APK update is not installed unless
-            // the running backend version can also be verified.
+            // A direct manifest can still describe the stable release, but no APK is
+            // installed until the running backend version has also been verified.
         }
 
-        // Independent stable-release metadata verifies that the published artifacts
-        // themselves obey the coordinated release contract.
         try {
             val manifest = downloadText("$DIRECT_MANIFEST?ts=${System.currentTimeMillis()}")
             parsePayload(manifest)?.let { parsed ->
@@ -118,9 +107,6 @@ object AppUpdateManager {
             val available = android.optBoolean("available", false)
             val url = android.optString("url").trim()
             val sha256 = android.optString("sha256").trim().lowercase()
-
-            // The most important rollout invariant: do not install a new APK before
-            // the backend that is actually serving this app has reached the same release.
             val runningBackendMatches = backendVersion != null && backendVersion == versionName
 
             if (
@@ -246,6 +232,8 @@ object AppUpdateManager {
             val rootContract = root.optInt("api_contract", -1)
             val apiContract = sequenceOf(dataContract, releaseContract, rootContract)
                 .firstOrNull { it >= 0 }
+            val requiredApiContract = android.optInt("required_api_contract", -1)
+                .takeIf { it >= 0 } ?: apiContract
 
             val capabilities = when {
                 data?.optJSONArray("capabilities") != null -> jsonStringSet(data.optJSONArray("capabilities"))
@@ -260,6 +248,7 @@ object AppUpdateManager {
                 releaseVersion = releaseVersion,
                 requiredBackendVersion = requiredBackendVersion,
                 apiContract = apiContract,
+                requiredApiContract = requiredApiContract,
                 capabilities = capabilities,
                 runtimePayload = runtimePayload,
             )
@@ -272,6 +261,7 @@ object AppUpdateManager {
         val versionName = parsed.android.optString("version_name").trim()
         if (versionName.isBlank() || parsed.requiredBackendVersion != versionName) return false
         if (parsed.apiContract == null || parsed.apiContract < 1) return false
+        if (parsed.requiredApiContract == null || parsed.requiredApiContract != parsed.apiContract) return false
         if (!parsed.capabilities.contains("api.capability_contract")) return false
         if (!parsed.capabilities.contains("updates.coordinated_backend_android")) return false
 
