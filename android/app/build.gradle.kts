@@ -7,6 +7,7 @@ val releaseKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
 val releaseStorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
 val releaseKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val releaseKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+val releaseStoreType = System.getenv("ANDROID_KEYSTORE_TYPE")?.takeIf { it.isNotBlank() }
 val hasPermanentSigning = listOf(
     releaseKeystorePath,
     releaseStorePassword,
@@ -33,6 +34,9 @@ android {
                 storePassword = requireNotNull(releaseStorePassword)
                 keyAlias = requireNotNull(releaseKeyAlias)
                 keyPassword = requireNotNull(releaseKeyPassword)
+                if (releaseStoreType != null) {
+                    storeType = releaseStoreType
+                }
                 enableV1Signing = true
                 enableV2Signing = true
                 enableV3Signing = true
