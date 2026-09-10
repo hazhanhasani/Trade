@@ -28,6 +28,10 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
 
     suspend fun exchanges(): Response = request("GET", "/api/exchanges")
     suspend fun botStatus(): Response = request("GET", "/api/bot")
+    suspend fun rotationStatus(limit: Int = 20): Response {
+        requireCapability("trading.portfolio_rotation_monitor")
+        return request("GET", "/api/bot/rotation?limit=${limit.coerceIn(1, 50)}")
+    }
     suspend fun markets(exchange: String = "bitpin"): Response = request("GET", "/api/markets?exchange=${exchangeArg(exchange)}")
     suspend fun wallets(exchange: String = "bitpin"): Response = request("GET", "/api/wallets?exchange=${exchangeArg(exchange)}")
     suspend fun orders(exchange: String = "bitpin"): Response = request("GET", "/api/orders?exchange=${exchangeArg(exchange)}")
