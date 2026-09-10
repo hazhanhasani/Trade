@@ -34,6 +34,7 @@ final class NobitexPortfolioEngine
         try {
             return $this->runLocked($pdo);
         } finally {
+            NobitexStrategyLearning::clearRuntime();
             try { $pdo->query("SELECT RELEASE_LOCK('trade_nobitex_portfolio_v1')"); } catch (\Throwable) {}
         }
     }
@@ -51,6 +52,7 @@ final class NobitexPortfolioEngine
         try {
             return $this->bootstrapLocked($pdo);
         } finally {
+            NobitexStrategyLearning::clearRuntime();
             try { $pdo->query("SELECT RELEASE_LOCK('trade_nobitex_portfolio_v1')"); } catch (\Throwable) {}
         }
     }
@@ -148,6 +150,9 @@ final class NobitexPortfolioEngine
                 $rejections[] = [
                     'symbol'=>$symbol,
                     'reason'=>$decision['reason'] ?? 'risk_blocked',
+                    'strategy_key'=>$decision['strategy_key'] ?? ($signal['strategy_key'] ?? null),
+                    'market_regime'=>$decision['market_regime'] ?? ($signal['market_regime']['regime'] ?? null),
+                    'strategy_learning_multiplier'=>$decision['strategy_learning_multiplier'] ?? null,
                     'effective_position_percent'=>$decision['effective_position_percent'] ?? null,
                     'portfolio_exposure_percent'=>$decision['portfolio_exposure_percent'] ?? null,
                     'exposure_capacity'=>$decision['exposure_capacity'] ?? null,
@@ -173,6 +178,8 @@ final class NobitexPortfolioEngine
                     'symbol'=>$symbol,
                     'asset'=>$market['asset'],
                     'quote_asset'=>$quoteAsset,
+                    'strategy_key'=>$signal['strategy_key'] ?? $signal['selected_strategy']['key'] ?? null,
+                    'market_regime'=>$signal['market_regime']['regime'] ?? null,
                     'expected_net_edge_percent'=>$signal['expected_net_edge_percent'] ?? null,
                     'tradable_net_edge_percent'=>$signal['tradable_net_edge_percent'] ?? null,
                     'required_edge_buffer_percent'=>$signal['required_edge_buffer_percent'] ?? null,
@@ -182,7 +189,10 @@ final class NobitexPortfolioEngine
                 'allocation'=>[
                     'budget'=>$decision['budget'] ?? null,
                     'configured_position_percent'=>$decision['configured_position_percent'] ?? null,
+                    'base_effective_position_percent'=>$decision['base_effective_position_percent'] ?? null,
                     'effective_position_percent'=>$decision['effective_position_percent'] ?? null,
+                    'strategy_learning_multiplier'=>$decision['strategy_learning_multiplier'] ?? 1.0,
+                    'strategy_learning_reason'=>$decision['strategy_learning_reason'] ?? null,
                     'portfolio_exposure_percent'=>$decision['portfolio_exposure_percent'] ?? null,
                     'portfolio_exposure_limit_percent'=>$decision['portfolio_exposure_limit_percent'] ?? null,
                     'exposure_capacity'=>$decision['exposure_capacity'] ?? null,
@@ -232,22 +242,25 @@ final class NobitexPortfolioEngine
         $preferredQuote = $irt > 0 ? 'IRT' : 'USDT';
         if ($irt <= 0 && $usdt <= 0) return $this->bootstrapBlocked($pdo, 'no_quote_balance');
 
-        $bootstrapScore = $this->intSetting($pdo, 'nobitex_bootstrap_min_score', 25, 10, 70);
         $scanLimit = $this->intSetting($pdo, 'nobitex_scan_limit', 12, 3, 20);
-        $candidates = $this->scanner->rankedCandidates($client, $preferredQuote, $scanLimit, $bootstrapScore);
+        $candidates = $this->scanner->rankedCandidates($client, $preferredQuote, $scanLimit, (int)$settings['min_signal_score']);
         $chosen = null;
         foreach ($candidates as $candidate) {
-            $signal = $candidate['signal'] ?? [];
+            $signal = is_array($candidate['signal'] ?? null) ? $candidate['signal'] : [];
             if (!($signal['ready'] ?? false)) continue;
-            if ((int) ($signal['score'] ?? -100) < $bootstrapScore) continue;
-            if ((float) ($candidate['spread_percent'] ?? 99) > 1.5) continue;
+            if ((string)($signal['action'] ?? 'hold') !== 'buy') continue;
+            if ((float)($signal['tradable_net_edge_percent'] ?? 0.0) <= 0.0) continue;
+            if ((float)($candidate['spread_percent'] ?? 99) > 1.5) continue;
             $quoteAvailable = $candidate['quote_asset'] === 'IRT' ? $irt : $usdt;
             if ($quoteAvailable <= 0) continue;
             $chosen = $candidate;
             break;
         }
         if ($chosen === null) {
-            return $this->bootstrapBlocked($pdo, 'waiting_for_positive_market', ['top_candidates'=>$this->candidateSummary($candidates),'minimum_score'=>$bootstrapScore]);
+            return $this->bootstrapBlocked($pdo, 'waiting_for_positive_market', [
+                'top_candidates'=>$this->candidateSummary($candidates),
+                'selection_model'=>'multi_strategy_positive_tradable_net_edge',
+            ]);
         }
 
         $quoteAsset = (string) $chosen['quote_asset'];
@@ -267,10 +280,22 @@ final class NobitexPortfolioEngine
         $result = $this->submitEntry($pdo, $chosen, $amount, $priceCeiling, $settings, $clientOrderId, 'autotrade_nobitex_first_buy');
         $this->setSetting($pdo, $this->symbolCooldownKey((string) $chosen['symbol']), gmdate('Y-m-d H:i:s'));
         $this->completeBootstrap($pdo, 'submitted');
-        $this->event($pdo, 'info', 'nobitex.first_buy.submitted', ['symbol'=>$chosen['symbol'],'asset'=>$chosen['asset'],'score'=>$chosen['signal']['score'] ?? 0,'order'=>$result]);
+        $chosenSignal = is_array($chosen['signal'] ?? null) ? $chosen['signal'] : [];
+        $this->event($pdo, 'info', 'nobitex.first_buy.submitted', [
+            'symbol'=>$chosen['symbol'],
+            'asset'=>$chosen['asset'],
+            'strategy_key'=>$chosenSignal['strategy_key'] ?? $chosenSignal['selected_strategy']['key'] ?? null,
+            'market_regime'=>$chosenSignal['market_regime']['regime'] ?? null,
+            'order'=>$result,
+        ]);
         return ['status'=>'first_buy_submitted','exchange'=>'nobitex','selected'=>[
-            'symbol'=>$chosen['symbol'],'asset'=>$chosen['asset'],'quote_asset'=>$chosen['quote_asset'],'score'=>$chosen['signal']['score'] ?? 0,
-        ],'order'=>$result];
+            'symbol'=>$chosen['symbol'],
+            'asset'=>$chosen['asset'],
+            'quote_asset'=>$chosen['quote_asset'],
+            'strategy_key'=>$chosenSignal['strategy_key'] ?? $chosenSignal['selected_strategy']['key'] ?? null,
+            'market_regime'=>$chosenSignal['market_regime']['regime'] ?? null,
+            'tradable_net_edge_percent'=>$chosenSignal['tradable_net_edge_percent'] ?? null,
+        ],'allocation'=>$budget,'order'=>$result];
     }
 
     private function preflight(PDO $pdo, bool $bootstrap = false): ?array
@@ -305,16 +330,44 @@ final class NobitexPortfolioEngine
             }
         }
 
+        $signal = is_array($market['signal'] ?? null) ? $market['signal'] : [];
+        try {
+            $learning = (new NobitexStrategyLearning())->assessSignal($pdo, $signal);
+        } catch (\Throwable $e) {
+            $this->event($pdo, 'error', 'nobitex.strategy_learning.error', ['symbol'=>$symbol,'error'=>$e->getMessage()]);
+            return ['allowed'=>false,'reason'=>'strategy_learning_unavailable'];
+        }
+        $learningMultiplier = max(0.55, min(1.0, (float)($learning['size_multiplier'] ?? 1.0)));
+        $strategyKey = (string)($learning['strategy_key'] ?? NobitexStrategyLearning::strategyKey($signal));
+        $marketRegime = (string)($learning['regime'] ?? NobitexStrategyLearning::regimeKey($signal));
+        if (!($learning['allowed'] ?? false)) {
+            return [
+                'allowed'=>false,
+                'reason'=>$learning['reason'] ?? 'strategy_profile_persistently_unprofitable',
+                'strategy_key'=>$strategyKey,
+                'market_regime'=>$marketRegime,
+                'strategy_learning_multiplier'=>$learningMultiplier,
+                'strategy_learning_stats'=>$learning['stats'] ?? null,
+            ];
+        }
+
         $portfolioMaxPct = $this->floatSetting($pdo, 'nobitex_portfolio_exposure_percent', 60.0, 10.0, 90.0);
         $maxPositions = $this->intSetting($pdo, 'nobitex_max_positions', 5, 1, 20);
         $capacity = max(0.0, ($portfolio * ($portfolioMaxPct / 100.0)) - $exposure);
         $exposurePct = $portfolio > 0 ? ($exposure / $portfolio) * 100.0 : 0.0;
         $configuredPerPositionPct = min((float) $settings['position_percent'], (float) $settings['max_position_percent']);
         $slotAlignedPct = $portfolioMaxPct / max(1, $maxPositions);
-        $effectivePerPositionPct = min($configuredPerPositionPct, $slotAlignedPct);
+        $baseEffectivePerPositionPct = min($configuredPerPositionPct, $slotAlignedPct);
+        $effectivePerPositionPct = $baseEffectivePerPositionPct * $learningMultiplier;
         $context = [
             'configured_position_percent'=>round($configuredPerPositionPct, 4),
+            'base_effective_position_percent'=>round($baseEffectivePerPositionPct, 4),
             'effective_position_percent'=>round($effectivePerPositionPct, 4),
+            'strategy_key'=>$strategyKey,
+            'market_regime'=>$marketRegime,
+            'strategy_learning_multiplier'=>round($learningMultiplier, 4),
+            'strategy_learning_reason'=>$learning['reason'] ?? null,
+            'strategy_learning_stats'=>$learning['stats'] ?? null,
             'portfolio_exposure_percent'=>round($exposurePct, 4),
             'portfolio_exposure_limit_percent'=>$portfolioMaxPct,
             'exposure_capacity'=>$capacity,
@@ -326,6 +379,19 @@ final class NobitexPortfolioEngine
         $perPositionCap = $portfolio * ((float) $settings['max_position_percent'] / 100.0);
         $minimum = max(0.0, (float) ($market['min_order_quote'] ?? 0));
         $minimumWithMargin = $minimum > 0 ? $minimum * 1.03 : 0.0;
+
+        // A learned risk reduction must never be silently bypassed by rounding
+        // the order back up to the exchange minimum. If the reduced strategy
+        // budget cannot satisfy the minimum order, skip this candidate instead.
+        if ($learningMultiplier < 0.9999 && $minimumWithMargin > $desired + 0.000001) {
+            return [
+                'allowed'=>false,
+                'reason'=>'strategy_learning_minimum_order_conflict',
+                'minimum_order'=>$minimum,
+                'learned_desired_budget'=>$desired,
+            ] + $context;
+        }
+
         $budget = min(max($desired, $minimumWithMargin), $perPositionCap, $capacity, $quoteAvailable * 0.985);
         if ($minimum > 0 && $budget + 0.000001 < $minimum) {
             return ['allowed'=>false,'reason'=>'minimum_order_exceeds_budget','minimum_order'=>$minimum,'budget'=>$budget,'available_quote'=>$quoteAvailable] + $context;
@@ -554,12 +620,15 @@ final class NobitexPortfolioEngine
     {
         $out = [];
         foreach (array_slice($candidates, 0, 8) as $c) {
+            $signal = is_array($c['signal'] ?? null) ? $c['signal'] : [];
             $out[] = [
                 'symbol'=>$c['symbol'] ?? null,'asset'=>$c['asset'] ?? null,'quote_asset'=>$c['quote_asset'] ?? null,
-                'signal'=>$c['signal']['action'] ?? 'hold',
-                'expected_net_edge_percent'=>$c['signal']['expected_net_edge_percent'] ?? null,
-                'tradable_net_edge_percent'=>$c['signal']['tradable_net_edge_percent'] ?? null,
-                'required_edge_buffer_percent'=>$c['signal']['required_edge_buffer_percent'] ?? null,
+                'signal'=>$signal['action'] ?? 'hold',
+                'strategy_key'=>$signal['strategy_key'] ?? $signal['selected_strategy']['key'] ?? null,
+                'market_regime'=>$signal['market_regime']['regime'] ?? null,
+                'expected_net_edge_percent'=>$signal['expected_net_edge_percent'] ?? null,
+                'tradable_net_edge_percent'=>$signal['tradable_net_edge_percent'] ?? null,
+                'required_edge_buffer_percent'=>$signal['required_edge_buffer_percent'] ?? null,
                 'spread_percent'=>$c['spread_percent'] ?? null,
             ];
         }
