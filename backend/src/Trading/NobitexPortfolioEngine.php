@@ -93,7 +93,7 @@ final class NobitexPortfolioEngine
             return $this->summary('waiting_order', ['active_positions'=>count($positions)]);
         }
 
-        $maxPositions = $this->intSetting($pdo, 'nobitex_max_positions', 5, 1, 10);
+        $maxPositions = $this->intSetting($pdo, 'nobitex_max_positions', 5, 1, 20);
         if (count($positions) >= $maxPositions) {
             return $this->summary('portfolio_full', ['active_positions'=>count($positions),'max_positions'=>$maxPositions]);
         }
@@ -110,12 +110,17 @@ final class NobitexPortfolioEngine
         if ($candidates === []) return $this->summary('no_trade', ['reason'=>'no_eligible_markets']);
 
         $activeSymbols = [];
-        foreach ($positions as $p) $activeSymbols[strtoupper((string) $p['symbol'])] = true;
+        $activeAssets = [];
+        foreach ($positions as $p) {
+            $activeSymbols[strtoupper((string) $p['symbol'])] = true;
+            $activeAssets[strtoupper((string) ($p['asset'] ?? ''))] = true;
+        }
         $rejections = [];
 
         foreach ($candidates as $market) {
             $symbol = strtoupper((string) $market['symbol']);
-            if (isset($activeSymbols[$symbol])) {
+            $asset = strtoupper((string) ($market['asset'] ?? ''));
+            if (isset($activeSymbols[$symbol]) || ($asset !== '' && isset($activeAssets[$asset]))) {
                 $rejections[] = ['symbol'=>$symbol,'reason'=>'already_positioned'];
                 continue;
             }
@@ -155,8 +160,9 @@ final class NobitexPortfolioEngine
                     'symbol'=>$symbol,
                     'asset'=>$market['asset'],
                     'quote_asset'=>$quoteAsset,
-                    'signal_score'=>$signal['score'] ?? 0,
-                    'opportunity_score'=>$market['opportunity_score'] ?? null,
+                    'expected_net_edge_percent'=>$signal['expected_net_edge_percent'] ?? null,
+                    'tradable_net_edge_percent'=>$signal['tradable_net_edge_percent'] ?? null,
+                    'required_edge_buffer_percent'=>$signal['required_edge_buffer_percent'] ?? null,
                     'spread_percent'=>$market['spread_percent'] ?? null,
                 ],
                 'order'=>$result,
@@ -422,7 +428,7 @@ final class NobitexPortfolioEngine
 
     private function activePositions(PDO $pdo): array
     {
-        return $pdo->query("SELECT * FROM nobitex_autotrade_positions WHERE status IN ('pending_open','open','pending_close') ORDER BY id ASC LIMIT 20")->fetchAll();
+        return $pdo->query("SELECT * FROM nobitex_autotrade_positions WHERE status IN ('pending_open','open','pending_close') ORDER BY id ASC LIMIT 30")->fetchAll();
     }
 
     private function hasPendingPosition(array $positions): bool
@@ -479,7 +485,10 @@ final class NobitexPortfolioEngine
         foreach (array_slice($candidates, 0, 8) as $c) {
             $out[] = [
                 'symbol'=>$c['symbol'] ?? null,'asset'=>$c['asset'] ?? null,'quote_asset'=>$c['quote_asset'] ?? null,
-                'signal'=>$c['signal']['action'] ?? 'hold','score'=>$c['signal']['score'] ?? 0,'opportunity_score'=>$c['opportunity_score'] ?? null,
+                'signal'=>$c['signal']['action'] ?? 'hold',
+                'expected_net_edge_percent'=>$c['signal']['expected_net_edge_percent'] ?? null,
+                'tradable_net_edge_percent'=>$c['signal']['tradable_net_edge_percent'] ?? null,
+                'required_edge_buffer_percent'=>$c['signal']['required_edge_buffer_percent'] ?? null,
                 'spread_percent'=>$c['spread_percent'] ?? null,
             ];
         }
