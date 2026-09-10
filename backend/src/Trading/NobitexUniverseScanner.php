@@ -4,25 +4,32 @@ declare(strict_types=1);
 
 namespace Trade\Trading;
 
+use PDO;
+use Trade\Database;
 use Trade\Exchange\NobitexClient;
 
 /**
  * Full-universe Nobitex spot scanner.
  *
- * No score, rank threshold or top-N shortlist is allowed to decide which asset
- * gets analyzed. Every executable IRT/USDT market receives the same 1m/5m/15m
- * profitability analysis. Sorting is only used to decide execution order when
- * several markets are profitable at the same time.
+ * No score, rank threshold or top-N shortlist decides which asset gets
+ * analyzed. Every executable IRT/USDT market is evaluated with the same
+ * 1m/5m/15m profitability model. Because Nobitex limits OHLC history to 60
+ * requests/minute, histories are persisted and refreshed round-robin under a
+ * shared request budget; the current order-book price updates every market on
+ * every tick, so stale-history scheduling never becomes an eligibility score.
  */
 final class NobitexUniverseScanner
 {
     private const QUOTES = ['IRT', 'USDT'];
     private const EXCLUDED_BASES = ['IRT','RLS','USDT','USDC','DAI','TUSD','BUSD','FDUSD'];
+    private const OHLC_REQUESTS_PER_60_SECONDS = 55; // keep 5 req/min headroom below official 60/min limit
+    private const POSITION_HISTORY_REFRESH_SECONDS = 180;
 
     /** @var array<string,array> */
     private static array $processSnapshotCache = [];
     /** @var array<string,array> */
     private static array $processUniverseCache = [];
+    private static bool $cacheSchemaEnsured = false;
 
     public function __construct(private readonly NobitexInternalSignalEngine $signals = new NobitexInternalSignalEngine()) {}
 
@@ -38,14 +45,13 @@ final class NobitexUniverseScanner
         int $legacyLimit = 20,
         int $legacyThreshold = 60
     ): array {
-        // Both legacy arguments are intentionally ignored. They remain in the
-        // signature so old callers do not break while score/top-N behavior is gone.
+        // Kept only for backward-compatible method signatures. Neither value can
+        // remove a Nobitex market from profitability analysis.
         unset($legacyLimit, $legacyThreshold);
 
         $preferredQuote = $this->quote($preferredQuote);
-        $cacheKey = $preferredQuote;
-        if (isset(self::$processUniverseCache[$cacheKey])) {
-            return self::$processUniverseCache[$cacheKey];
+        if (isset(self::$processUniverseCache[$preferredQuote])) {
+            return self::$processUniverseCache[$preferredQuote];
         }
 
         $all = $client->allOrderBooks();
@@ -55,31 +61,88 @@ final class NobitexUniverseScanner
         $markets = $this->marketsFromAll($all, $stats, $options);
         $universeSize = count($markets);
         if ($markets === []) {
-            self::$processUniverseCache[$cacheKey] = [];
+            self::$processUniverseCache[$preferredQuote] = [];
             return [];
         }
 
-        $symbols = array_values(array_map(
-            static fn(array $market): string => (string) $market['symbol'],
-            $markets
-        ));
+        $pdo = Database::connection();
+        $this->ensureCacheSchema($pdo);
+        $cache = $this->loadHistoryCache($pdo);
 
-        // Concurrently request all histories. No market is dropped because it
-        // failed a liquidity score or was outside an arbitrary top-N limit.
-        $histories = $client->ohlcMany($symbols, '1', 480, 8);
+        // Refresh missing/oldest histories first. This is scheduling only: every
+        // market below is still analyzed, including markets not refreshed in this
+        // tick, using its persisted history plus the current live price.
+        $refreshQueue = $markets;
+        usort($refreshQueue, static function (array $a, array $b) use ($cache): int {
+            $aAt = trim((string) ($cache[(string) $a['symbol']]['fetched_at'] ?? ''));
+            $bAt = trim((string) ($cache[(string) $b['symbol']]['fetched_at'] ?? ''));
+            $aTs = $aAt === '' ? 0 : (strtotime($aAt . ' UTC') ?: 0);
+            $bTs = $bAt === '' ? 0 : (strtotime($bAt . ' UTC') ?: 0);
+            return $aTs <=> $bTs;
+        });
+
+        $grant = $this->reserveOhlcBudget($pdo, $universeSize);
+        $refreshSymbols = [];
+        foreach (array_slice($refreshQueue, 0, $grant) as $market) {
+            $refreshSymbols[] = (string) $market['symbol'];
+        }
+        $histories = $refreshSymbols !== []
+            ? $client->ohlcMany($refreshSymbols, '1', 480, 8)
+            : [];
+
+        $now = gmdate('Y-m-d H:i:s');
+        $minute = gmdate('Y-m-d H:i:00');
+        $upsert = $pdo->prepare(
+            "INSERT INTO nobitex_market_history_cache
+                (symbol,prices_json,fetched_at,last_observed_minute,updated_at)
+             VALUES (:symbol,:prices,:fetched_at,:last_observed_minute,UTC_TIMESTAMP())
+             ON DUPLICATE KEY UPDATE
+                prices_json=VALUES(prices_json),
+                fetched_at=VALUES(fetched_at),
+                last_observed_minute=VALUES(last_observed_minute),
+                updated_at=UTC_TIMESTAMP()"
+        );
 
         $analyzed = [];
         foreach ($markets as $market) {
             $symbol = (string) $market['symbol'];
+            $cached = is_array($cache[$symbol] ?? null) ? $cache[$symbol] : [];
+            $cachedPrices = $this->cachedPrices($cached);
+            $fetchedAt = trim((string) ($cached['fetched_at'] ?? '')) ?: null;
+
             $history = is_array($histories[$symbol] ?? null) ? $histories[$symbol] : [];
-            $minutePrices = $this->minutePricesFromResponse($history, (float) $market['price']);
-            $market['prices'] = $minutePrices;
+            $historyPrices = $this->minutePricesFromResponse($history, 0.0);
+            if ($historyPrices !== []) {
+                $prices = $historyPrices;
+                $fetchedAt = $now;
+            } else {
+                $prices = $cachedPrices;
+            }
+
+            $prices = $this->mergeLivePrice(
+                $prices,
+                (float) $market['price'],
+                trim((string) ($cached['last_observed_minute'] ?? '')),
+                $minute
+            );
+
+            $upsert->execute([
+                ':symbol'=>$symbol,
+                ':prices'=>json_encode($prices, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES),
+                ':fetched_at'=>$fetchedAt,
+                ':last_observed_minute'=>$minute,
+            ]);
+
+            $market['prices'] = $prices;
             $market['analysis_resolution'] = '1m';
             $market['universe_size'] = $universeSize;
             $market['deep_scan_size'] = $universeSize;
             $market['full_universe_analysis'] = true;
+            $market['history_refreshed_this_tick'] = $historyPrices !== [];
+            $market['history_fetched_at'] = $fetchedAt;
+            $market['ohlc_budget_granted'] = $grant;
 
-            $signal = $this->signals->analyze($market, $minutePrices);
+            $signal = $this->signals->analyze($market, $prices);
             $market['signal'] = $signal;
             $market['expected_gross_move_percent'] = round((float) ($signal['expected_gross_move_percent'] ?? 0.0), 4);
             $market['estimated_roundtrip_cost_percent'] = round((float) ($signal['estimated_roundtrip_cost_percent'] ?? 0.0), 4);
@@ -90,9 +153,9 @@ final class NobitexUniverseScanner
             self::$processSnapshotCache[$symbol] = $market;
         }
 
-        // This sort does not decide eligibility. Every executable market above
-        // has already been analyzed. It only chooses which profitable order is
-        // submitted first if capital/risk limits prevent simultaneous entries.
+        // Sorting happens only after every executable market has been analyzed.
+        // It decides execution order when capital/risk constraints prevent all
+        // profitable entries from being sent at once; it never creates eligibility.
         usort($analyzed, static function (array $a, array $b) use ($preferredQuote): int {
             $aBuy = (($a['signal']['action'] ?? '') === 'buy') ? 1 : 0;
             $bBuy = (($b['signal']['action'] ?? '') === 'buy') ? 1 : 0;
@@ -113,7 +176,7 @@ final class NobitexUniverseScanner
             return ((float) ($b['depth_quote'] ?? 0.0)) <=> ((float) ($a['depth_quote'] ?? 0.0));
         });
 
-        self::$processUniverseCache[$cacheKey] = $analyzed;
+        self::$processUniverseCache[$preferredQuote] = $analyzed;
         return $analyzed;
     }
 
@@ -136,12 +199,40 @@ final class NobitexUniverseScanner
         $market = $this->market($symbol, $book, $stats, $options);
         if ($market === null) throw new \RuntimeException('Nobitex market is unavailable: ' . $symbol);
 
-        $minutePrices = $this->minuteHistory($client, $symbol, (float) $market['price']);
-        $market['prices'] = $minutePrices;
+        $pdo = Database::connection();
+        $this->ensureCacheSchema($pdo);
+        $cached = $this->loadOneHistoryCache($pdo, $symbol);
+        $prices = $this->cachedPrices($cached);
+        $fetchedAt = trim((string) ($cached['fetched_at'] ?? '')) ?: null;
+        $fetchTs = $fetchedAt ? (strtotime($fetchedAt . ' UTC') ?: 0) : 0;
+        $needsRefresh = count($prices) < 60 || $fetchTs <= 0 || time() - $fetchTs >= self::POSITION_HISTORY_REFRESH_SECONDS;
+
+        if ($needsRefresh && $this->reserveOhlcBudget($pdo, 1) === 1) {
+            try {
+                $history = $client->ohlc($symbol, '1', 480);
+                $fresh = $this->minutePricesFromResponse($history, 0.0);
+                if ($fresh !== []) {
+                    $prices = $fresh;
+                    $fetchedAt = gmdate('Y-m-d H:i:s');
+                }
+            } catch (\Throwable) {}
+        }
+
+        $minute = gmdate('Y-m-d H:i:00');
+        $prices = $this->mergeLivePrice(
+            $prices,
+            (float) $market['price'],
+            trim((string) ($cached['last_observed_minute'] ?? '')),
+            $minute
+        );
+        $this->saveOneHistoryCache($pdo, $symbol, $prices, $fetchedAt, $minute);
+
+        $market['prices'] = $prices;
         $market['analysis_resolution'] = '1m';
         $market['full_universe_analysis'] = false;
+        $market['history_fetched_at'] = $fetchedAt;
 
-        $signal = $this->signals->analyze($market, $minutePrices);
+        $signal = $this->signals->analyze($market, $prices);
         $market['signal'] = $signal;
         $market['expected_gross_move_percent'] = round((float) ($signal['expected_gross_move_percent'] ?? 0.0), 4);
         $market['estimated_roundtrip_cost_percent'] = round((float) ($signal['estimated_roundtrip_cost_percent'] ?? 0.0), 4);
@@ -152,13 +243,143 @@ final class NobitexUniverseScanner
         return $market;
     }
 
-    private function minuteHistory(NobitexClient $client, string $symbol, float $lastPrice): array
+    private function ensureCacheSchema(PDO $pdo): void
     {
-        try {
-            return $this->minutePricesFromResponse($client->ohlc($symbol, '1', 480), $lastPrice);
-        } catch (\Throwable) {
-            return $lastPrice > 0 ? [$lastPrice] : [];
+        if (self::$cacheSchemaEnsured) return;
+
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS nobitex_market_history_cache (
+                symbol VARCHAR(40) NOT NULL PRIMARY KEY,
+                prices_json LONGTEXT NOT NULL,
+                fetched_at DATETIME NULL,
+                last_observed_minute DATETIME NULL,
+                updated_at DATETIME NOT NULL,
+                INDEX idx_nobitex_history_fetched (fetched_at),
+                INDEX idx_nobitex_history_updated (updated_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS nobitex_api_rate_budget (
+                budget_key VARCHAR(50) NOT NULL PRIMARY KEY,
+                window_started_at DATETIME NOT NULL,
+                used_count SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+                updated_at DATETIME NOT NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+        self::$cacheSchemaEnsured = true;
+    }
+
+    /**
+     * Reserves request slots transactionally across cron/manual runs. We cap at
+     * 55 per rolling local 60-second budget, leaving headroom below Nobitex's
+     * documented 60 OHLC requests/minute limit.
+     */
+    private function reserveOhlcBudget(PDO $pdo, int $desired): int
+    {
+        $desired = max(0, $desired);
+        if ($desired === 0) return 0;
+        $this->ensureCacheSchema($pdo);
+
+        return (int) Database::transaction(function (PDO $tx) use ($desired): int {
+            $tx->exec(
+                "INSERT IGNORE INTO nobitex_api_rate_budget
+                    (budget_key,window_started_at,used_count,updated_at)
+                 VALUES ('ohlc',UTC_TIMESTAMP(),0,UTC_TIMESTAMP())"
+            );
+            $stmt = $tx->query(
+                "SELECT window_started_at,used_count
+                 FROM nobitex_api_rate_budget WHERE budget_key='ohlc' FOR UPDATE"
+            );
+            $row = $stmt->fetch() ?: ['window_started_at'=>gmdate('Y-m-d H:i:s'),'used_count'=>0];
+            $start = strtotime((string) $row['window_started_at'] . ' UTC') ?: time();
+            $used = (int) $row['used_count'];
+
+            if (time() - $start >= 60) {
+                $start = time();
+                $used = 0;
+            }
+
+            $remaining = max(0, self::OHLC_REQUESTS_PER_60_SECONDS - $used);
+            $grant = min($desired, $remaining);
+            $newUsed = $used + $grant;
+            $update = $tx->prepare(
+                "UPDATE nobitex_api_rate_budget
+                 SET window_started_at=:started,used_count=:used,updated_at=UTC_TIMESTAMP()
+                 WHERE budget_key='ohlc'"
+            );
+            $update->execute([
+                ':started'=>gmdate('Y-m-d H:i:s', $start),
+                ':used'=>$newUsed,
+            ]);
+            return $grant;
+        });
+    }
+
+    /** @return array<string,array> */
+    private function loadHistoryCache(PDO $pdo): array
+    {
+        $out = [];
+        foreach ($pdo->query('SELECT symbol,prices_json,fetched_at,last_observed_minute FROM nobitex_market_history_cache')->fetchAll() as $row) {
+            if (!is_array($row)) continue;
+            $symbol = strtoupper((string) ($row['symbol'] ?? ''));
+            if ($symbol !== '') $out[$symbol] = $row;
         }
+        return $out;
+    }
+
+    private function loadOneHistoryCache(PDO $pdo, string $symbol): array
+    {
+        $stmt = $pdo->prepare('SELECT symbol,prices_json,fetched_at,last_observed_minute FROM nobitex_market_history_cache WHERE symbol=:symbol LIMIT 1');
+        $stmt->execute([':symbol'=>$symbol]);
+        $row = $stmt->fetch();
+        return is_array($row) ? $row : [];
+    }
+
+    private function saveOneHistoryCache(PDO $pdo, string $symbol, array $prices, ?string $fetchedAt, string $minute): void
+    {
+        $stmt = $pdo->prepare(
+            "INSERT INTO nobitex_market_history_cache
+                (symbol,prices_json,fetched_at,last_observed_minute,updated_at)
+             VALUES (:symbol,:prices,:fetched_at,:minute,UTC_TIMESTAMP())
+             ON DUPLICATE KEY UPDATE
+                prices_json=VALUES(prices_json),fetched_at=VALUES(fetched_at),
+                last_observed_minute=VALUES(last_observed_minute),updated_at=UTC_TIMESTAMP()"
+        );
+        $stmt->execute([
+            ':symbol'=>$symbol,
+            ':prices'=>json_encode(array_slice($prices, -480), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES),
+            ':fetched_at'=>$fetchedAt,
+            ':minute'=>$minute,
+        ]);
+    }
+
+    private function cachedPrices(array $cached): array
+    {
+        $decoded = json_decode((string) ($cached['prices_json'] ?? '[]'), true);
+        return is_array($decoded) ? $this->cleanPrices($decoded) : [];
+    }
+
+    private function cleanPrices(array $prices): array
+    {
+        $out = [];
+        foreach ($prices as $price) {
+            $n = $this->number($price);
+            if ($n > 0) $out[] = $n;
+        }
+        return array_slice($out, -480);
+    }
+
+    private function mergeLivePrice(array $prices, float $price, string $lastObservedMinute, string $minute): array
+    {
+        $prices = $this->cleanPrices($prices);
+        if ($price <= 0) return $prices;
+
+        if ($lastObservedMinute === $minute && $prices !== []) {
+            $prices[count($prices) - 1] = $price;
+        } else {
+            $prices[] = $price;
+        }
+        return array_slice($prices, -480);
     }
 
     private function minutePricesFromResponse(array $history, float $lastPrice): array
@@ -171,7 +392,6 @@ final class NobitexUniverseScanner
                 if ($n > 0) $prices[] = $n;
             }
         }
-
         if ($lastPrice > 0 && ($prices === [] || abs((float) end($prices) - $lastPrice) > 0.00000001)) {
             $prices[] = $lastPrice;
         }
@@ -197,9 +417,9 @@ final class NobitexUniverseScanner
     }
 
     /**
-     * Executability filter only. It rejects malformed books, crossed/very-wide
-     * books and markets whose visible depth cannot cover even a minimal order.
-     * It does not rank assets by momentum, popularity or a synthetic score.
+     * Executability filter only. It rejects malformed/crossed books, very wide
+     * spreads and markets whose visible depth cannot cover a minimal order. It
+     * never ranks assets by momentum, popularity or a synthetic score.
      */
     private function market(string $symbol, array $book, array $stats, array $options): ?array
     {
