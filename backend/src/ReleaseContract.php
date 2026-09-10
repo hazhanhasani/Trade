@@ -25,6 +25,7 @@ final class ReleaseContract
         'trading.execution_quality_v5',
         'trading.adaptive_exit_v2',
         'trading.portfolio_rotation_v1',
+        'trading.portfolio_rotation_monitor_v1',
         'trading.multi_pending',
         'trading.pending_watchdog',
         'trading.kill_switch',
