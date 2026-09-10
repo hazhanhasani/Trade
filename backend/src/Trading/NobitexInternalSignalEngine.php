@@ -7,19 +7,18 @@ namespace Trade\Trading;
 /**
  * Profit-first, score-free Nobitex signal engine.
  *
- * A market is bought when the expected move remains positive after estimated
- * taker fees, the live bid/ask spread and a volatility-based slippage reserve.
- * There is no point score, voting threshold, top-N gate or hidden model-margin
- * requirement. `score` remains zero only for legacy database compatibility.
+ * Markets are evaluated using expected move minus explicit execution costs and
+ * an explicit adaptive forecast-error buffer. The buffer is not a score and is
+ * returned in every signal so a positive raw Net Edge can never be silently
+ * treated as tradable when its margin is too small for current market noise.
  */
 final class NobitexInternalSignalEngine
 {
-    // Base-tier two-sided taker fee assumptions for the two spot quote families.
-    // These are deliberately kept separate because using the IRT cost for USDT
-    // materially suppresses otherwise positive USDT opportunities.
     private const IRT_ROUNDTRIP_TAKER_FEE_PERCENT = 0.50;
     private const USDT_ROUNDTRIP_TAKER_FEE_PERCENT = 0.26;
     private const MAX_EXECUTABLE_SPREAD_PERCENT = 1.50;
+    private const MIN_EDGE_BUFFER_PERCENT = 0.20;
+    private const MAX_EDGE_BUFFER_PERCENT = 0.85;
 
     public function __construct(private readonly SignalEngine $base = new SignalEngine()) {}
 
@@ -35,8 +34,6 @@ final class NobitexInternalSignalEngine
             return $this->notReady($minute, $five, $fifteen, 'insufficient_internal_mtf_history');
         }
 
-        // SignalEngine is used only as an indicator calculator here. Its generic
-        // economic decision is ignored; this engine owns the Nobitex decision.
         $one = $this->base->analyze($market + ['prices'=>$minute], 60);
         $fiveSignal = $this->base->analyze($market + ['prices'=>$five], 60);
         $fifteenSignal = $this->base->analyze($market + ['prices'=>$fifteen], 60);
@@ -48,8 +45,6 @@ final class NobitexInternalSignalEngine
         $spread = max(0.0, (float) ($market['spread_percent'] ?? 0.0));
         $imbalance = $this->clamp((float) ($market['orderbook_imbalance'] ?? 0.0), -1.0, 1.0);
 
-        // Multi-timeframe directional estimate. Features are continuous; there
-        // are no "N out of M" votes and no synthetic minimum score.
         $m1 = $this->clamp((float) ($i1['momentum_5_percent'] ?? 0.0), -2.0, 2.0);
         $m5 = $this->clamp((float) ($i5['momentum_5_percent'] ?? 0.0), -4.0, 4.0);
         $m15 = $this->clamp((float) ($i15['momentum_5_percent'] ?? 0.0), -6.0, 6.0);
@@ -79,50 +74,65 @@ final class NobitexInternalSignalEngine
         if ($rsi1 <= 22.0 && $m1 < 0.0) $rsiPenalty += 0.20;
 
         $flowBias = $imbalance * 0.35;
-
-        $gross = ($momentum * 0.52)
+        $rawGross = ($momentum * 0.52)
             + ($trend * 0.34)
             + ($macdPressure * 0.75)
             + $consistencyBias
             + $flowBias
             - $rsiPenalty;
 
+        // Penalize contradictory short/medium-term regimes instead of using a
+        // binary trend gate. Strong opportunities can still pass if their edge
+        // remains positive after this explicitly reported reversal risk.
+        $regimePenalty = 0.0;
+        if ($m1 < 0.0 && $m5 < 0.0) {
+            $regimePenalty += min(0.25, (abs($m1) * 0.08) + (abs($m5) * 0.03));
+        }
+        if ($m5 < 0.0 && $m15 < 0.0) {
+            $regimePenalty += min(0.30, (abs($m5) * 0.03) + (abs($m15) * 0.02));
+        }
+        if ($trend < 0.0) {
+            $regimePenalty += min(0.20, abs($trend) * 0.08);
+        }
+        $gross = $rawGross - $regimePenalty;
+
         $vol1 = max(0.0, (float) ($i1['volatility_percent'] ?? 0.0));
         $vol5 = max(0.0, (float) ($i5['volatility_percent'] ?? 0.0));
         $volatility = ($vol1 * 0.65) + ($vol5 * 0.35);
 
-        // Economic cost only: two-sided taker fee + observed spread + a
-        // volatility/slippage reserve. Volatility is priced into the trade once;
-        // it is not also used as a hidden hard gate after Net Edge is positive.
         $baseFee = $this->baseRoundtripFeePercent($market);
         $spreadCost = min(self::MAX_EXECUTABLE_SPREAD_PERCENT, $spread);
         $slippageNoiseReserve = min(1.25, $volatility * 0.15);
         $estimatedCost = $baseFee + $spreadCost + $slippageNoiseReserve;
 
         $netEdge = $gross - $estimatedCost;
-        $expectedNetProfit = $netEdge > 0.0;
 
-        // The MTF histories were already validated above. SignalEngine is only
-        // an indicator calculator for Nobitex, so its generic volatility gate
-        // must not override this engine's profitability decision.
+        // Forecast error grows with both transaction friction and observed
+        // volatility. This is intentionally visible in the returned signal.
+        $edgeBuffer = $this->clamp(
+            0.20 + min(0.30, $estimatedCost * 0.30) + min(0.35, $volatility * 0.08),
+            self::MIN_EDGE_BUFFER_PERCENT,
+            self::MAX_EDGE_BUFFER_PERCENT
+        );
+        $tradableNetEdge = $netEdge - $edgeBuffer;
+        $expectedNetProfit = $tradableNetEdge > 0.0;
+
         $ready = $spread <= self::MAX_EXECUTABLE_SPREAD_PERCENT
             && is_finite($gross)
             && is_finite($estimatedCost)
-            && is_finite($netEdge);
+            && is_finite($netEdge)
+            && is_finite($tradableNetEdge);
 
-        // Entry is purely economic after the market is executable.
         $buyGate = $ready && $expectedNetProfit;
 
-        // Spot exits cannot short. Negative forward edge is used only to decide
-        // whether an existing position should be released before the hard stop.
         $estimatedExitCost = $estimatedCost * 0.50;
         $sellGate = $ready && $gross < -max(0.05, $estimatedExitCost);
 
         $action = 'hold';
-        $reason = 'expected_net_profit_not_positive';
+        $reason = 'edge_below_adaptive_safety_buffer';
         if ($buyGate) {
             $action = 'buy';
-            $reason = 'positive_expected_net_profit_after_costs';
+            $reason = 'positive_tradable_net_edge_after_costs_and_buffer';
         } elseif ($sellGate) {
             $action = 'sell';
             $reason = 'expected_forward_move_negative_after_exit_cost';
@@ -132,8 +142,7 @@ final class NobitexInternalSignalEngine
                 : 'market_quality_not_ready';
         }
 
-        // Confidence is display/diagnostic metadata only. It never gates orders.
-        $edgeToCost = $estimatedCost > 0.0 ? $netEdge / $estimatedCost : 0.0;
+        $edgeToCost = $estimatedCost > 0.0 ? $tradableNetEdge / $estimatedCost : $tradableNetEdge;
         $confidence = $ready
             ? min(100, max(0, (int) round(50.0 + ($edgeToCost * 35.0))))
             : 0;
@@ -152,23 +161,27 @@ final class NobitexInternalSignalEngine
             'confidence_is_gate'=>false,
             'action'=>$action,
             'reason'=>$reason,
-            'decision_model'=>'positive_expected_net_profit',
+            'decision_model'=>'net_edge_after_costs_and_adaptive_forecast_buffer',
             'expected_net_profit'=>$ready && $expectedNetProfit,
             'expected_gross_move_percent'=>round($gross, 4),
+            'raw_expected_gross_move_percent'=>round($rawGross, 4),
+            'regime_risk_penalty_percent'=>round($regimePenalty, 4),
             'estimated_roundtrip_cost_percent'=>round($estimatedCost, 4),
             'estimated_exit_cost_percent'=>round($estimatedExitCost, 4),
             'expected_net_edge_percent'=>round($netEdge, 4),
-            'minimum_net_edge_percent'=>0.0,
+            'required_edge_buffer_percent'=>round($edgeBuffer, 4),
+            'tradable_net_edge_percent'=>round($tradableNetEdge, 4),
+            'minimum_net_edge_percent'=>round($edgeBuffer, 4),
             'cost_model'=>[
                 'quote_asset'=>strtoupper((string) ($market['quote_asset'] ?? 'IRT')),
                 'base_roundtrip_taker_fee_percent'=>round($baseFee, 4),
                 'spread_cost_percent'=>round($spreadCost, 4),
                 'slippage_noise_reserve_percent'=>round($slippageNoiseReserve, 4),
-                'hidden_model_margin_percent'=>0.0,
+                'adaptive_forecast_buffer_percent'=>round($edgeBuffer, 4),
                 'volatility_hard_gate'=>false,
             ],
             'reasons'=>array_values(array_unique($reasons)),
-            'source'=>'nobitex_internal_profit_first_full_universe_v3',
+            'source'=>'nobitex_internal_profit_first_full_universe_v4',
             'timeframes'=>[
                 '1m'=>[
                     'momentum_percent'=>round($m1,4),
@@ -200,6 +213,7 @@ final class NobitexInternalSignalEngine
                 'orderbook_imbalance'=>round($imbalance,4),
                 'spread_percent'=>round($spread,6),
                 'rsi_penalty_percent'=>round($rsiPenalty,4),
+                'regime_risk_penalty_percent'=>round($regimePenalty,4),
             ],
             'tradingview'=>['enabled'=>false,'used'=>false,'required'=>false],
         ];
@@ -222,16 +236,20 @@ final class NobitexInternalSignalEngine
             'confidence_is_gate'=>false,
             'action'=>'hold',
             'reason'=>$reason,
-            'decision_model'=>'positive_expected_net_profit',
+            'decision_model'=>'net_edge_after_costs_and_adaptive_forecast_buffer',
             'expected_net_profit'=>false,
             'expected_gross_move_percent'=>0.0,
+            'raw_expected_gross_move_percent'=>0.0,
+            'regime_risk_penalty_percent'=>0.0,
             'estimated_roundtrip_cost_percent'=>0.0,
             'estimated_exit_cost_percent'=>0.0,
             'expected_net_edge_percent'=>0.0,
+            'required_edge_buffer_percent'=>0.0,
+            'tradable_net_edge_percent'=>0.0,
             'minimum_net_edge_percent'=>0.0,
             'cost_model'=>[],
             'reasons'=>[],
-            'source'=>'nobitex_internal_profit_first_full_universe_v3',
+            'source'=>'nobitex_internal_profit_first_full_universe_v4',
             'timeframes'=>[
                 '1m'=>['samples'=>count($minute)],
                 '5m'=>['samples'=>count($five)],
