@@ -9,9 +9,10 @@ use Trade\Exchange\NobitexClient;
 /**
  * Discovers the complete Nobitex spot universe every tick.
  *
- * The full IRT/USDT order-book universe is pre-scanned each minute. Deep OHLC
- * analysis is then limited to the best liquid candidates to stay comfortably
- * inside public API limits. TradingView is not part of the execution path.
+ * Every IRT/USDT order book is pre-scanned each minute. Deep 1m/5m/15m analysis
+ * is then applied to the most liquid executable markets. Final ranking is based
+ * on expected net trading edge after estimated execution costs, not a signal
+ * score threshold.
  */
 final class NobitexUniverseScanner
 {
@@ -24,7 +25,7 @@ final class NobitexUniverseScanner
         NobitexClient $client,
         string $preferredQuote = 'IRT',
         int $limit = 20,
-        int $threshold = 60
+        int $legacyThreshold = 60
     ): array {
         $preferredQuote = $this->quote($preferredQuote);
         $limit = max(3, min(20, $limit));
@@ -34,7 +35,7 @@ final class NobitexUniverseScanner
 
         $markets = $this->marketsFromAll($all, $stats, $options, $preferredQuote);
         $universeSize = count($markets);
-        usort($markets, static fn(array $a, array $b): int => ($b['pre_score'] <=> $a['pre_score']));
+        usort($markets, static fn(array $a, array $b): int => ($b['pre_rank'] <=> $a['pre_rank']));
         $markets = array_slice($markets, 0, $limit);
         $deepScanSize = count($markets);
 
@@ -45,30 +46,41 @@ final class NobitexUniverseScanner
             $market['analysis_resolution'] = '1m';
             $market['universe_size'] = $universeSize;
             $market['deep_scan_size'] = $deepScanSize;
-            $signal = $this->signals->analyze($market, $minutePrices, $threshold);
+            $signal = $this->signals->analyze($market, $minutePrices, $legacyThreshold);
             $market['signal'] = $signal;
 
-            $liquidityBonus = min(15.0, max(0.0, log10(max(1.0, (float) $market['depth_quote'])) * 2.0));
-            $spreadPenalty = min(25.0, max(0.0, (float) $market['spread_percent'] * 10.0));
-            $preferredBonus = $market['quote_asset'] === $preferredQuote ? 4.0 : 0.0;
-            $readinessPenalty = ($signal['ready'] ?? false) ? 0.0 : 35.0;
-            $market['opportunity_score'] = round(
-                (float) ($signal['score'] ?? 0) + $liquidityBonus + $preferredBonus - $spreadPenalty - $readinessPenalty,
-                4
-            );
+            $netEdge = (float) ($signal['expected_net_edge_percent'] ?? -999.0);
+            $gross = (float) ($signal['expected_gross_move_percent'] ?? 0.0);
+            $cost = (float) ($signal['estimated_roundtrip_cost_percent'] ?? 0.0);
+            $market['expected_gross_move_percent'] = round($gross, 4);
+            $market['estimated_roundtrip_cost_percent'] = round($cost, 4);
+            $market['expected_net_edge_percent'] = round($netEdge, 4);
+
+            // Backward-compatible field retained for older UI code. It now
+            // equals the estimated net edge percentage; it is not a score.
+            $market['opportunity_score'] = round($netEdge, 4);
             $ranked[] = $market;
         }
 
         usort($ranked, static function (array $a, array $b): int {
+            $aReady = (bool) ($a['signal']['ready'] ?? false);
+            $bReady = (bool) ($b['signal']['ready'] ?? false);
+            if ($aReady !== $bReady) return $bReady <=> $aReady;
+
             $aBuy = (($a['signal']['action'] ?? '') === 'buy') ? 1 : 0;
             $bBuy = (($b['signal']['action'] ?? '') === 'buy') ? 1 : 0;
             if ($aBuy !== $bBuy) return $bBuy <=> $aBuy;
-            return ($b['opportunity_score'] <=> $a['opportunity_score']);
+
+            $aEdge = (float) ($a['expected_net_edge_percent'] ?? -999.0);
+            $bEdge = (float) ($b['expected_net_edge_percent'] ?? -999.0);
+            if (abs($aEdge - $bEdge) > 0.000001) return $bEdge <=> $aEdge;
+
+            return ((float) ($b['depth_quote'] ?? 0.0)) <=> ((float) ($a['depth_quote'] ?? 0.0));
         });
         return $ranked;
     }
 
-    public function snapshotSymbol(NobitexClient $client, string $symbol, int $threshold = 60): array
+    public function snapshotSymbol(NobitexClient $client, string $symbol, int $legacyThreshold = 60): array
     {
         $symbol = strtoupper(preg_replace('/[^A-Z0-9]/', '', $symbol) ?? '');
         [$base, $quote] = $this->parseSymbol($symbol);
@@ -83,7 +95,12 @@ final class NobitexUniverseScanner
         $minutePrices = $this->minuteHistory($client, $symbol, (float) $market['price']);
         $market['prices'] = $minutePrices;
         $market['analysis_resolution'] = '1m';
-        $market['signal'] = $this->signals->analyze($market, $minutePrices, $threshold);
+        $signal = $this->signals->analyze($market, $minutePrices, $legacyThreshold);
+        $market['signal'] = $signal;
+        $market['expected_gross_move_percent'] = round((float) ($signal['expected_gross_move_percent'] ?? 0.0), 4);
+        $market['estimated_roundtrip_cost_percent'] = round((float) ($signal['estimated_roundtrip_cost_percent'] ?? 0.0), 4);
+        $market['expected_net_edge_percent'] = round((float) ($signal['expected_net_edge_percent'] ?? 0.0), 4);
+        $market['opportunity_score'] = $market['expected_net_edge_percent'];
         return $market;
     }
 
@@ -161,7 +178,7 @@ final class NobitexUniverseScanner
             'orderbook_imbalance'=>$imbalance,
             'base_precision'=>$this->amountPrecision($options, $symbol, 8),
             'min_order_quote'=>$minOrder,
-            'pre_score'=>round($liquidityComponent + $trendComponent + $preferredBonus - $spreadPenalty, 4),
+            'pre_rank'=>round($liquidityComponent + $trendComponent + $preferredBonus - $spreadPenalty, 4),
             'observed_at'=>gmdate(DATE_ATOM),
         ];
     }
