@@ -11,6 +11,7 @@ use Trade\Security\AppAccess;
 use Trade\Trading\BotController;
 use Trade\Trading\NobitexAutoTraderEngine;
 use Trade\Trading\NobitexEdgeCalibration;
+use Trade\Trading\NobitexExecutionLearning;
 use Trade\Trading\NobitexOrderService;
 use Trade\Trading\NobitexPerformanceAnalytics;
 use Trade\Trading\NobitexPortfolioValuation;
@@ -91,6 +92,7 @@ try{
     if($method==='GET'&&$path==='/api/bot/recent')respond(['ok'=>true,'data'=>$controller->recentData(isset($_GET['limit'])?(int)$_GET['limit']:25)]);
     if($method==='GET'&&$path==='/api/bot/rotation')respond(['ok'=>true,'data'=>(new NobitexRotationMonitor())->snapshot(isset($_GET['limit'])?(int)$_GET['limit']:20)]);
     if($method==='GET'&&$path==='/api/bot/strategy-learning')respond(['ok'=>true,'data'=>(new NobitexStrategyLearning())->snapshot(null,isset($_GET['limit'])?(int)$_GET['limit']:240)]);
+    if($method==='GET'&&$path==='/api/bot/execution-learning')respond(['ok'=>true,'data'=>(new NobitexExecutionLearning())->snapshot(null,isset($_GET['limit'])?(int)$_GET['limit']:240)]);
     if($method==='GET'&&$path==='/api/bot/edge-calibration')respond(['ok'=>true,'data'=>(new NobitexEdgeCalibration())->snapshot()]);
     if($method==='GET'&&$path==='/api/portfolio/global')respond(['ok'=>true,'data'=>globalPortfolioSnapshot()]);
     if($method==='GET'&&$path==='/api/analytics')respond(['ok'=>true,'data'=>(new NobitexPerformanceAnalytics())->snapshot(null,isset($_GET['days'])?(int)$_GET['days']:30)]);
