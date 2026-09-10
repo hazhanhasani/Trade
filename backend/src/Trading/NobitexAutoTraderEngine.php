@@ -10,10 +10,10 @@ use Trade\Database;
 /**
  * Nobitex live orchestration entry point.
  *
- * The tick now coordinates fee accounting, realized-performance intelligence,
- * one global IRT-normalized exposure budget, bounded order repricing, smart
- * candidate fallback and guarded portfolio rotation. Reduction-only risk
- * policies are process scoped and always cleared in finally.
+ * The tick coordinates fee accounting, portfolio intelligence, one global
+ * RLS-native/Toman-display exposure budget, bounded order repricing, smart
+ * candidate fallback and guarded portfolio rotation. Runtime diagnostics use
+ * NobitexRuntimeModels so stale legacy model names cannot survive upgrades.
  */
 final class NobitexAutoTraderEngine
 {
@@ -61,8 +61,9 @@ final class NobitexAutoTraderEngine
                 $reason = $e->reasonCode();
 
                 // Portfolio-wide valuation/exposure failures apply to every
-                // candidate. Retrying eight symbols would only repeat wallet and
-                // conversion calls, so stop the tick without mutating cooldowns.
+                // candidate. Retrying symbols would only repeat the same wallet
+                // and conversion calls, so stop this tick without mutating more
+                // candidate cooldowns.
                 if (str_starts_with($reason, 'global_portfolio_')) {
                     $last = [
                         'status'=>'no_trade',
@@ -130,7 +131,10 @@ final class NobitexAutoTraderEngine
                     $rotation = (new NobitexPortfolioRotation())->attempt();
                 } catch (\Throwable $e) {
                     $rotation = [
-                        'status'=>'no_rotation','exchange'=>'nobitex','reason'=>'rotation_engine_error','error'=>mb_substr($e->getMessage(), 0, 240),
+                        'status'=>'no_rotation',
+                        'exchange'=>'nobitex',
+                        'reason'=>'rotation_engine_error',
+                        'error'=>mb_substr($e->getMessage(), 0, 240),
                     ];
                 }
                 $rotationStatus = (string)($rotation['status'] ?? 'no_rotation');
@@ -151,8 +155,10 @@ final class NobitexAutoTraderEngine
             'position_size_multiplier'=>NobitexPortfolioIntelligence::runtimePositionMultiplier(),
             'entry_learning'=>$entryLearning,
             'smart_candidate_fallback'=>[
-                'enabled'=>true,'max_rejections_per_tick'=>self::MAX_FALLBACKS_PER_TICK,
-                'temporary_skip_seconds'=>self::FALLBACK_SKIP_SECONDS,'rejected_candidates'=>$fallbackRejections,
+                'enabled'=>true,
+                'max_rejections_per_tick'=>self::MAX_FALLBACKS_PER_TICK,
+                'temporary_skip_seconds'=>self::FALLBACK_SKIP_SECONDS,
+                'rejected_candidates'=>$fallbackRejections,
             ],
         ];
         $portfolioContext = [
@@ -165,6 +171,7 @@ final class NobitexAutoTraderEngine
             $result = $this->stripLegacyScores(is_array($last) ? $last : [
                 'status'=>'no_trade','exchange'=>'nobitex','reason'=>'no_actionable_profit',
             ]);
+            $result['runtime_models'] = $this->runtimeModels();
             $result['accounting'] = ['before'=>$accountingBefore,'after'=>$accountingAfter];
             $result['intelligence'] = $intelligenceContext;
             $result['global_portfolio'] = $portfolioContext;
@@ -176,6 +183,7 @@ final class NobitexAutoTraderEngine
             $one = $actions[0];
             $one['continuation_status'] = $last['status'];
             if (isset($last['rotation'])) $one['rotation'] = $last['rotation'];
+            $one['runtime_models'] = $this->runtimeModels();
             $one['accounting'] = ['before'=>$accountingBefore,'after'=>$accountingAfter];
             $one['intelligence'] = $intelligenceContext;
             $one['global_portfolio'] = $portfolioContext;
@@ -186,12 +194,17 @@ final class NobitexAutoTraderEngine
         return [
             'status'=>'profit_actions_processed',
             'exchange'=>'nobitex',
-            'decision_model'=>'net_edge_after_execution_quality_and_adaptive_forecast_buffer_v5',
-            'execution_model'=>'execution_quality_v2',
-            'global_portfolio_model'=>'global_quote_normalization_v1',
-            'rotation_model'=>'guarded_opportunity_replacement_v1',
+            'strategy_mode'=>NobitexRuntimeModels::STRATEGY_MODE,
+            'decision_model'=>NobitexRuntimeModels::DECISION,
+            'selection_model'=>NobitexRuntimeModels::SELECTION,
+            'execution_model'=>NobitexRuntimeModels::EXECUTION,
+            'global_portfolio_model'=>NobitexRuntimeModels::GLOBAL_PORTFOLIO,
+            'rotation_model'=>NobitexRuntimeModels::ROTATION,
             'intelligence_model'=>NobitexPortfolioIntelligence::MODEL,
-            'fallback_model'=>'smart_candidate_fallback_v1',
+            'strategy_learning_model'=>NobitexRuntimeModels::STRATEGY_LEARNING,
+            'edge_calibration_model'=>NobitexRuntimeModels::EDGE_CALIBRATION,
+            'order_value_guard_model'=>NobitexRuntimeModels::ORDER_VALUE_GUARD,
+            'fallback_model'=>NobitexRuntimeModels::FALLBACK,
             'score_based_selection'=>false,
             'actions_count'=>count($actions),
             'actions'=>$actions,
@@ -207,25 +220,61 @@ final class NobitexAutoTraderEngine
     {
         NobitexSchema::ensure();
         $pdo = Database::connection();
-        if (!$this->settingIsTrue($pdo, 'nobitex_bootstrap_first_buy_pending')) return ['status'=>'not_pending','exchange'=>'nobitex'];
+        if (!$this->settingIsTrue($pdo, 'nobitex_bootstrap_first_buy_pending')) {
+            return [
+                'status'=>'not_pending',
+                'exchange'=>'nobitex',
+                'selection_model'=>NobitexRuntimeModels::SELECTION,
+                'decision_model'=>NobitexRuntimeModels::DECISION,
+            ];
+        }
         Database::transaction(function (PDO $tx): void {
             $this->writeSetting($tx, 'nobitex_bootstrap_first_buy_pending', '0');
             $this->writeSetting($tx, 'nobitex_bootstrap_retired_at', gmdate('Y-m-d H:i:s'));
-            $this->writeSetting($tx, 'nobitex_selection_model', 'net_edge_after_execution_quality_and_adaptive_forecast_buffer_v5');
+            $this->writeSetting($tx, 'nobitex_selection_model', NobitexRuntimeModels::SELECTION);
         });
-        return ['status'=>'not_pending','exchange'=>'nobitex','bootstrap'=>'retired_score_gate','selection_model'=>'net_edge_after_execution_quality_and_adaptive_forecast_buffer_v5'];
+        return [
+            'status'=>'not_pending',
+            'exchange'=>'nobitex',
+            'bootstrap'=>'retired_score_gate',
+            'selection_model'=>NobitexRuntimeModels::SELECTION,
+            'decision_model'=>NobitexRuntimeModels::DECISION,
+        ];
+    }
+
+    /** @return array<string,string> */
+    private function runtimeModels(): array
+    {
+        return [
+            'strategy_mode'=>NobitexRuntimeModels::STRATEGY_MODE,
+            'decision'=>NobitexRuntimeModels::DECISION,
+            'selection'=>NobitexRuntimeModels::SELECTION,
+            'execution'=>NobitexRuntimeModels::EXECUTION,
+            'global_portfolio'=>NobitexRuntimeModels::GLOBAL_PORTFOLIO,
+            'rotation'=>NobitexRuntimeModels::ROTATION,
+            'strategy_learning'=>NobitexRuntimeModels::STRATEGY_LEARNING,
+            'edge_calibration'=>NobitexRuntimeModels::EDGE_CALIBRATION,
+            'order_value_guard'=>NobitexRuntimeModels::ORDER_VALUE_GUARD,
+            'fallback'=>NobitexRuntimeModels::FALLBACK,
+        ];
     }
 
     private function safeActivateIntelligence(NobitexPortfolioIntelligence $intelligence): array
     {
         try { return ['status'=>'ok','snapshot'=>$intelligence->activateRuntimePolicy()]; }
-        catch (\Throwable $e) { NobitexPortfolioIntelligence::clearRuntimePolicy(); return ['status'=>'deferred','error'=>mb_substr($e->getMessage(), 0, 300)]; }
+        catch (\Throwable $e) {
+            NobitexPortfolioIntelligence::clearRuntimePolicy();
+            return ['status'=>'deferred','error'=>mb_substr($e->getMessage(), 0, 300)];
+        }
     }
 
     private function safeActivateGlobalRisk(NobitexGlobalRiskRuntime $risk): array
     {
         try { return ['status'=>'ok','snapshot'=>$risk->activate()]; }
-        catch (\Throwable $e) { NobitexGlobalRiskRuntime::clear(); return ['status'=>'deferred','error'=>mb_substr($e->getMessage(), 0, 300)]; }
+        catch (\Throwable $e) {
+            NobitexGlobalRiskRuntime::clear();
+            return ['status'=>'deferred','error'=>mb_substr($e->getMessage(), 0, 300)];
+        }
     }
 
     private function safeExecutionReprice(): array
@@ -245,10 +294,21 @@ final class NobitexAutoTraderEngine
         $symbol = strtoupper(preg_replace('/[^A-Z0-9]/', '', $symbol) ?? '');
         if ($symbol === '') return ['applied'=>false,'reason'=>'invalid_symbol'];
         $stmt = $pdo->prepare("SELECT value_text FROM settings WHERE key_name='cooldown_minutes' LIMIT 1");
-        $stmt->execute();$raw=$stmt->fetchColumn();$cooldownMinutes=is_numeric($raw)?(int)$raw:15;$cooldownMinutes=max(1,min(1440,$cooldownMinutes));
-        $cooldownSeconds=$cooldownMinutes*60;$remainingSeconds=max(15,min($cooldownSeconds,max(15,$requestedSeconds)));$syntheticLastTrade=time()-max(0,$cooldownSeconds-$remainingSeconds);
-        $key='nobitex_last_trade_'.substr(sha1($symbol),0,16);$this->writeSetting($pdo,$key,gmdate('Y-m-d H:i:s',$syntheticLastTrade));
-        return ['applied'=>true,'symbol'=>$symbol,'remaining_seconds'=>$remainingSeconds,'until'=>gmdate(DATE_ATOM,time()+$remainingSeconds)];
+        $stmt->execute();
+        $raw=$stmt->fetchColumn();
+        $cooldownMinutes=is_numeric($raw)?(int)$raw:15;
+        $cooldownMinutes=max(1,min(1440,$cooldownMinutes));
+        $cooldownSeconds=$cooldownMinutes*60;
+        $remainingSeconds=max(15,min($cooldownSeconds,max(15,$requestedSeconds)));
+        $syntheticLastTrade=time()-max(0,$cooldownSeconds-$remainingSeconds);
+        $key='nobitex_last_trade_'.substr(sha1($symbol),0,16);
+        $this->writeSetting($pdo,$key,gmdate('Y-m-d H:i:s',$syntheticLastTrade));
+        return [
+            'applied'=>true,
+            'symbol'=>$symbol,
+            'remaining_seconds'=>$remainingSeconds,
+            'until'=>gmdate(DATE_ATOM,time()+$remainingSeconds),
+        ];
     }
 
     private function safeAccountingSync(NobitexTradeAccounting $accounting): array
@@ -259,14 +319,21 @@ final class NobitexAutoTraderEngine
 
     private function settingIsTrue(PDO $pdo, string $key): bool
     {
-        $stmt=$pdo->prepare('SELECT value_text FROM settings WHERE key_name=:key LIMIT 1');$stmt->execute([':key'=>$key]);return in_array(strtolower(trim((string)($stmt->fetchColumn()?:'0'))),['1','true','yes','on'],true);
+        $stmt=$pdo->prepare('SELECT value_text FROM settings WHERE key_name=:key LIMIT 1');
+        $stmt->execute([':key'=>$key]);
+        return in_array(strtolower(trim((string)($stmt->fetchColumn()?:'0'))),['1','true','yes','on'],true);
     }
+
     private function writeSetting(PDO $pdo,string $key,string $value):void
     {
-        $stmt=$pdo->prepare("INSERT INTO settings (key_name,value_text,updated_at) VALUES (:key,:value,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE value_text=VALUES(value_text),updated_at=UTC_TIMESTAMP()");$stmt->execute([':key'=>$key,':value'=>$value]);
+        $stmt=$pdo->prepare("INSERT INTO settings (key_name,value_text,updated_at) VALUES (:key,:value,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE value_text=VALUES(value_text),updated_at=UTC_TIMESTAMP()");
+        $stmt->execute([':key'=>$key,':value'=>$value]);
     }
+
     private function stripLegacyScores(array $value):array
     {
-        foreach(['score','signal_score','opportunity_score','minimum_score']as$key)unset($value[$key]);foreach($value as$key=>$item)if(is_array($item))$value[$key]=$this->stripLegacyScores($item);return$value;
+        foreach(['score','signal_score','opportunity_score','minimum_score'] as $key) unset($value[$key]);
+        foreach($value as $key=>$item) if(is_array($item)) $value[$key]=$this->stripLegacyScores($item);
+        return$value;
     }
 }
