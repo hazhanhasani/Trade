@@ -37,6 +37,11 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
         return request("GET", "/api/bot/strategy-learning?limit=${limit.coerceIn(30, 500)}")
     }
 
+    suspend fun edgeCalibration(): Response {
+        requireCapability("trading.adaptive_edge_calibration_v1")
+        return request("GET", "/api/bot/edge-calibration")
+    }
+
     suspend fun globalPortfolio(): Response {
         requireCapability("trading.global_portfolio_exposure_v1")
         return request("GET", "/api/portfolio/global")
