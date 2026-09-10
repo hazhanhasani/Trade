@@ -12,6 +12,8 @@ object ReleaseContract {
         "trading.manual_orders",
         "trading.auto_trading",
         "trading.dynamic_position_sizing",
+        "trading.portfolio_rotation_v1",
+        "trading.portfolio_rotation_monitor_v1",
         "trading.multi_pending",
         "trading.pending_watchdog",
         "trading.kill_switch",
