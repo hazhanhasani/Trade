@@ -29,6 +29,10 @@ jobs:
         run: php backend/tests/strategy_learning_v2_test.php
       - name: Adaptive Edge Calibration regression tests
         run: php backend/tests/edge_calibration_test.php
+      - name: Canonical Nobitex fill semantics regression tests
+        run: php backend/tests/nobitex_order_fill_test.php
+      - name: Execution Learning v1 regression tests
+        run: php backend/tests/execution_learning_v1_test.php
       - name: Nobitex order value guard regression tests
         run: php backend/tests/nobitex_order_value_guard_test.php
       - name: Nobitex runtime telemetry regression tests
