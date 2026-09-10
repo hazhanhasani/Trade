@@ -16,6 +16,7 @@ object ReleaseContract {
         "trading.execution_quality_v2",
         "trading.multi_strategy_regime_router_v1",
         "trading.strategy_learning_v2",
+        "trading.adaptive_edge_calibration_v1",
         "trading.global_portfolio_exposure_v1",
         "trading.portfolio_rotation_v1",
         "trading.portfolio_rotation_monitor_v1",
