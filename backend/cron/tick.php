@@ -9,6 +9,7 @@ use Trade\Database;
 use Trade\Integrations\BaleTradeNotifier;
 use Trade\Trading\AutoTraderEngine;
 use Trade\Trading\NobitexAutoTraderEngine;
+use Trade\Trading\NobitexRuntimeModels;
 use Trade\Trading\NobitexSchema;
 use Trade\Updater;
 
@@ -95,11 +96,17 @@ try {
 
     $baseSummary = [
         'run_id' => $runId,
-        'strategy_mode' => 'nobitex_profit_first_full_universe',
+        'strategy_mode' => NobitexRuntimeModels::STRATEGY_MODE,
+        'decision_model' => NobitexRuntimeModels::DECISION,
+        'selection_model' => NobitexRuntimeModels::SELECTION,
+        'execution_model' => NobitexRuntimeModels::EXECUTION,
+        'global_portfolio_model' => NobitexRuntimeModels::GLOBAL_PORTFOLIO,
+        'strategy_learning_model' => NobitexRuntimeModels::STRATEGY_LEARNING,
+        'edge_calibration_model' => NobitexRuntimeModels::EDGE_CALIBRATION,
+        'order_value_guard_model' => NobitexRuntimeModels::ORDER_VALUE_GUARD,
         'nobitex_universe' => 'all_executable_irt_usdt_spot_markets',
         'universe_awareness' => 'full_orderbook_scan_each_tick',
         'deep_analysis' => 'all_executable_markets_no_top_n_gate',
-        'selection_model' => 'positive_expected_net_profit_after_costs',
         'score_based_selection' => false,
         'signal_source' => 'nobitex_internal_1m_5m_15m',
         'tradingview_dependency' => false,
