@@ -24,48 +24,105 @@ object AppUpdateManager {
         val sha256: String,
     )
 
-    suspend fun check(context: Context): UpdateInfo? = withContext(Dispatchers.IO) {
-        val currentCode = currentVersionCode(context)
-        val payloads = mutableListOf<String>()
+    data class ReleaseStatus(
+        val installedVersion: String,
+        val backendVersion: String?,
+        val releaseVersion: String?,
+        val synchronized: Boolean,
+    )
 
-        // Primary path: installed backend. This lets self-hosted deployments override
-        // release metadata if needed.
+    data class CheckResult(
+        val update: UpdateInfo?,
+        val status: ReleaseStatus,
+    )
+
+    /** Backward-compatible shortcut for callers that only care about an APK update. */
+    suspend fun check(context: Context): UpdateInfo? = checkRelease(context).update
+
+    /**
+     * Checks both the installed backend and the stable release manifest.
+     * The highest valid signed-asset candidate wins, while the returned status lets
+     * the UI make backend/app rollout drift visible instead of silently hiding it.
+     */
+    suspend fun checkRelease(context: Context): CheckResult = withContext(Dispatchers.IO) {
+        val currentCode = currentVersionCode(context)
+        val installedVersion = currentVersionName(context)
+        val payloads = mutableListOf<String>()
+        var backendVersion: String? = null
+        var stableReleaseVersion: String? = null
+
+        // Primary path: installed backend. This reports the version that is actually
+        // running on cPanel while still carrying the stable Android release metadata.
         try {
             val response = TradeApi(SERVER, "").updateInfo()
-            if (response.ok && response.body.isNotBlank()) payloads += response.body
+            if (response.ok && response.body.isNotBlank()) {
+                payloads += response.body
+                backendVersion = parseBackendVersion(response.body) ?: backendVersion
+                stableReleaseVersion = parseReleaseVersion(response.body) ?: stableReleaseVersion
+            }
         } catch (_: Exception) {
-            // Direct release fallback below keeps Android updates working even while
-            // the backend itself is stale, temporarily unavailable or mid-update.
+            // Direct stable manifest remains the fallback when the backend is offline,
+            // stale or in the middle of a self-update.
         }
 
         try {
-            payloads += downloadText("$DIRECT_MANIFEST?ts=${System.currentTimeMillis()}")
+            val manifest = downloadText("$DIRECT_MANIFEST?ts=${System.currentTimeMillis()}")
+            payloads += manifest
+            val manifestBackend = parseBackendVersion(manifest)
+            val manifestRelease = parseReleaseVersion(manifest)
+
+            // A stable release is publishable only when backend and Android share the
+            // same semantic version. Ignore a malformed/mixed release for installation.
+            if (manifestBackend != null && manifestRelease != null && manifestBackend == manifestRelease) {
+                stableReleaseVersion = manifestRelease
+            }
         } catch (_: Exception) {
-            // If backend metadata was available we can still continue with it.
+            // Backend metadata may still be enough to continue.
         }
 
-        for (raw in payloads) {
-            val android = parseAndroid(raw) ?: continue
+        val candidates = payloads.mapNotNull { raw ->
+            val android = parseAndroid(raw) ?: return@mapNotNull null
             val remoteCode = android.optLong("version_code", 0L)
+            val versionName = android.optString("version_name").trim().ifBlank { remoteCode.toString() }
             val available = android.optBoolean("available", false)
             val url = android.optString("url").trim()
             val sha256 = android.optString("sha256").trim().lowercase()
+
             if (
                 available &&
                 remoteCode > currentCode &&
+                versionName.isNotBlank() &&
                 url.startsWith("https://") &&
                 sha256.matches(Regex("^[a-f0-9]{64}$"))
             ) {
-                return@withContext UpdateInfo(
+                UpdateInfo(
                     available = true,
                     versionCode = remoteCode,
-                    versionName = android.optString("version_name").ifBlank { remoteCode.toString() },
+                    versionName = versionName,
                     url = url,
                     sha256 = sha256,
                 )
+            } else {
+                null
             }
         }
-        null
+
+        val update = candidates.maxByOrNull { it.versionCode }
+        val releaseVersion = update?.versionName ?: stableReleaseVersion
+        val synchronized = backendVersion != null &&
+            releaseVersion != null &&
+            installedVersion == backendVersion &&
+            backendVersion == releaseVersion
+
+        CheckResult(
+            update = update,
+            status = ReleaseStatus(
+                installedVersion = installedVersion,
+                backendVersion = backendVersion,
+                releaseVersion = releaseVersion,
+                synchronized = synchronized,
+            ),
+        )
     }
 
     suspend fun download(context: Context, info: UpdateInfo): File = withContext(Dispatchers.IO) {
@@ -127,6 +184,27 @@ object AppUpdateManager {
             val root = JSONObject(raw)
             root.optJSONObject("data")?.optJSONObject("android")
                 ?: root.optJSONObject("android")
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun parseBackendVersion(raw: String): String? {
+        return try {
+            val root = JSONObject(raw)
+            root.optJSONObject("data")?.optString("backend_version")?.trim()?.takeIf { it.isNotBlank() }
+                ?: root.optJSONObject("backend")?.optString("version")?.trim()?.takeIf { it.isNotBlank() }
+                ?: root.optString("backend_version").trim().takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun parseReleaseVersion(raw: String): String? {
+        return try {
+            val root = JSONObject(raw)
+            val android = root.optJSONObject("data")?.optJSONObject("android") ?: root.optJSONObject("android")
+            android?.optString("version_name")?.trim()?.takeIf { it.isNotBlank() }
         } catch (_: Exception) {
             null
         }
