@@ -14,21 +14,16 @@ final class Schema
 
     public static function ensure(): void
     {
-        if (self::$ensured) {
-            return;
-        }
+        if (self::$ensured) return;
         $pdo = Database::connection();
-        $version = $pdo->query("SELECT value_text FROM settings WHERE key_name='autotrade_schema_version' LIMIT 1")->fetchColumn();
-        if ((string) $version === '1') {
-            self::$ensured = true;
-            return;
-        }
+        $version = (string)($pdo->query("SELECT value_text FROM settings WHERE key_name='autotrade_schema_version' LIMIT 1")->fetchColumn() ?: '0');
+        if ($version === '2') { self::$ensured = true; return; }
 
         $statements = [
             "CREATE TABLE IF NOT EXISTS autotrade_settings (
                 id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
                 enabled TINYINT(1) NOT NULL DEFAULT 0,
-                quote_asset VARCHAR(20) NOT NULL DEFAULT 'USDT',
+                quote_asset VARCHAR(20) NOT NULL DEFAULT 'IRT',
                 risk_profile VARCHAR(20) NOT NULL DEFAULT 'balanced',
                 position_percent DECIMAL(8,4) NOT NULL DEFAULT 5.0000,
                 max_position_percent DECIMAL(8,4) NOT NULL DEFAULT 10.0000,
@@ -106,38 +101,28 @@ final class Schema
                 INDEX idx_autotrade_event_name (event_name, created_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
         ];
+        foreach($statements as$sql)$pdo->exec($sql);
 
-        foreach ($statements as $sql) {
-            $pdo->exec($sql);
+        $enabled=(bool)Config::get('trading.enabled',false)?1:0;
+        $stmt=$pdo->prepare("INSERT IGNORE INTO autotrade_settings (id,enabled,quote_asset,risk_profile,position_percent,max_position_percent,stop_loss_percent,take_profit_percent,daily_loss_limit_percent,min_signal_score,cooldown_minutes,updated_at) VALUES (1,:enabled,'IRT','balanced',5,10,3,6,5,60,15,UTC_TIMESTAMP())");
+        $stmt->execute([':enabled'=>$enabled]);
+
+        // v1 used USDT as the installation default. This release intentionally
+        // migrates that default to IRT for the requested IRT-first / USDT-fallback policy.
+        if($version==='1'){
+            $pdo->exec("UPDATE autotrade_settings SET quote_asset='IRT',updated_at=UTC_TIMESTAMP() WHERE id=1 AND quote_asset='USDT'");
         }
 
-        $enabled = (bool) Config::get('trading.enabled', false) ? 1 : 0;
-        $stmt = $pdo->prepare(
-            "INSERT IGNORE INTO autotrade_settings
-            (id,enabled,quote_asset,risk_profile,position_percent,max_position_percent,stop_loss_percent,take_profit_percent,daily_loss_limit_percent,min_signal_score,cooldown_minutes,updated_at)
-            VALUES (1,:enabled,'USDT','balanced',5,10,3,6,5,60,15,UTC_TIMESTAMP())"
-        );
-        $stmt->execute([':enabled' => $enabled]);
-
-        $override = $pdo->prepare(
-            "INSERT INTO settings (key_name,value_text,updated_at)
-             VALUES ('live_trading_enabled',:v,UTC_TIMESTAMP())
-             ON DUPLICATE KEY UPDATE value_text=value_text"
-        );
-        $override->execute([':v' => $enabled ? '1' : '0']);
-
-        $pdo->exec("INSERT INTO settings (key_name,value_text,updated_at) VALUES ('autotrade_schema_version','1',UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE value_text='1',updated_at=UTC_TIMESTAMP()");
-        self::$ensured = true;
+        $override=$pdo->prepare("INSERT INTO settings (key_name,value_text,updated_at) VALUES ('live_trading_enabled',:v,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE value_text=value_text");
+        $override->execute([':v'=>$enabled?'1':'0']);
+        $pdo->exec("INSERT INTO settings (key_name,value_text,updated_at) VALUES ('autotrade_schema_version','2',UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE value_text='2',updated_at=UTC_TIMESTAMP()");
+        self::$ensured=true;
     }
 
-    public static function settings(?PDO $pdo = null): array
+    public static function settings(?PDO $pdo=null):array
     {
-        self::ensure();
-        $pdo ??= Database::connection();
-        $row = $pdo->query('SELECT * FROM autotrade_settings WHERE id=1')->fetch();
-        if (!$row) {
-            throw new \RuntimeException('Auto-trading settings row is missing.');
-        }
-        return $row;
+        self::ensure();$pdo??=Database::connection();$row=$pdo->query('SELECT * FROM autotrade_settings WHERE id=1')->fetch();
+        if(!$row)throw new \RuntimeException('Auto-trading settings row is missing.');
+        return$row;
     }
 }

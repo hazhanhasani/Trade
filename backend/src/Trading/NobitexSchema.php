@@ -5,19 +5,21 @@ declare(strict_types=1);
 namespace Trade\Trading;
 
 use PDO;
+use Trade\Config;
 use Trade\Database;
 
 final class NobitexSchema
 {
-    private static bool $ensured = false;
+    private static bool $ensured=false;
 
-    public static function ensure(): void
+    public static function ensure():void
     {
-        if (self::$ensured) return;
+        if(self::$ensured)return;
         Schema::ensure();
-        $pdo = Database::connection();
+        $pdo=Database::connection();
+        $previous=(string)($pdo->query("SELECT value_text FROM settings WHERE key_name='nobitex_schema_version' LIMIT 1")->fetchColumn()?:'0');
 
-        $statements = [
+        $statements=[
             "CREATE TABLE IF NOT EXISTS nobitex_autotrade_signals (
                 id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                 symbol VARCHAR(40) NOT NULL,
@@ -81,54 +83,74 @@ final class NobitexSchema
                 INDEX idx_nobitex_event_name (event_name,created_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
         ];
-        foreach ($statements as $sql) $pdo->exec($sql);
+        foreach($statements as$sql)$pdo->exec($sql);
 
-        $legacy = (bool) (Schema::settings($pdo)['enabled'] ?? false);
-        self::seedSetting($pdo, 'autotrade_bitpin_enabled', $legacy ? '1' : '0');
-        self::seedSetting($pdo, 'autotrade_nobitex_enabled', '0');
-        self::seedSetting($pdo, 'live_trading_nobitex_enabled', '0');
-        self::seedSetting($pdo, 'nobitex_schema_version', '1');
-        self::$ensured = true;
-    }
+        $legacy=(bool)(Schema::settings($pdo)['enabled']??false);
+        self::seedSetting($pdo,'autotrade_bitpin_enabled',$legacy?'1':'0');
+        self::seedSetting($pdo,'autotrade_nobitex_enabled','0');
+        self::seedSetting($pdo,'live_trading_nobitex_enabled','0');
+        self::seedSetting($pdo,'nobitex_bootstrap_first_buy_pending','0');
+        self::seedSetting($pdo,'nobitex_bootstrap_first_buy_id','trade-first-v113');
 
-    public static function botEnabled(string $exchange): bool
-    {
-        self::ensure();
-        $exchange = self::exchange($exchange);
-        $key = 'autotrade_' . $exchange . '_enabled';
-        $stmt = Database::connection()->prepare('SELECT value_text FROM settings WHERE key_name=:key LIMIT 1');
-        $stmt->execute([':key'=>$key]);
-        return in_array(strtolower(trim((string) ($stmt->fetchColumn() ?: '0'))), ['1','true','yes','on'], true);
-    }
-
-    public static function setBotEnabled(string $exchange, bool $enabled): void
-    {
-        self::ensure();
-        $exchange = self::exchange($exchange);
-        $stmt = Database::connection()->prepare(
-            "INSERT INTO settings (key_name,value_text,updated_at) VALUES (:key,:value,UTC_TIMESTAMP())
-             ON DUPLICATE KEY UPDATE value_text=VALUES(value_text),updated_at=UTC_TIMESTAMP()"
-        );
-        $stmt->execute([':key'=>'autotrade_' . $exchange . '_enabled', ':value'=>$enabled ? '1' : '0']);
-        if ($exchange === 'bitpin') {
-            // Keep legacy clients in sync with the Bitpin bot switch.
-            Database::connection()->prepare('UPDATE autotrade_settings SET enabled=:v,updated_at=UTC_TIMESTAMP() WHERE id=1')->execute([':v'=>$enabled ? 1 : 0]);
+        // One-time migration for the already-authorized production installation.
+        // It never arms on a fresh install and never enables Bot/Live by itself.
+        if($previous==='1'&&self::isTargetProductionInstall()&&self::canArmExistingInstallation($pdo)){
+            self::writeSetting($pdo,'nobitex_bootstrap_first_buy_pending','1');
+            self::writeSetting($pdo,'nobitex_bootstrap_first_buy_armed_at',gmdate('Y-m-d H:i:s'));
         }
+
+        self::writeSetting($pdo,'nobitex_schema_version','2');
+        self::$ensured=true;
     }
 
-    private static function seedSetting(PDO $pdo, string $key, string $value): void
+    public static function botEnabled(string $exchange):bool
     {
-        $stmt = $pdo->prepare(
-            "INSERT INTO settings (key_name,value_text,updated_at) VALUES (:key,:value,UTC_TIMESTAMP())
-             ON DUPLICATE KEY UPDATE value_text=value_text"
-        );
-        $stmt->execute([':key'=>$key, ':value'=>$value]);
+        self::ensure();$exchange=self::exchange($exchange);$key='autotrade_'.$exchange.'_enabled';
+        $stmt=Database::connection()->prepare('SELECT value_text FROM settings WHERE key_name=:key LIMIT 1');$stmt->execute([':key'=>$key]);
+        return in_array(strtolower(trim((string)($stmt->fetchColumn()?:'0'))),['1','true','yes','on'],true);
     }
 
-    private static function exchange(string $exchange): string
+    public static function setBotEnabled(string $exchange,bool $enabled):void
     {
-        $exchange = strtolower(trim($exchange));
-        if (!in_array($exchange, ['bitpin','nobitex'], true)) throw new \InvalidArgumentException('Unsupported exchange.');
-        return $exchange;
+        self::ensure();$exchange=self::exchange($exchange);self::writeSetting(Database::connection(),'autotrade_'.$exchange.'_enabled',$enabled?'1':'0');
+        if($exchange==='bitpin')Database::connection()->prepare('UPDATE autotrade_settings SET enabled=:v,updated_at=UTC_TIMESTAMP() WHERE id=1')->execute([':v'=>$enabled?1:0]);
+    }
+
+    private static function canArmExistingInstallation(PDO $pdo):bool
+    {
+        $credential=(bool)$pdo->query("SELECT EXISTS(SELECT 1 FROM exchange_credentials WHERE exchange_name='nobitex')")->fetchColumn();
+        $bot=self::settingIsTrue($pdo,'autotrade_nobitex_enabled');
+        $live=self::settingIsTrue($pdo,'live_trading_nobitex_enabled');
+        $kill=self::settingIsTrue($pdo,'kill_switch');
+        $active=(int)$pdo->query("SELECT COUNT(*) FROM nobitex_autotrade_positions WHERE status IN ('pending_open','open','pending_close')")->fetchColumn();
+        $accepted=(int)$pdo->query("SELECT COUNT(*) FROM orders WHERE exchange_name='nobitex' AND status IN ('submitting','submitted','filled')")->fetchColumn();
+        return$credential&&$bot&&$live&&!$kill&&$active===0&&$accepted===0;
+    }
+
+    private static function isTargetProductionInstall():bool
+    {
+        $host=strtolower((string)(parse_url((string)Config::get('app.url',''),PHP_URL_HOST)?:''));
+        return$host==='rado-taxi.sbs';
+    }
+
+    private static function settingIsTrue(PDO $pdo,string $key):bool
+    {
+        $s=$pdo->prepare('SELECT value_text FROM settings WHERE key_name=:k LIMIT 1');$s->execute([':k'=>$key]);
+        return in_array(strtolower(trim((string)($s->fetchColumn()?:'0'))),['1','true','yes','on'],true);
+    }
+
+    private static function seedSetting(PDO $pdo,string $key,string $value):void
+    {
+        $stmt=$pdo->prepare("INSERT INTO settings (key_name,value_text,updated_at) VALUES (:key,:value,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE value_text=value_text");$stmt->execute([':key'=>$key,':value'=>$value]);
+    }
+
+    private static function writeSetting(PDO $pdo,string $key,string $value):void
+    {
+        $stmt=$pdo->prepare("INSERT INTO settings (key_name,value_text,updated_at) VALUES (:key,:value,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE value_text=VALUES(value_text),updated_at=UTC_TIMESTAMP()");$stmt->execute([':key'=>$key,':value'=>$value]);
+    }
+
+    private static function exchange(string $exchange):string
+    {
+        $exchange=strtolower(trim($exchange));if(!in_array($exchange,['bitpin','nobitex'],true))throw new \InvalidArgumentException('Unsupported exchange.');return$exchange;
     }
 }

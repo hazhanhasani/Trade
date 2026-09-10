@@ -8,6 +8,7 @@ final class NobitexClient
 {
     private string $baseUrl;
     private string $publicBaseUrl;
+    private string $legacyPublicBaseUrl;
     private string $publicKey;
     private string $privateKey;
     private int $timeout;
@@ -15,7 +16,10 @@ final class NobitexClient
     public function __construct(array $config)
     {
         $this->baseUrl = rtrim((string) ($config['base_url'] ?? 'https://apiv2.nobitex.ir'), '/');
-        $this->publicBaseUrl = rtrim((string) ($config['public_base_url'] ?? 'https://api.nobitex.ir'), '/');
+        // Public market endpoints are available on apiv2 as well. Using the same
+        // host avoids shared-hosting DNS failures seen for api.nobitex.ir.
+        $this->publicBaseUrl = rtrim((string) ($config['public_base_url'] ?? 'https://apiv2.nobitex.ir'), '/');
+        $this->legacyPublicBaseUrl = rtrim((string) ($config['legacy_public_base_url'] ?? 'https://api.nobitex.ir'), '/');
         $this->publicKey = trim((string) ($config['public_key'] ?? ''));
         $this->privateKey = trim((string) ($config['private_key'] ?? ''));
         $this->timeout = max(3, min(30, (int) ($config['timeout'] ?? 12)));
@@ -26,6 +30,7 @@ final class NobitexClient
     public function allOrderBooks(): array { return $this->request('GET', '/v3/orderbook/all', [], false); }
     public function orderBook(string $symbol): array { return $this->request('GET', '/v3/orderbook/' . rawurlencode($this->safeSymbol($symbol)), [], false); }
     public function stats(array $query = []): array { return $this->request('GET', '/market/stats', $query, false); }
+    public function options(): array { return $this->request('GET', '/v2/options', [], false); }
 
     public function ohlc(string $symbol, string $resolution = '15', int $countback = 120): array
     {
@@ -67,16 +72,25 @@ final class NobitexClient
     {
         $method=strtoupper($method);$path='/'.ltrim($path,'/');$body='';$fullPath=$path;
         if($method==='GET'&&$data!==[]){$fullPath.='?'.http_build_query($data,'','&',PHP_QUERY_RFC3986);}elseif($method!=='GET'){$body=json_encode($data,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);}
-        $headers=['Accept: application/json','User-Agent: Trade/1.1'];if($method!=='GET')$headers[]='Content-Type: application/json';if($authenticated)foreach($this->authHeaders($method,$fullPath,$body)as$header)$headers[]=$header;
-        $base=$authenticated?$this->baseUrl:$this->publicBaseUrl;
-        $ch=curl_init($base.$fullPath);if($ch===false)throw new \RuntimeException('Unable to initialize cURL for Nobitex.');
-        $options=[CURLOPT_RETURNTRANSFER=>true,CURLOPT_CONNECTTIMEOUT=>min(5,$this->timeout),CURLOPT_TIMEOUT=>$this->timeout,CURLOPT_HTTPHEADER=>$headers,CURLOPT_CUSTOMREQUEST=>$method,CURLOPT_FOLLOWLOCATION=>false,CURLOPT_MAXREDIRS=>0,CURLOPT_PROTOCOLS=>CURLPROTO_HTTPS,CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,CURLOPT_PROXY=>'',CURLOPT_NOPROXY=>'*'];if($method!=='GET')$options[CURLOPT_POSTFIELDS]=$body;
-        curl_setopt_array($ch,$options);$raw=curl_exec($ch);$error=curl_error($ch);$errno=curl_errno($ch);$status=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE);curl_close($ch);
-        if($raw===false)throw new \RuntimeException('Nobitex network error ('.$errno.'): '.$error);
-        $decoded=json_decode((string)$raw,true);if(!is_array($decoded))$decoded=['raw'=>mb_substr((string)$raw,0,2000)];
-        if($status<200||$status>=300)throw new NobitexHttpException($status,$decoded);
-        if($requireStatusOk){$apiStatus=strtolower(trim((string)($decoded['status']??$decoded['s']??'ok')));if(in_array($apiStatus,['failed','error'],true))throw new NobitexHttpException($status,$decoded);}
-        return$decoded;
+        $headers=['Accept: application/json','User-Agent: Trade/1.1.3'];if($method!=='GET')$headers[]='Content-Type: application/json';if($authenticated)foreach($this->authHeaders($method,$fullPath,$body)as$header)$headers[]=$header;
+
+        $bases = $authenticated
+            ? [$this->baseUrl]
+            : array_values(array_unique(array_filter([$this->publicBaseUrl, $this->baseUrl, $this->legacyPublicBaseUrl])));
+        $networkErrors=[];
+
+        foreach($bases as $base){
+            $ch=curl_init($base.$fullPath);if($ch===false)throw new \RuntimeException('Unable to initialize cURL for Nobitex.');
+            $options=[CURLOPT_RETURNTRANSFER=>true,CURLOPT_CONNECTTIMEOUT=>min(5,$this->timeout),CURLOPT_TIMEOUT=>$this->timeout,CURLOPT_HTTPHEADER=>$headers,CURLOPT_CUSTOMREQUEST=>$method,CURLOPT_FOLLOWLOCATION=>false,CURLOPT_MAXREDIRS=>0,CURLOPT_PROTOCOLS=>CURLPROTO_HTTPS,CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,CURLOPT_PROXY=>'',CURLOPT_NOPROXY=>'*'];if($method!=='GET')$options[CURLOPT_POSTFIELDS]=$body;
+            curl_setopt_array($ch,$options);$raw=curl_exec($ch);$error=curl_error($ch);$errno=curl_errno($ch);$status=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE);curl_close($ch);
+            if($raw===false){$networkErrors[]=(parse_url($base,PHP_URL_HOST)?:$base).': '.$errno.' '.$error;if(!$authenticated)continue;throw new \RuntimeException('Nobitex network error ('.$errno.'): '.$error);}
+            $decoded=json_decode((string)$raw,true);if(!is_array($decoded))$decoded=['raw'=>mb_substr((string)$raw,0,2000)];
+            if($status<200||$status>=300)throw new NobitexHttpException($status,$decoded);
+            if($requireStatusOk){$apiStatus=strtolower(trim((string)($decoded['status']??$ecoded['s']??'ok')));if(in_array($apiStatus,['failed','error'],true))throw new NobitexHttpException($status,$decoded);}
+            return$decoded;
+        }
+
+        throw new \RuntimeException('Nobitex public network error after fallback: '.implode(' | ',$networkErrors));
     }
 
     private function authHeaders(string $method,string $fullPath,string $body):array

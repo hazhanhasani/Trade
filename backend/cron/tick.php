@@ -8,6 +8,7 @@ use Trade\Config;
 use Trade\Database;
 use Trade\Trading\AutoTraderEngine;
 use Trade\Trading\NobitexAutoTraderEngine;
+use Trade\Trading\NobitexFirstBuy;
 use Trade\Trading\NobitexSchema;
 use Trade\Updater;
 
@@ -27,6 +28,7 @@ $baseSummary = [
     'run_id' => $runId,
     'asset' => 'GRAM',
     'legacy_alias' => 'TON',
+    'quote_priority' => ['IRT','USDT'],
     'execution_mode' => 'live_only',
     'update' => $update,
     'backend_version' => Updater::currentVersion(),
@@ -66,7 +68,14 @@ $runExchange = static function (string $exchange, callable $runner) use (&$resul
 };
 
 $runExchange('bitpin', static fn(): array => (new AutoTraderEngine())->run());
-$runExchange('nobitex', static fn(): array => (new NobitexAutoTraderEngine())->run());
+$runExchange('nobitex', static function (): array {
+    // The existing production installation has explicitly requested a first live
+    // entry after this upgrade. This one-shot path is idempotent and still obeys
+    // Bot, Live, Kill Switch, balance, minimum-order and portfolio-risk limits.
+    $first = (new NobitexFirstBuy())->runIfPending();
+    if (($first['status'] ?? '') !== 'not_pending') return $first;
+    return (new NobitexAutoTraderEngine())->run();
+});
 
 $overall = $failedCount === 0 ? 'success' : (($enabledCount > $failedCount) ? 'partial' : 'failed');
 $summary = $baseSummary + [
