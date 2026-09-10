@@ -7,7 +7,8 @@ namespace Trade\Trading;
 final class RiskManager
 {
     private const STRATEGY_MIN_HOLD_SECONDS = 180;
-    private const STRATEGY_NOISE_GUARD_PERCENT = 0.35;
+    private const STRATEGY_MIN_GROSS_PROFIT_PERCENT = 0.65;
+    private const STRATEGY_REVERSAL_LOSS_PERCENT = 0.75;
 
     public function normalizeSettings(array $settings): array
     {
@@ -50,6 +51,8 @@ final class RiskManager
             'stop_loss_percent' => $stop,
             'take_profit_percent' => $take,
             'daily_loss_limit_percent' => $daily,
+            // Legacy setting retained for Bitpin/backward compatibility. The
+            // Nobitex profitability engine does not use this as an entry gate.
             'min_signal_score' => $score,
             'cooldown_minutes' => $cooldown,
         ];
@@ -113,22 +116,31 @@ final class RiskManager
         if ($stop > 0 && $price <= $stop) return 'stop_loss';
         if ($take > 0 && $price >= $take) return 'take_profit';
 
-        if ($signalAction === 'sell') {
-            $openedAt = trim((string) ($position['opened_at'] ?? ''));
-            if ($openedAt !== '') {
-                $opened = strtotime($openedAt . ' UTC');
-                if ($opened !== false && time() - $opened < self::STRATEGY_MIN_HOLD_SECONDS) return null;
-            }
+        if ($signalAction !== 'sell') return null;
 
-            $entry = (float) ($position['entry_price'] ?? 0);
-            if ($entry > 0 && $price < $entry) {
-                $drawdownPercent = (($price - $entry) / $entry) * 100.0;
-                // Ignore tiny negative flips that are commonly just spread/fee noise.
-                // A genuine hard loss is still handled immediately by stop-loss.
-                if ($drawdownPercent > -self::STRATEGY_NOISE_GUARD_PERCENT) return null;
-            }
-            return 'strategy_sell';
+        $openedAt = trim((string) ($position['opened_at'] ?? ''));
+        if ($openedAt !== '') {
+            $opened = strtotime($openedAt . ' UTC');
+            if ($opened !== false && time() - $opened < self::STRATEGY_MIN_HOLD_SECONDS) return null;
         }
+
+        $entry = (float) ($position['entry_price'] ?? 0);
+        if ($entry <= 0) return 'strategy_sell';
+
+        $movePercent = (($price - $entry) / $entry) * 100.0;
+
+        // Avoid churning around break-even where two-sided fees, spread and
+        // slippage can turn a visually green trade into a real net loss.
+        if ($movePercent >= self::STRATEGY_MIN_GROSS_PROFIT_PERCENT) {
+            return 'strategy_profit_capture';
+        }
+
+        // A confirmed reversal may still justify accepting a controlled loss
+        // before the hard stop-loss is reached. Tiny negative flips are ignored.
+        if ($movePercent <= -self::STRATEGY_REVERSAL_LOSS_PERCENT) {
+            return 'strategy_reversal_exit';
+        }
+
         return null;
     }
 
