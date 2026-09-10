@@ -187,7 +187,7 @@ jobs:
             exit 1
           fi
           "$APKSIGNER" verify --verbose --print-certs "$APK" | tee "$RUNNER_TEMP/apksigner.txt"
-          CERT_SHA=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/apksigner.txt" | head -n1 | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
+          CERT_SHA=$(grep -E -m1 'certificate SHA-256 digest:' "$RUNNER_TEMP/apksigner.txt" | sed -E 's/^.*certificate SHA-256 digest:[[:space:]]*//' | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
           EXPECTED=$(printf '%s' "$EXPECTED_CERT_SHA256" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
           if [ -z "$CERT_SHA" ] || [ "$CERT_SHA" != "$EXPECTED" ]; then
             echo "::error::Final APK signer does not match the permanent signing identity."
