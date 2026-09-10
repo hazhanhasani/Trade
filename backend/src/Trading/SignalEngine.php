@@ -5,36 +5,43 @@ declare(strict_types=1);
 namespace Trade\Trading;
 
 /**
- * Deterministic multi-factor signal engine.
+ * Generic score-free profitability signal engine.
  *
- * The model deliberately requires agreement between trend, momentum and MACD
- * before emitting BUY. RSI alone is never allowed to trigger an entry because
- * oversold markets can keep falling. Liquidity/spread are also considered so
- * the execution engine receives fewer low-quality candidates.
+ * `score` remains zero only because legacy signal tables still contain a NOT
+ * NULL score column. It never participates in an entry/exit decision.
  */
 final class SignalEngine
 {
-    public function analyze(array $market, int $threshold = 60): array
+    private const BASE_ROUNDTRIP_EXECUTION_RESERVE_PERCENT = 0.55;
+    private const MODEL_UNCERTAINTY_RESERVE_PERCENT = 0.15;
+    private const MAX_EXECUTABLE_SPREAD_PERCENT = 1.50;
+
+    public function analyze(array $market, int $legacyThreshold = 60): array
     {
+        unset($legacyThreshold);
         $prices = array_values(array_filter(
             array_map(static fn(mixed $v): float => is_numeric($v) ? (float) $v : 0.0, $market['prices'] ?? []),
-            static fn(float $v): bool => $v > 0
+            static fn(float $v): bool => is_finite($v) && $v > 0
         ));
-        $threshold = max(35, min(90, $threshold));
+
         if (count($prices) < 26) {
             return [
-                'ready' => false,
-                'score' => 0,
-                'confidence' => 0,
-                'action' => 'hold',
-                'reason' => 'insufficient_market_history',
-                'reasons' => [],
-                'indicators' => ['samples' => count($prices)],
+                'ready'=>false,
+                'score'=>0,
+                'confidence'=>0,
+                'confidence_is_gate'=>false,
+                'action'=>'hold',
+                'reason'=>'insufficient_market_history',
+                'decision_model'=>'positive_expected_net_profit',
+                'expected_net_profit'=>false,
+                'expected_gross_move_percent'=>0.0,
+                'estimated_roundtrip_cost_percent'=>0.0,
+                'expected_net_edge_percent'=>0.0,
+                'reasons'=>[],
+                'indicators'=>['samples'=>count($prices)],
             ];
         }
 
-        $score = 0.0;
-        $reasons = [];
         $rsi = $this->rsi($prices, 14);
         $emaFast = $this->ema($prices, 9);
         $emaSlow = $this->ema($prices, 21);
@@ -43,149 +50,89 @@ final class SignalEngine
         $macd = $this->macd($prices);
         $trendConsistency = $this->trendConsistency($prices, 8);
         $volatility = $this->volatility($prices, 24);
-        $spread = max(0.0, (float) ($market['spread_percent'] ?? 0));
-        $imbalance = max(-1.0, min(1.0, (float) ($market['orderbook_imbalance'] ?? 0)));
-        $change = (float) ($market['change_percent'] ?? 0);
+        $spread = max(0.0, (float) ($market['spread_percent'] ?? 0.0));
+        $imbalance = max(-1.0, min(1.0, (float) ($market['orderbook_imbalance'] ?? 0.0)));
+        $change = (float) ($market['change_percent'] ?? 0.0);
 
-        // RSI is supporting evidence only, never a standalone entry trigger.
-        if ($rsi >= 38 && $rsi <= 58) {
-            $score += 8;
-            $reasons[] = 'rsi_healthy';
-        } elseif ($rsi < 30) {
-            $score += 6;
-            $reasons[] = 'rsi_oversold_watch';
-        } elseif ($rsi >= 72) {
-            $score -= 24;
-            $reasons[] = 'rsi_overbought';
-        } elseif ($rsi >= 65) {
-            $score -= 10;
-            $reasons[] = 'rsi_high';
-        }
+        $rsiPenalty = 0.0;
+        if ($rsi >= 78.0) $rsiPenalty = 0.55;
+        elseif ($rsi >= 72.0) $rsiPenalty = 0.25;
+        elseif ($rsi <= 22.0 && $momentum < 0.0) $rsiPenalty = 0.20;
 
-        if ($emaGap >= 0.35) {
-            $score += 28;
-            $reasons[] = 'ema_trend_strong';
-        } elseif ($emaGap >= 0.12) {
-            $score += 16;
-            $reasons[] = 'ema_trend_positive';
-        } elseif ($emaGap <= -0.35) {
-            $score -= 30;
-            $reasons[] = 'ema_trend_negative';
-        } elseif ($emaGap <= -0.12) {
-            $score -= 16;
-            $reasons[] = 'ema_trend_weak';
-        }
+        // Continuous economic estimate; no votes, points or score thresholds.
+        $gross = ($this->clamp($momentum, -4.0, 4.0) * 0.55)
+            + ($this->clamp($emaGap, -3.0, 3.0) * 0.45)
+            + ($this->clamp((float) $macd['histogram_percent'], -1.0, 1.0) * 0.80)
+            + (($trendConsistency - 0.5) * 0.80)
+            + ($imbalance * 0.30)
+            + ($this->clamp($change, -8.0, 8.0) * 0.05)
+            - $rsiPenalty;
 
-        if ($macd['histogram'] > 0 && $macd['macd'] > $macd['signal']) {
-            $score += $macd['histogram_percent'] >= 0.08 ? 22 : 12;
-            $reasons[] = 'macd_bullish';
-        } elseif ($macd['histogram'] < 0 && $macd['macd'] < $macd['signal']) {
-            $score -= abs($macd['histogram_percent']) >= 0.08 ? 22 : 12;
-            $reasons[] = 'macd_bearish';
-        }
+        $spreadCost = min(1.50, $spread * 1.25);
+        $slippageNoiseReserve = min(0.60, max(0.0, $volatility) * 0.35);
+        $estimatedCost = self::BASE_ROUNDTRIP_EXECUTION_RESERVE_PERCENT
+            + $spreadCost
+            + $slippageNoiseReserve
+            + self::MODEL_UNCERTAINTY_RESERVE_PERCENT;
+        $netEdge = $gross - $estimatedCost;
 
-        if ($momentum >= 0.60) {
-            $score += 18;
-            $reasons[] = 'momentum_up';
-        } elseif ($momentum >= 0.20) {
-            $score += 9;
-        } elseif ($momentum <= -0.60) {
-            $score -= 20;
-            $reasons[] = 'momentum_down';
-        } elseif ($momentum <= -0.20) {
-            $score -= 9;
-        }
-
-        if ($trendConsistency >= 0.68) {
-            $score += 12;
-            $reasons[] = 'trend_consistent';
-        } elseif ($trendConsistency <= 0.32) {
-            $score -= 12;
-            $reasons[] = 'trend_inconsistent';
-        }
-
-        if ($imbalance >= 0.15) {
-            $score += 10;
-            $reasons[] = 'bid_imbalance';
-        } elseif ($imbalance <= -0.15) {
-            $score -= 10;
-            $reasons[] = 'ask_imbalance';
-        }
-
-        if ($change >= 0.5 && $change <= 8.0) {
-            $score += 7;
-            $reasons[] = 'daily_trend_up';
-        } elseif ($change < -1.0) {
-            $score -= 8;
-            $reasons[] = 'daily_trend_down';
-        } elseif ($change > 12.0) {
-            $score -= 8;
-            $reasons[] = 'extended_move_penalty';
-        }
-
-        if ($spread > 1.0) {
-            $score -= 18;
-            $reasons[] = 'wide_spread';
-        } elseif ($spread > 0.5) {
-            $score -= 7;
-            $reasons[] = 'spread_penalty';
-        }
-
-        if ($volatility > 3.5) {
-            $score -= 15;
-            $reasons[] = 'high_short_term_volatility';
-        } elseif ($volatility > 2.0) {
-            $score -= 7;
-            $reasons[] = 'elevated_volatility';
-        }
-
-        $score = (int) round(max(-100, min(100, $score)));
-        $qualityReady = $spread <= 1.5 && $volatility <= 6.0;
-        $buyConfirmed = $emaGap > -0.05
-            && $macd['histogram'] >= 0
-            && $momentum > -0.20
-            && $trendConsistency >= 0.45;
-        $sellConfirmed = $emaGap < 0.05 || $macd['histogram'] < 0 || $momentum < -0.20;
+        $qualityReady = $spread <= self::MAX_EXECUTABLE_SPREAD_PERCENT && $volatility <= 6.0;
+        $buy = $qualityReady && $netEdge > 0.0;
+        $estimatedExitCost = ($estimatedCost - self::MODEL_UNCERTAINTY_RESERVE_PERCENT) * 0.50;
+        $sell = $qualityReady && $gross < -max(0.05, $estimatedExitCost);
 
         $action = 'hold';
-        $reason = 'score_below_threshold';
+        $reason = 'expected_net_profit_not_positive';
         if (!$qualityReady) {
-            $reason = $spread > 1.5 ? 'spread_too_wide' : 'volatility_too_high';
-        } elseif ($score >= $threshold && $buyConfirmed) {
+            $reason = $spread > self::MAX_EXECUTABLE_SPREAD_PERCENT ? 'spread_not_executable' : 'volatility_too_high';
+        } elseif ($buy) {
             $action = 'buy';
-            $reason = 'multi_factor_buy_confirmed';
-        } elseif ($score >= $threshold) {
-            $reason = 'buy_score_without_confirmation';
-        } elseif ($score <= -$threshold && $sellConfirmed) {
+            $reason = 'positive_expected_net_profit_after_costs';
+        } elseif ($sell) {
             $action = 'sell';
-            $reason = 'multi_factor_sell_confirmed';
+            $reason = 'expected_forward_move_negative_after_exit_cost';
         }
 
-        $confidence = $qualityReady ? min(100, max(0, (int) round(abs($score)))) : 0;
+        $edgeToCost = $estimatedCost > 0.0 ? $netEdge / $estimatedCost : 0.0;
+        $confidence = $qualityReady ? min(100, max(0, (int) round(50.0 + ($edgeToCost * 35.0)))) : 0;
 
         return [
-            'ready' => $qualityReady,
-            'score' => $score,
-            'confidence' => $confidence,
-            'action' => $action,
-            'reason' => $reason,
-            'reasons' => array_values(array_unique($reasons)),
-            'indicators' => [
-                'samples' => count($prices),
-                'rsi14' => round($rsi, 4),
-                'ema9' => $emaFast,
-                'ema21' => $emaSlow,
-                'ema_gap_percent' => round($emaGap, 4),
-                'macd' => round($macd['macd'], 10),
-                'macd_signal' => round($macd['signal'], 10),
-                'macd_histogram' => round($macd['histogram'], 10),
-                'macd_histogram_percent' => round($macd['histogram_percent'], 4),
-                'momentum_5_percent' => round($momentum, 4),
-                'trend_consistency' => round($trendConsistency, 4),
-                'volatility_percent' => round($volatility, 4),
-                'orderbook_imbalance' => round($imbalance, 4),
-                'spread_percent' => round($spread, 6),
-                'change_percent' => $change,
+            'ready'=>$qualityReady,
+            'score'=>0,
+            'confidence'=>$confidence,
+            'confidence_is_gate'=>false,
+            'action'=>$action,
+            'reason'=>$reason,
+            'decision_model'=>'positive_expected_net_profit',
+            'expected_net_profit'=>$qualityReady && $netEdge > 0.0,
+            'expected_gross_move_percent'=>round($gross, 4),
+            'estimated_roundtrip_cost_percent'=>round($estimatedCost, 4),
+            'estimated_exit_cost_percent'=>round($estimatedExitCost, 4),
+            'expected_net_edge_percent'=>round($netEdge, 4),
+            'minimum_net_edge_percent'=>0.0,
+            'cost_model'=>[
+                'base_roundtrip_execution_reserve_percent'=>self::BASE_ROUNDTRIP_EXECUTION_RESERVE_PERCENT,
+                'spread_cost_percent'=>round($spreadCost, 4),
+                'slippage_noise_reserve_percent'=>round($slippageNoiseReserve, 4),
+                'model_uncertainty_reserve_percent'=>self::MODEL_UNCERTAINTY_RESERVE_PERCENT,
+            ],
+            'reasons'=>[],
+            'indicators'=>[
+                'samples'=>count($prices),
+                'rsi14'=>round($rsi, 4),
+                'ema9'=>$emaFast,
+                'ema21'=>$emaSlow,
+                'ema_gap_percent'=>round($emaGap, 4),
+                'macd'=>round($macd['macd'], 10),
+                'macd_signal'=>round($macd['signal'], 10),
+                'macd_histogram'=>round($macd['histogram'], 10),
+                'macd_histogram_percent'=>round($macd['histogram_percent'], 4),
+                'momentum_5_percent'=>round($momentum, 4),
+                'trend_consistency'=>round($trendConsistency, 4),
+                'volatility_percent'=>round($volatility, 4),
+                'orderbook_imbalance'=>round($imbalance, 4),
+                'spread_percent'=>round($spread, 6),
+                'change_percent'=>$change,
             ],
         ];
     }
@@ -255,10 +202,10 @@ final class SignalEngine
         $histogram = $macd - $signal;
         $price = max(0.00000001, (float) end($prices));
         return [
-            'macd' => $macd,
-            'signal' => $signal,
-            'histogram' => $histogram,
-            'histogram_percent' => ($histogram / $price) * 100.0,
+            'macd'=>$macd,
+            'signal'=>$signal,
+            'histogram'=>$histogram,
+            'histogram_percent'=>($histogram / $price) * 100.0,
         ];
     }
 
@@ -297,5 +244,11 @@ final class SignalEngine
         $sum = 0.0;
         foreach ($returns as $r) $sum += ($r - $mean) ** 2;
         return sqrt($sum / ($n - 1));
+    }
+
+    private function clamp(float $value, float $min, float $max): float
+    {
+        if (!is_finite($value)) return $min;
+        return max($min, min($max, $value));
     }
 }
