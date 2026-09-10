@@ -18,6 +18,11 @@ use Trade\Database;
  * Fee accounting runs before and after trading so exits see the latest entry fee,
  * mark price and trailing-profit floor, while completed orders are converted from
  * gross PnL to net PnL after actual/estimated exchange fees.
+ *
+ * Portfolio Intelligence v2 is activated only for the lifetime of this Nobitex
+ * run. Its runtime multiplier can reduce new-entry sizing but is always cleared
+ * in finally, preventing the shared RiskManager from leaking Nobitex learning
+ * into Bitpin or unrelated status reads.
  */
 final class NobitexAutoTraderEngine
 {
@@ -28,17 +33,56 @@ final class NobitexAutoTraderEngine
         NobitexUniverseScanner::resetProcessCache();
         $accounting = new NobitexTradeAccounting();
         $accountingBefore = $this->safeAccountingSync($accounting);
+        $intelligence = new NobitexPortfolioIntelligence();
+        $policy = $this->safeActivateIntelligence($intelligence);
 
+        try {
+            return $this->runWithPolicy($accounting, $accountingBefore, $intelligence, $policy);
+        } finally {
+            NobitexPortfolioIntelligence::clearRuntimePolicy();
+        }
+    }
+
+    private function runWithPolicy(
+        NobitexTradeAccounting $accounting,
+        array $accountingBefore,
+        NobitexPortfolioIntelligence $intelligence,
+        array $policy
+    ): array {
         $actions = [];
         $last = null;
         $accountingAfter = null;
+        $entryLearning = [];
 
         for ($i = 0; $i < self::MAX_ACTIONS_PER_TICK; $i++) {
-            $last = (new NobitexPortfolioEngine())->run();
+            try {
+                $last = (new NobitexPortfolioEngine())->run();
+            } catch (\Throwable $e) {
+                // A fail-closed Portfolio Intelligence guard can reject an
+                // automated BUY before it reaches the exchange. Convert that
+                // rejection into an explainable no-trade result rather than
+                // crashing the cron run; exits from previous iterations remain
+                // unaffected because intelligence is BUY-only in OrderService.
+                if (str_contains($e->getMessage(), 'Portfolio intelligence')) {
+                    $last = [
+                        'status'=>'no_trade',
+                        'exchange'=>'nobitex',
+                        'reason'=>'portfolio_intelligence_buy_blocked',
+                        'error'=>mb_substr($e->getMessage(), 0, 300),
+                    ];
+                    $accountingAfter = $this->safeAccountingSync($accounting);
+                    break;
+                }
+                throw $e;
+            }
+
             $accountingAfter = $this->safeAccountingSync($accounting);
             $status = (string) ($last['status'] ?? 'unknown');
 
             if (in_array($status, ['buy_submitted','sell_submitted'], true)) {
+                if ($status === 'buy_submitted') {
+                    $entryLearning[] = $this->safeRecordIntelligence($intelligence, $last);
+                }
                 $actions[] = $this->stripLegacyScores($last);
                 continue;
             }
@@ -76,6 +120,12 @@ final class NobitexAutoTraderEngine
             break;
         }
 
+        $intelligenceContext = [
+            'activation'=>$policy,
+            'position_size_multiplier'=>NobitexPortfolioIntelligence::runtimePositionMultiplier(),
+            'entry_learning'=>$entryLearning,
+        ];
+
         if ($actions === []) {
             $result = $this->stripLegacyScores(is_array($last) ? $last : [
                 'status'=>'no_trade',
@@ -83,6 +133,7 @@ final class NobitexAutoTraderEngine
                 'reason'=>'no_actionable_profit',
             ]);
             $result['accounting'] = ['before'=>$accountingBefore,'after'=>$accountingAfter];
+            $result['intelligence'] = $intelligenceContext;
             return $result;
         }
 
@@ -91,6 +142,7 @@ final class NobitexAutoTraderEngine
             $one['continuation_status'] = $last['status'];
             if (isset($last['rotation'])) $one['rotation'] = $last['rotation'];
             $one['accounting'] = ['before'=>$accountingBefore,'after'=>$accountingAfter];
+            $one['intelligence'] = $intelligenceContext;
             return $one;
         }
 
@@ -99,11 +151,13 @@ final class NobitexAutoTraderEngine
             'exchange'=>'nobitex',
             'decision_model'=>'net_edge_after_execution_quality_and_adaptive_forecast_buffer_v5',
             'rotation_model'=>'guarded_opportunity_replacement_v1',
+            'intelligence_model'=>NobitexPortfolioIntelligence::MODEL,
             'score_based_selection'=>false,
             'actions_count'=>count($actions),
             'actions'=>$actions,
             'continuation'=>$this->stripLegacyScores(is_array($last) ? $last : []),
             'accounting'=>['before'=>$accountingBefore,'after'=>$accountingAfter],
+            'intelligence'=>$intelligenceContext,
         ];
     }
 
@@ -133,6 +187,27 @@ final class NobitexAutoTraderEngine
             'bootstrap'=>'retired_score_gate',
             'selection_model'=>'net_edge_after_execution_quality_and_adaptive_forecast_buffer_v5',
         ];
+    }
+
+    private function safeActivateIntelligence(NobitexPortfolioIntelligence $intelligence): array
+    {
+        try {
+            return ['status'=>'ok','snapshot'=>$intelligence->activateRuntimePolicy()];
+        } catch (\Throwable $e) {
+            NobitexPortfolioIntelligence::clearRuntimePolicy();
+            return ['status'=>'deferred','error'=>mb_substr($e->getMessage(), 0, 300)];
+        }
+    }
+
+    private function safeRecordIntelligence(NobitexPortfolioIntelligence $intelligence, array $action): array
+    {
+        try {
+            return $intelligence->recordEntryFromAction(Database::connection(), $action);
+        } catch (\Throwable $e) {
+            // The order has already been submitted at this point. Learning must
+            // therefore degrade gracefully and never pretend the trade failed.
+            return ['status'=>'deferred','error'=>mb_substr($e->getMessage(), 0, 300)];
+        }
     }
 
     private function safeAccountingSync(NobitexTradeAccounting $accounting): array
