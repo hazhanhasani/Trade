@@ -20,22 +20,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve unified local version
+      - name: Resolve unified local version and contract
         id: version
         shell: bash
         run: |
           set -euo pipefail
           VERSION=$(php -r "echo require 'backend/version.php';")
           if [[ ! "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-            echo "::error::backend/version.php must contain a semantic version like 1.3.2"
+            echo "::error::backend/version.php must contain a semantic version like 1.3.5"
             exit 1
           fi
           MAJOR=$((10#${BASH_REMATCH[1]}))
           MINOR=$((10#${BASH_REMATCH[2]}))
           PATCH=$((10#${BASH_REMATCH[3]}))
           VERSION_CODE=$((MAJOR * 1000000 + MINOR * 1000 + PATCH))
+          API_CONTRACT=$(php -r "require 'backend/bootstrap.php'; echo Trade\\ReleaseContract::API_CONTRACT;")
+          ANDROID_CONTRACT=$(sed -n 's/.*const val API_CONTRACT = \([0-9][0-9]*\).*/\1/p' android/app/src/main/java/ir/trade/app/data/ReleaseContract.kt | head -n1)
+
+          if [[ ! "$API_CONTRACT" =~ ^[0-9]+$ || "$API_CONTRACT" != "$ANDROID_CONTRACT" ]]; then
+            echo "::error::Local Backend and Android API contracts are not synchronized."
+            exit 1
+          fi
+
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
           echo "code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "api_contract=$API_CONTRACT" >> "$GITHUB_OUTPUT"
 
       - name: Download stable coordinated release
         shell: bash
@@ -49,20 +58,29 @@ jobs:
             'https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade.apk' \
             -o dist/Trade.apk
 
-      - name: Verify coordinated version contract
+      - name: Verify coordinated version and capability contract
         env:
           LOCAL_VERSION: ${{ steps.version.outputs.value }}
           LOCAL_VERSION_CODE: ${{ steps.version.outputs.code }}
+          LOCAL_API_CONTRACT: ${{ steps.version.outputs.api_contract }}
         shell: bash
         run: |
           set -euo pipefail
+          SCHEMA=$(jq -r '.schema // 0' dist/latest.json)
           RELEASE_VERSION=$(jq -r '.release.version // empty' dist/latest.json)
           BACKEND_VERSION=$(jq -r '.backend.version // empty' dist/latest.json)
           ANDROID_VERSION=$(jq -r '.android.version_name // empty' dist/latest.json)
           REQUIRED_BACKEND=$(jq -r '.android.required_backend_version // empty' dist/latest.json)
           ANDROID_CODE=$(jq -r '.android.version_code // 0' dist/latest.json)
           ANDROID_AVAILABLE=$(jq -r '.android.available // false' dist/latest.json)
+          RELEASE_CONTRACT=$(jq -r '.release.api_contract // 0' dist/latest.json)
+          BACKEND_CONTRACT=$(jq -r '.backend.api_contract // 0' dist/latest.json)
+          REQUIRED_API_CONTRACT=$(jq -r '.android.required_api_contract // 0' dist/latest.json)
 
+          if [[ "$SCHEMA" != "3" ]]; then
+            echo "::error::Stable manifest must use schema 3."
+            exit 1
+          fi
           if [[ "$RELEASE_VERSION" != "$LOCAL_VERSION" || \
                 "$BACKEND_VERSION" != "$LOCAL_VERSION" || \
                 "$ANDROID_VERSION" != "$LOCAL_VERSION" || \
@@ -78,7 +96,22 @@ jobs:
             echo "::error::The coordinated Android APK is not marked available."
             exit 1
           fi
-          echo "Release contract is coordinated at Trade $LOCAL_VERSION."
+          if [[ "$RELEASE_CONTRACT" != "$LOCAL_API_CONTRACT" || \
+                "$BACKEND_CONTRACT" != "$LOCAL_API_CONTRACT" || \
+                "$REQUIRED_API_CONTRACT" != "$LOCAL_API_CONTRACT" ]]; then
+            echo "::error::Stable API contract is not coordinated across release/backend/android."
+            exit 1
+          fi
+
+          EXPECTED_CAPABILITIES=$(php -r "require 'backend/bootstrap.php'; echo json_encode(Trade\\ReleaseContract::CAPABILITIES, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);")
+          jq -e --argjson expected "$EXPECTED_CAPABILITIES" \
+            '(.release.capabilities | type == "array") and (($expected - .release.capabilities) | length == 0)' \
+            dist/latest.json >/dev/null || {
+              echo "::error::Stable release is missing capabilities declared by the backend contract."
+              exit 1
+            }
+
+          echo "Release $LOCAL_VERSION / API contract $LOCAL_API_CONTRACT is coordinated."
 
       - name: Verify released APK checksum and signature
         shell: bash
@@ -107,4 +140,5 @@ jobs:
       - name: Validation summary
         env:
           VERSION: ${{ steps.version.outputs.value }}
-        run: echo "Trade $VERSION Backend + Android release validation passed."
+          API_CONTRACT: ${{ steps.version.outputs.api_contract }}
+        run: echo "Trade $VERSION Backend + Android + API contract $API_CONTRACT validation passed."
