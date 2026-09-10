@@ -19,8 +19,6 @@ function assertTrue(bool $condition, string $message): void
 $prices = [];
 $price = 100.0;
 for ($i = 0; $i < 480; $i++) {
-    // A deterministic, mildly trending series with enough movement to exercise
-    // the full 1m/5m/15m indicator pipeline without random test flakiness.
     $wave = sin($i / 7.0) * 0.00045;
     $price *= 1.00035 + $wave;
     $prices[] = $price;
@@ -37,16 +35,22 @@ $baseMarket = [
 
 $engine = new NobitexInternalSignalEngine();
 $signal = $engine->analyze($baseMarket, $prices);
-assertTrue(($signal['source'] ?? '') === 'nobitex_internal_profit_first_full_universe_v5', 'v5 source marker missing');
-assertTrue(($signal['decision_model'] ?? '') === 'net_edge_after_execution_quality_and_adaptive_forecast_buffer_v5', 'v5 decision model missing');
+assertTrue(($signal['source'] ?? '') === 'nobitex_multi_strategy_regime_engine_v1', 'multi-strategy source marker missing');
+assertTrue(($signal['decision_model'] ?? '') === 'multi_strategy_regime_router_net_edge_v1', 'multi-strategy decision model missing');
+assertTrue(isset($signal['market_regime']['regime']), 'market regime missing');
+assertTrue(isset($signal['selected_strategy']['key']), 'selected strategy missing');
+assertTrue(isset($signal['strategy_candidates']) && is_array($signal['strategy_candidates']), 'strategy candidate diagnostics missing');
+assertTrue(count($signal['strategy_candidates']) === 3, 'all three strategies should be evaluated');
 assertTrue(isset($signal['execution_quality']) && is_array($signal['execution_quality']), 'execution quality diagnostics missing');
 assertTrue((float)($signal['execution_quality']['liquidity_multiple'] ?? 0) >= 15.9, 'liquidity multiple was not calculated');
 assertTrue(isset($signal['execution_quality_score']), 'execution quality score missing');
 assertTrue(isset($signal['cost_model']['liquidity_slippage_reserve_percent']), 'liquidity cost reserve missing');
 assertTrue(isset($signal['cost_model']['adverse_flow_reserve_percent']), 'adverse flow reserve missing');
+assertTrue(isset($signal['cost_model']['regime_uncertainty_buffer_percent']), 'regime uncertainty reserve missing');
+assertTrue(isset($signal['cost_model']['strategy_uncertainty_buffer_percent']), 'strategy uncertainty reserve missing');
 
 $illiquid = $baseMarket;
-$illiquid['depth_quote'] = 6_000_000.0; // only 3x minimum order, below the v5 4x floor
+$illiquid['depth_quote'] = 6_000_000.0;
 $illiquidSignal = $engine->analyze($illiquid, $prices);
 assertTrue(($illiquidSignal['ready'] ?? true) === false, 'illiquid market should not be executable');
 assertTrue(($illiquidSignal['reason'] ?? '') === 'liquidity_not_executable', 'illiquid rejection reason mismatch');
@@ -54,10 +58,7 @@ assertTrue(($illiquidSignal['reason'] ?? '') === 'liquidity_not_executable', 'il
 $adverse = $baseMarket;
 $adverse['orderbook_imbalance'] = -0.90;
 $adverseSignal = $engine->analyze($adverse, $prices);
-assertTrue(
-    (float)($adverseSignal['cost_model']['adverse_flow_reserve_percent'] ?? 0) > 0.0,
-    'negative order-book imbalance should reserve adverse-flow cost'
-);
+assertTrue((float)($adverseSignal['cost_model']['adverse_flow_reserve_percent'] ?? 0) > 0.0, 'negative order-book imbalance should reserve adverse-flow cost');
 
 $risk = new RiskManager();
 $stalePosition = [
@@ -90,53 +91,19 @@ $rotationConfig = [
 ];
 $positions = [
     [
-        'id'=>1,
-        'symbol'=>'WEAKIRT',
-        'asset'=>'WEAK',
-        'quote_asset'=>'IRT',
-        'status'=>'open',
-        'amount'=>2.0,
-        'forward_edge_percent'=>0.05,
-        'estimated_exit_cost_percent'=>0.30,
-        'unrealized_net_pnl_percent'=>0.20,
+        'id'=>1,'symbol'=>'WEAKIRT','asset'=>'WEAK','quote_asset'=>'IRT','status'=>'open','amount'=>2.0,
+        'forward_edge_percent'=>0.05,'estimated_exit_cost_percent'=>0.30,'unrealized_net_pnl_percent'=>0.20,
         'opened_at'=>gmdate('Y-m-d H:i:s', $now - 2 * 3600),
     ],
     [
-        'id'=>2,
-        'symbol'=>'STRONGIRT',
-        'asset'=>'STRONG',
-        'quote_asset'=>'IRT',
-        'status'=>'open',
-        'amount'=>1.0,
-        'forward_edge_percent'=>0.70,
-        'estimated_exit_cost_percent'=>0.25,
-        'unrealized_net_pnl_percent'=>0.40,
+        'id'=>2,'symbol'=>'STRONGIRT','asset'=>'STRONG','quote_asset'=>'IRT','status'=>'open','amount'=>1.0,
+        'forward_edge_percent'=>0.70,'estimated_exit_cost_percent'=>0.25,'unrealized_net_pnl_percent'=>0.40,
         'opened_at'=>gmdate('Y-m-d H:i:s', $now - 3 * 3600),
     ],
 ];
 $candidates = [
-    [
-        'symbol'=>'NEWIRT',
-        'asset'=>'NEW',
-        'quote_asset'=>'IRT',
-        'signal'=>[
-            'ready'=>true,
-            'action'=>'buy',
-            'tradable_net_edge_percent'=>1.25,
-            'execution_quality_score'=>84,
-        ],
-    ],
-    [
-        'symbol'=>'WEAKUSDT',
-        'asset'=>'WEAK',
-        'quote_asset'=>'USDT',
-        'signal'=>[
-            'ready'=>true,
-            'action'=>'buy',
-            'tradable_net_edge_percent'=>3.00,
-            'execution_quality_score'=>95,
-        ],
-    ],
+    ['symbol'=>'NEWIRT','asset'=>'NEW','quote_asset'=>'IRT','signal'=>['ready'=>true,'action'=>'buy','tradable_net_edge_percent'=>1.25,'execution_quality_score'=>84]],
+    ['symbol'=>'WEAKUSDT','asset'=>'WEAK','quote_asset'=>'USDT','signal'=>['ready'=>true,'action'=>'buy','tradable_net_edge_percent'=>3.00,'execution_quality_score'=>95]],
 ];
 $plan = $rotation->plan($positions, $candidates, $rotationConfig, $now);
 assertTrue(($plan['rotate'] ?? false) === true, 'superior replacement should trigger rotation');
@@ -162,4 +129,4 @@ $weakPlan = $rotation->plan($positions, $weakCandidate, $rotationConfig, $now);
 assertTrue(($weakPlan['rotate'] ?? true) === false, 'insufficient replacement edge should not churn the portfolio');
 assertTrue(($weakPlan['reason'] ?? '') === 'replacement_advantage_insufficient', 'insufficient advantage rejection reason mismatch');
 
-echo "Nobitex strategy v5 + portfolio rotation regression tests passed.\n";
+echo "Nobitex multi-strategy + execution quality + portfolio rotation regression tests passed.\n";
