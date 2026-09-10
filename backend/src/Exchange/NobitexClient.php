@@ -41,11 +41,12 @@ final class NobitexClient
     }
 
     /**
-     * Fetches public OHLC histories concurrently. This lets the trading engine
-     * inspect the complete executable market universe instead of arbitrarily
-     * choosing a top-N shortlist before profitability analysis.
+     * Fetches a caller-budgeted set of public OHLC histories concurrently.
      *
-     * Failed batch items are retried through the normal public-host fallback.
+     * Deliberately does not retry failed batch items: Nobitex documents a hard
+     * 60 OHLC requests/minute limit and automatic retries could silently consume
+     * twice the reserved budget. The scanner persists histories and schedules a
+     * missed market again on a later tick instead.
      */
     public function ohlcMany(array $symbols, string $resolution = '1', int $countback = 480, int $concurrency = 8): array
     {
@@ -64,15 +65,11 @@ final class NobitexClient
         if ($safe === []) return [];
 
         $result = [];
-        $failed = [];
         $to = time();
 
         foreach (array_chunk(array_values($safe), $concurrency) as $chunk) {
             $multi = curl_multi_init();
-            if ($multi === false) {
-                foreach ($chunk as $symbol) $failed[$symbol] = true;
-                continue;
-            }
+            if ($multi === false) continue;
 
             $handles = [];
             foreach ($chunk as $symbol) {
@@ -84,10 +81,7 @@ final class NobitexClient
                 ], '', '&', PHP_QUERY_RFC3986);
 
                 $ch = curl_init($this->publicBaseUrl . '/market/udf/history?' . $query);
-                if ($ch === false) {
-                    $failed[$symbol] = true;
-                    continue;
-                }
+                if ($ch === false) continue;
 
                 curl_setopt_array($ch, [
                     CURLOPT_RETURNTRANSFER=>true,
@@ -118,25 +112,12 @@ final class NobitexClient
 
                 if ($errno === 0 && $http >= 200 && $http < 300 && is_array($decoded)) {
                     $result[$symbol] = $decoded;
-                } else {
-                    $failed[$symbol] = true;
                 }
 
                 curl_multi_remove_handle($multi, $ch);
                 curl_close($ch);
             }
             curl_multi_close($multi);
-        }
-
-        // Public fallback hosts are used only for batch misses; one bad/illiquid
-        // market must not abort analysis of the rest of the universe.
-        foreach (array_keys($failed) as $symbol) {
-            if (isset($result[$symbol])) continue;
-            try {
-                $result[$symbol] = $this->ohlc($symbol, $resolution, $countback);
-            } catch (\Throwable) {
-                $result[$symbol] = [];
-            }
         }
 
         return $result;
