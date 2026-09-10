@@ -137,10 +137,35 @@ final class NobitexOrderService
             if(str_starts_with($source,'autotrade_nobitex')&&$source!=='autotrade_nobitex_reprice'){
                 $symbol=strtoupper(preg_replace('/[^A-Z0-9]/','',(string)($order['symbol']??$order['market_symbol']??''))??'');
                 try{$assessment=(new NobitexPortfolioIntelligence())->assessAutomatedBuy($pdo,$symbol);}catch(\Throwable $e){$this->audit('nobitex.intelligence.guard_error',['symbol'=>$symbol,'source'=>$source,'error'=>mb_substr($e->getMessage(),0,500)]);throw new \RuntimeException('Portfolio intelligence unavailable; automated BUY blocked.');}
-                if(!($assessment['allowed']??false)){$reason=(string)($assessment['reason']??'portfolio_intelligence_blocked');$this->audit('nobitex.intelligence.buy_blocked',['symbol'=>$symbol,'source'=>$source,'reason'=>$reason,'assessment'=>$assessment]);throw new NobitexCandidateRejectedException($symbol,$reason,$assessment);}
+                if(!($assessment['allowed']??false)){
+                    $reason=(string)($assessment['reason']??'portfolio_intelligence_blocked');
+                    if($reason==='strategy_profile_underperforming'&&$this->usesStrategyLearningV2($pdo,$symbol)){
+                        // Strategy Learning v2 owns performance penalties for the
+                        // new regime router. The legacy Intelligence profile may
+                        // still enforce duplicate/correlation guards, but its old
+                        // mixed performance bucket must not cross-penalize Trend,
+                        // Breakout and Mean Reversion.
+                        $this->audit('nobitex.intelligence.legacy_strategy_penalty_superseded',['symbol'=>$symbol,'source'=>$source,'assessment'=>$assessment]);
+                    }else{
+                        $this->audit('nobitex.intelligence.buy_blocked',['symbol'=>$symbol,'source'=>$source,'reason'=>$reason,'assessment'=>$assessment]);
+                        throw new NobitexCandidateRejectedException($symbol,$reason,$assessment);
+                    }
+                }
             }
         }
         $maxValue=(float)Config::get('trading.max_order_value',0);if($maxValue>0&&isset($order['price'])&&isset($order['amount1'])){if((float)$order['price']*(float)$order['amount1']>$maxValue)throw new \RuntimeException('Order exceeds configured max_order_value.');}
+    }
+
+    private function usesStrategyLearningV2(\PDO $pdo,string $symbol):bool
+    {
+        if($symbol==='')return false;
+        $stmt=$pdo->prepare('SELECT details_json FROM nobitex_autotrade_signals WHERE symbol=:symbol ORDER BY id DESC LIMIT 1');
+        $stmt->execute([':symbol'=>$symbol]);
+        $details=json_decode((string)($stmt->fetchColumn()?:''),true);
+        if(!is_array($details))return false;
+        $strategy=(string)($details['strategy_key']??$details['selected_strategy']['key']??'');
+        return in_array($strategy,['trend_momentum_v1','breakout_v1','mean_reversion_v1'],true)
+            && str_starts_with((string)($details['decision_model']??''),'multi_strategy_regime_router_');
     }
 
     private function assertEnabled():void{if(!$this->liveEnabled())throw new \RuntimeException('Nobitex live trading is disabled.');}
