@@ -40,7 +40,7 @@ final class NobitexMultiStrategyRouter
             NobitexMarketRegimeDetector::BREAKOUT_UP,
             NobitexMarketRegimeDetector::BREAKOUT_DOWN => 'breakout_v1',
             NobitexMarketRegimeDetector::RANGING => 'mean_reversion_v1',
-            NobitexMarketRegimeDetector::HIGH_VOLATILITY => 'high_volatility_momentum_v2',
+            NobitexMarketRegimeDetector::HIGH_VOLATILITY => 'high_volatility_momentum_v3',
             default => null,
         };
 
