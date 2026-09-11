@@ -28,8 +28,13 @@ function tradeAdminNav(string $active, string $version): void
         'system' => ['/admin/system.php', 'سیستم'],
     ];
     ?>
-    <link rel="stylesheet" href="/admin/assets/cockpit-ui.css?v=6">
-    <script defer src="/admin/assets/cockpit.js?v=6"></script>
+    <style id="trade-theme-prepaint">html:not([data-theme-ready="true"]) body{visibility:hidden!important}html:not(.theme-animated) *,html:not(.theme-animated) *::before,html:not(.theme-animated) *::after{transition:none!important}</style>
+    <script id="trade-theme-bootstrap">
+    (()=>{const root=document.documentElement;let stored=null;try{stored=localStorage.getItem('trade-theme')}catch(_){}const theme=(stored==='dark'||stored==='light')?stored:((window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light');root.dataset.theme=theme;const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.setAttribute('content',theme==='dark'?'#0d111b':'#f3f5f9');})();
+    </script>
+    <link rel="stylesheet" href="/admin/assets/cockpit-ui.css?v=7">
+    <script>document.documentElement.dataset.themeReady='true';requestAnimationFrame(()=>requestAnimationFrame(()=>document.documentElement.classList.add('theme-animated')));</script>
+    <script defer src="/admin/assets/cockpit.js?v=7"></script>
     <style id="trade-mobile-overflow-guard">
     html,body{max-width:100%!important;overflow-x:clip!important}.admin-shell,.admin-shell>*{max-width:100%!important;min-width:0!important}
     @media(max-width:1100px){html,body{width:100%!important;max-width:100%!important;overflow-x:clip!important}.admin-shell{width:100%!important;max-width:100%!important;min-width:0!important;overflow-x:clip!important}.admin-topbar{width:100%!important;max-width:100%!important;margin-left:0!important;margin-right:0!important}.admin-toprow,.admin-brand,.admin-nav,.page-head,.hero-panel,.panel-grid,.panel,.stat-grid,.stat-card,.metric-grid,.metric,.field-grid,.field,.subnav,.actions,.table-wrap,form,fieldset,details{max-width:100%!important;min-width:0!important}.table-wrap{width:100%!important;overflow-x:hidden!important;overflow-y:visible!important;-webkit-overflow-scrolling:auto!important}.table-wrap table,table{width:100%!important;max-width:100%!important;min-width:0!important;table-layout:fixed!important}thead,tbody,tr,th,td{max-width:100%!important;min-width:0!important}th,td{white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important}.admin-nav a,.subnav a,.btn,.badge,.hero-pill,.notice,.metric,.stat-card{max-width:100%!important;min-width:0!important;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important}input,select,textarea,button,pre,code,iframe,canvas,video,img,svg{max-width:100%!important;min-width:0!important}pre,code,.code,.mono{white-space:pre-wrap!important;word-break:break-all!important;overflow-x:hidden!important}}

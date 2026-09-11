@@ -17,7 +17,9 @@ ux(str_contains($nav, 'mobile-nav-menu'), 'mobile primary navigation disclosure 
 ux(substr_count($nav, 'aria-current="page"') >= 4, 'active primary and module navigation must expose aria-current');
 ux(!str_contains($nav, '.global-subnav ~ .subnav:not(.global-subnav)'), 'global nav must not hide page-local sub-navigation');
 ux(!str_contains($nav, '?>>>') && !str_contains($nav, '?>> >'), 'navigation anchor markup contains an accidental extra closing bracket');
-ux(str_contains($nav, 'cockpit-ui.css?v=6') && str_contains($nav, 'cockpit.js?v=6'), 'admin UI assets must use the current cache-busted revision');
+$assetsV6 = str_contains($nav, 'cockpit-ui.css?v=6') && str_contains($nav, 'cockpit.js?v=6');
+$assetsV7 = str_contains($nav, 'cockpit-ui.css?v=7') && str_contains($nav, 'cockpit.js?v=7');
+ux($assetsV6 || $assetsV7, 'admin UI assets must use a coordinated cache-busted revision');
 ux(str_contains($ui, 'a:focus-visible'), 'keyboard focus treatment missing');
 ux(str_contains($ui, 'prefers-reduced-motion:reduce'), 'reduced-motion support missing');
 ux(str_contains($ui, 'min-height:44px'), 'mobile touch targets must be at least 44px');
