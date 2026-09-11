@@ -14,6 +14,8 @@ namespace Trade\Trading;
  */
 final class NobitexCrossMarketPriceOracle
 {
+    public const MODEL = 'nobitex_spot_irt_plus_usdt_cross_rate_v1';
+
     private const MAX_REFERENCE_SPREAD_PERCENT = 1.50;
     private const MAX_DIRECTIONAL_ADJUSTMENT_PERCENT = 0.15;
     private const MAX_UNCERTAINTY_PERCENT = 0.12;
@@ -49,6 +51,100 @@ final class NobitexCrossMarketPriceOracle
         }
 
         return self::fromCatalog($market, self::$catalog);
+    }
+
+    /**
+     * Applies the Nobitex-local IRT spot + Nobitex USDT spot/global reference to
+     * the already fee-aware Profit-First signal. Explicit fee/spread/slippage
+     * costs are never rewritten. A bounded cross-market directional term changes
+     * the forecast while basis uncertainty is added to the residual buffer.
+     * Missing paired markets are neutral rather than a hard trading veto.
+     *
+     * @return array<string,mixed>
+     */
+    public static function applyToSignal(array $signal, array $market): array
+    {
+        if (NobitexStrategyLearning::strategyKey($signal) !== 'profit_first_v5') return $signal;
+
+        $reference = (new self())->reference($market);
+        $signal['cross_market_reference'] = $reference;
+        $signal['cross_market_model'] = self::MODEL;
+        $signal['cross_market_reference_ready'] = (bool)($reference['available'] ?? false)
+            && (bool)($reference['quality_ready'] ?? false);
+
+        if (!($reference['available'] ?? false)) return $signal;
+        if (!is_numeric($signal['expected_gross_move_percent'] ?? null)
+            || !is_numeric($signal['expected_net_edge_percent'] ?? null)
+            || !is_numeric($signal['required_edge_buffer_percent'] ?? null)) {
+            return $signal;
+        }
+
+        $qualityReady = (bool)($reference['quality_ready'] ?? false);
+        $directional = $qualityReady
+            ? self::clamp((float)($reference['directional_adjustment_percent'] ?? 0.0), -self::MAX_DIRECTIONAL_ADJUSTMENT_PERCENT, self::MAX_DIRECTIONAL_ADJUSTMENT_PERCENT)
+            : 0.0;
+        $uncertainty = self::clamp((float)($reference['uncertainty_percent'] ?? 0.0), 0.0, self::MAX_UNCERTAINTY_PERCENT);
+
+        $grossBefore = (float)$signal['expected_gross_move_percent'];
+        $netBefore = (float)$signal['expected_net_edge_percent'];
+        $bufferBefore = max(0.0, (float)$signal['required_edge_buffer_percent']);
+        $grossAfter = $grossBefore + $directional;
+        $netAfter = $netBefore + $directional;
+        $bufferAfter = $bufferBefore + $uncertainty;
+        $tradableAfter = $netAfter - $bufferAfter;
+        $ready = (bool)($signal['ready'] ?? false);
+        $action = strtolower((string)($signal['action'] ?? 'hold'));
+        $reason = (string)($signal['reason'] ?? '');
+
+        $signal['expected_gross_move_percent'] = round($grossAfter, 4);
+        $signal['expected_net_edge_percent'] = round($netAfter, 4);
+        $signal['required_edge_buffer_percent'] = round($bufferAfter, 4);
+        $signal['minimum_net_edge_percent'] = round($bufferAfter, 4);
+        $signal['tradable_net_edge_percent'] = round($tradableAfter, 4);
+        $signal['expected_net_profit'] = $ready && $tradableAfter > 0.0;
+        $signal['cross_market_directional_adjustment_percent'] = round($directional, 4);
+        $signal['cross_market_uncertainty_percent'] = round($uncertainty, 4);
+        $signal['cross_market_basis_percent'] = is_numeric($reference['basis_percent'] ?? null)
+            ? round((float)$reference['basis_percent'], 4) : null;
+
+        // Re-evaluate only the economic BUY/forward-SELL edge. Structural market
+        // readiness still belongs to the primary engine and cannot be overridden.
+        if ($ready) {
+            if ($action === 'buy' && $tradableAfter <= 0.0) {
+                $action = 'hold';
+                $reason = 'cross_market_reference_removed_tradable_edge';
+            } elseif ($action === 'hold'
+                && in_array($reason, ['edge_below_adaptive_safety_buffer','adaptive_policy_tightened_edge_below_margin'], true)
+                && $tradableAfter > 0.0) {
+                $action = 'buy';
+                $reason = 'positive_tradable_net_edge_after_cross_market_reference';
+            }
+
+            $exitCost = max(0.0, (float)($signal['estimated_exit_cost_percent'] ?? 0.0));
+            $sellTrigger = max(0.05, $exitCost);
+            if ($action === 'sell' && $grossAfter >= -$sellTrigger) {
+                $action = 'hold';
+                $reason = 'cross_market_reference_holds_forward_sell';
+            } elseif ($action === 'hold' && $tradableAfter <= 0.0 && $grossAfter < -$sellTrigger) {
+                $action = 'sell';
+                $reason = 'cross_market_reference_forward_sell_bias';
+            }
+        }
+
+        $signal['action'] = $action;
+        $signal['reason'] = $reason;
+        if (is_array($signal['selected_strategy'] ?? null)) {
+            $signal['selected_strategy']['entry_allowed'] = $action === 'buy';
+            $signal['selected_strategy']['exit_bias'] = $action === 'sell';
+            $signal['selected_strategy']['reason'] = $reason;
+        }
+        if (is_array($signal['cost_model'] ?? null)) {
+            $signal['cost_model']['cross_market_model'] = self::MODEL;
+            $signal['cost_model']['cross_market_directional_adjustment_percent'] = round($directional, 4);
+            $signal['cost_model']['cross_market_uncertainty_percent'] = round($uncertainty, 4);
+            $signal['cost_model']['cross_market_reference_basis_percent'] = $signal['cross_market_basis_percent'];
+        }
+        return $signal;
     }
 
     /**
@@ -149,7 +245,7 @@ final class NobitexCrossMarketPriceOracle
 
         return [
             'available'=>true,
-            'source'=>'nobitex_spot_irt_plus_usdt_cross_rate_v1',
+            'source'=>self::MODEL,
             'asset'=>$asset,
             'candidate_quote'=>$quote,
             'local_spot_symbol'=>$asset . 'IRT',
@@ -176,7 +272,7 @@ final class NobitexCrossMarketPriceOracle
     {
         $out = [
             'available'=>false,
-            'source'=>'nobitex_spot_irt_plus_usdt_cross_rate_v1',
+            'source'=>self::MODEL,
             'asset'=>$asset,
             'candidate_quote'=>$quote,
             'reason'=>$reason,
