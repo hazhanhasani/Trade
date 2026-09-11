@@ -39,6 +39,11 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
         return request("POST", "/api/settings/preview", json)
     }
 
+    suspend fun updateBotSettings(json: String): Response {
+        requireCapability("trading.auto_trading")
+        return request("POST", "/api/bot/settings", json)
+    }
+
     suspend fun applyPreset(name: String): Response {
         requireCapability("trading.settings_presets_history_v1")
         return request("POST", "/api/settings/preset", JSONObject().put("name", name).toString())
