@@ -16,6 +16,9 @@ $root = dirname(__DIR__, 2);
 $repair = file_get_contents($root . '/backend/public/admin/repair.php');
 $cronRun = file_get_contents($root . '/backend/public/admin/cron-run.php');
 $client = file_get_contents($root . '/backend/src/Exchange/BitpinClient.php');
+$errorReporter = file_get_contents($root . '/backend/src/Observability/ErrorReporter.php');
+$baleAlert = file_get_contents($root . '/backend/src/Observability/BaleSystemAlert.php');
+$cronTick = file_get_contents($root . '/backend/cron/tick.php');
 
 expectRepair(is_string($repair) && $repair !== '', 'Repair center must exist.');
 expectRepair(str_contains($repair, 'bitpinReportedIp'), 'Repair center must parse the IP reported by Bitpin itself.');
@@ -35,5 +38,25 @@ expectRepair(str_contains($cronRun, 'اجرای Tick بعدی همین حالا'
 expectRepair(is_string($client) && str_contains($client, "CURLOPT_PROXY => ''"), 'Bitpin transport must bypass HTTP proxy variables.');
 expectRepair(str_contains($client, "CURLOPT_NOPROXY => '*'"), 'Bitpin transport must explicitly bypass all proxy destinations.');
 expectRepair(str_contains($client, 'CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4'), 'Bitpin transport must keep deterministic IPv4 routing for IP-whitelisted API access.');
+
+expectRepair(is_string($errorReporter) && str_contains($errorReporter, 'E_NOTICE,E_USER_NOTICE,E_DEPRECATED,E_USER_DEPRECATED,E_STRICT'), 'Minor PHP notices and deprecations must be captured.');
+expectRepair(str_contains($errorReporter, 'public static function log('), 'Application info logs must have a central forensic capture path.');
+expectRepair(str_contains($errorReporter, "'file'=>"), 'Bale diagnostic context must carry the exact project-relative file path.');
+expectRepair(str_contains($errorReporter, "'line'=>"), 'Bale diagnostic context must carry the exact source line.');
+expectRepair(str_contains($errorReporter, "'diagnosis'=>"), 'Bale diagnostic context must include a human-readable diagnosis.');
+expectRepair(str_contains($errorReporter, "'action'=>"), 'Bale diagnostic context must include a suggested action.');
+expectRepair(str_contains($errorReporter, "'run_id'=>"), 'Bale diagnostics must include run correlation when available.');
+expectRepair(str_contains($errorReporter, "default => 'لاگ فنی Trade'"), 'Info-level diagnostics must be mirrored to Bale.');
+
+expectRepair(is_string($baleAlert) && str_contains($baleAlert, "'file'=>'فایل دقیق'"), 'Bale alert formatter must label the exact file.');
+expectRepair(str_contains($baleAlert, "'line'=>'خط دقیق'"), 'Bale alert formatter must label the exact line.');
+expectRepair(str_contains($baleAlert, 'توضیح:'), 'Bale alert formatter must show the diagnosis text.');
+expectRepair(str_contains($baleAlert, 'اقدام پیشنهادی:'), 'Bale alert formatter must show remediation guidance.');
+expectRepair(str_contains($baleAlert, 'recentlyQueued($pdo, $hash, 5)'), 'Only a tiny anti-recursion dedupe guard may remain.');
+expectRepair(str_contains($baleAlert, "default=>'لاگ'"), 'Info diagnostics must render as log messages in Bale.');
+
+expectRepair(is_string($cronTick) && str_contains($cronTick, "'cron_cycle'"), 'Every completed Cron cycle must emit a diagnostic log.');
+expectRepair(str_contains($cronTick, "'run_id'=>"), 'Cron diagnostic logs must include their Run ID.');
+expectRepair(str_contains($cronTick, "'cron_update'"), 'Backend update deferral must emit its own diagnostic log.');
 
 fwrite(STDOUT, "Repair diagnostics regression tests passed.\n");

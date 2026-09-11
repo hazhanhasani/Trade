@@ -47,13 +47,9 @@ final class BaleSystemAlert
         $severity = $this->severity($severity);
 
         $hash = substr(hash('sha256', $fingerprint), 0, 40);
-        $windowSeconds = match ($severity) {
-            'critical' => 120,
-            'error' => 300,
-            'warning' => 600,
-            default => 900,
-        };
-        if ($this->recentlyQueued($pdo, $hash, $windowSeconds)) return;
+        // The channel is intentionally verbose. Keep only a tiny 5-second guard
+        // against accidental recursive storms; otherwise every occurrence is kept.
+        if ($this->recentlyQueued($pdo, $hash, 5)) return;
 
         $eventKey = 'system:' . $hash . ':' . time() . ':' . substr(bin2hex(random_bytes(3)), 0, 6);
         $stmt = $pdo->prepare("INSERT INTO bale_system_alert_deliveries
@@ -103,7 +99,7 @@ final class BaleSystemAlert
 
     private function recentlyQueued(PDO $pdo, string $hash, int $seconds): bool
     {
-        $seconds = max(30, min(3600, $seconds));
+        $seconds = max(1, min(3600, $seconds));
         $stmt = $pdo->prepare("SELECT EXISTS(
             SELECT 1 FROM bale_system_alert_deliveries
             WHERE event_key LIKE :prefix
@@ -140,7 +136,7 @@ final class BaleSystemAlert
     {
         $severity=strtolower((string)$row['severity']);
         $icon=match($severity){'critical'=>'🚨','error'=>'🔴','warning'=>'🟠',default=>'🔵'};
-        $label=match($severity){'critical'=>'بحرانی','error'=>'خطا','warning'=>'هشدار',default=>'اطلاع'};
+        $label=match($severity){'critical'=>'بحرانی','error'=>'خطا','warning'=>'هشدار',default=>'لاگ'};
         $lines=[
             $icon . ' Trade — ' . $label,
             'عنوان: ' . (string)$row['title'],
@@ -149,18 +145,31 @@ final class BaleSystemAlert
         ];
         $context=json_decode((string)($row['context_json']??''),true);
         if (is_array($context)) {
+            if (!empty($context['diagnosis'])) $lines[]='توضیح: '.mb_substr((string)$context['diagnosis'],0,600);
+            if (!empty($context['action'])) $lines[]='اقدام پیشنهادی: '.mb_substr((string)$context['action'],0,600);
             foreach ([
                 'component'=>'بخش',
-                'file'=>'فایل',
-                'line'=>'خط',
+                'file'=>'فایل دقیق',
+                'line'=>'خط دقیق',
+                'caller'=>'تابع/مسیر فراخوانی',
+                'error_type'=>'نوع رویداد',
                 'exchange'=>'صرافی',
                 'symbol'=>'بازار',
-                'request_id'=>'شناسه',
                 'status'=>'وضعیت',
+                'run_id'=>'Run ID',
+                'request_id'=>'Request ID',
+                'pid'=>'PID',
+                'sapi'=>'SAPI',
+                'method'=>'HTTP Method',
+                'request'=>'مسیر درخواست',
+                'fingerprint'=>'اثر خطا',
             ] as $k=>$fa) {
                 if (isset($context[$k]) && is_scalar($context[$k]) && trim((string)$context[$k])!=='') {
-                    $lines[]=$fa . ': ' . mb_substr((string)$context[$k],0,180);
+                    $lines[]=$fa . ': ' . mb_substr((string)$context[$k],0,300);
                 }
+            }
+            if (!empty($context['trace']) && is_scalar($context['trace'])) {
+                $lines[]="Trace:\n" . mb_substr((string)$context['trace'],0,1200);
             }
         }
         return mb_substr(implode("\n",$lines),0,4000);

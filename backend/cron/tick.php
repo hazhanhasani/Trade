@@ -35,7 +35,11 @@ register_shutdown_function(static function()use(&$heartbeat,$writeHeartbeat):voi
 $pdo=Database::connection();$versionBeforeUpdate=Updater::currentVersion();$update=Updater::autoUpdateIfDue();$versionAfterUpdate=Updater::currentVersion();
 $updatedThisProcess=($update['status']??'')==='updated'&&$versionAfterUpdate!==$versionBeforeUpdate&&version_compare($versionAfterUpdate,$versionBeforeUpdate,'>');
 if(($update['status']??'')==='updated'&&!$updatedThisProcess){$update['previous_result_status']='updated';$update['status']='up_to_date';$update['current_version']=$versionAfterUpdate;$update['latest_version']=(string)($update['latest_version']??$versionAfterUpdate);$update['replayed_update_state']=true;}
-if($updatedThisProcess){$heartbeat['status']='updated_deferred';$heartbeat['finished_at']=gmdate(DATE_ATOM);$heartbeat['finished_at_iran']=IranClock::nowPayload();$heartbeat['backend_version']=$versionAfterUpdate;$writeHeartbeat($heartbeat);echo json_encode(['status'=>'success','update'=>$update,'backend_version'=>$versionAfterUpdate,'exchanges'=>['bitpin'=>['status'=>'deferred','reason'=>'backend_updated_restart_next_tick'],'nobitex'=>['status'=>'deferred','reason'=>'backend_updated_restart_next_tick']],'time_utc'=>gmdate(DATE_ATOM),'time_iran'=>IranClock::nowPayload()],JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE).PHP_EOL;exit(0);}
+if($updatedThisProcess){
+    $heartbeat['status']='updated_deferred';$heartbeat['finished_at']=gmdate(DATE_ATOM);$heartbeat['finished_at_iran']=IranClock::nowPayload();$heartbeat['backend_version']=$versionAfterUpdate;$writeHeartbeat($heartbeat);
+    ErrorReporter::log('Backend با موفقیت داخل Cron به نسخه جدید به‌روزرسانی شد؛ اجرای معامله عمداً به Tick بعدی موکول شد.','cron_update',['status'=>'updated_deferred','from_version'=>$versionBeforeUpdate,'to_version'=>$versionAfterUpdate],'info');
+    echo json_encode(['status'=>'success','update'=>$update,'backend_version'=>$versionAfterUpdate,'exchanges'=>['bitpin'=>['status'=>'deferred','reason'=>'backend_updated_restart_next_tick'],'nobitex'=>['status'=>'deferred','reason'=>'backend_updated_restart_next_tick']],'time_utc'=>gmdate(DATE_ATOM),'time_iran'=>IranClock::nowPayload()],JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE).PHP_EOL;exit(0);
+}
 
 try{
     NobitexSchema::ensure();$runId=bin2hex(random_bytes(12));$stmt=$pdo->prepare("INSERT INTO bot_runs (run_id,status,started_at) VALUES (:id,'running',UTC_TIMESTAMP())");$stmt->execute([':id'=>$runId]);
@@ -77,18 +81,42 @@ try{
                 (new BaleSystemAlert())->queue('nobitex-external-position-'.$type.'-'.(int)($event['position_id']??0),'warning',$title,$body,['component'=>'position_reconciliation','exchange'=>'nobitex','symbol'=>$symbol,'status'=>$type],true,$pdo);
             }
         }
-    }catch(Throwable $e){$positionReconciliation=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];if(($externalTradeReconciliation['status']??'')==='skipped')$externalTradeReconciliation=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];ErrorReporter::captureThrowable($e,'warning','nobitex_position_reconciliation',['exchange'=>'nobitex']);}
+    }catch(Throwable $e){$positionReconciliation=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];if(($externalTradeReconciliation['status']??'')==='skipped')$externalTradeReconciliation=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];ErrorReporter::captureThrowable($e,'warning','nobitex_position_reconciliation',['exchange'=>'nobitex','run_id'=>$runId]);}
 
     $results=[];$enabledCount=0;$failedCount=0;
-    $runExchange=static function(string $exchange,callable $runner)use(&$results,&$enabledCount,&$failedCount):void{if(!NobitexSchema::botEnabled($exchange)){$results[$exchange]=['status'=>'disabled','exchange'=>$exchange];return;}$enabledCount++;try{$results[$exchange]=$runner();}catch(Throwable $e){$failedCount++;$results[$exchange]=['status'=>'failed','exchange'=>$exchange,'error'=>$e->getMessage()];ErrorReporter::captureThrowable($e,'error','cron_exchange',['exchange'=>$exchange,'status'=>'failed']);}};
+    $runExchange=static function(string $exchange,callable $runner)use(&$results,&$enabledCount,&$failedCount,$runId):void{if(!NobitexSchema::botEnabled($exchange)){$results[$exchange]=['status'=>'disabled','exchange'=>$exchange];return;}$enabledCount++;try{$results[$exchange]=$runner();}catch(Throwable $e){$failedCount++;$results[$exchange]=['status'=>'failed','exchange'=>$exchange,'error'=>$e->getMessage()];ErrorReporter::captureThrowable($e,'error','cron_exchange',['exchange'=>$exchange,'status'=>'failed','run_id'=>$runId]);}};
     $runExchange('bitpin',static fn():array=>(new AutoTraderEngine())->run());$runExchange('nobitex',static function():array{$engine=new NobitexAutoTraderEngine();$engine->runBootstrapIfPending();return$engine->run();});
 
-    $dust=['status'=>'disabled'];try{$dust=(new NobitexDustConverter())->runIfDue($pdo);}catch(Throwable $e){$dust=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];ErrorReporter::captureThrowable($e,'error','dust_converter_cron',['exchange'=>'nobitex']);}
-    $hostHealth=['status'=>'ok','alert_count'=>0];try{$hostHealth=(new HostHealthSentinel())->run();}catch(Throwable $e){$hostHealth=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];ErrorReporter::captureThrowable($e,'warning','host_health_sentinel');}
-    $bale=['status'=>'disabled'];try{$notifier=new BaleTradeNotifier();$baleStatus=$notifier->status($pdo);if(($baleStatus['enabled']??false)&&($baleStatus['configured']??false)){$sync=$notifier->syncConfirmedTrades(50,$pdo);$delivery=$notifier->flushPending(15,$pdo);$systemDelivery=(new BaleSystemAlert())->flushPending(20,$pdo);$bale=['status'=>'ok','sync'=>$sync,'delivery'=>$delivery,'system_alerts'=>$systemDelivery];}}catch(Throwable $e){$bale=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];ErrorReporter::captureThrowable($e,'warning','bale_delivery',['status'=>'deferred']);}
+    $dust=['status'=>'disabled'];try{$dust=(new NobitexDustConverter())->runIfDue($pdo);}catch(Throwable $e){$dust=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];ErrorReporter::captureThrowable($e,'error','dust_converter_cron',['exchange'=>'nobitex','run_id'=>$runId]);}
+    $hostHealth=['status'=>'ok','alert_count'=>0];try{$hostHealth=(new HostHealthSentinel())->run();}catch(Throwable $e){$hostHealth=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];ErrorReporter::captureThrowable($e,'warning','host_health_sentinel',['run_id'=>$runId]);}
+    $bale=['status'=>'disabled'];try{$notifier=new BaleTradeNotifier();$baleStatus=$notifier->status($pdo);if(($baleStatus['enabled']??false)&&($baleStatus['configured']??false)){$sync=$notifier->syncConfirmedTrades(50,$pdo);$delivery=$notifier->flushPending(15,$pdo);$systemDelivery=(new BaleSystemAlert())->flushPending(20,$pdo);$bale=['status'=>'ok','sync'=>$sync,'delivery'=>$delivery,'system_alerts'=>$systemDelivery];}}catch(Throwable $e){$bale=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];ErrorReporter::captureThrowable($e,'warning','bale_delivery',['status'=>'deferred','run_id'=>$runId]);}
 
     $overall=$failedCount===0?'success':(($enabledCount>$failedCount)?'partial':'failed');
     $summary=$baseSummary+['external_trade_reconciliation'=>$externalTradeReconciliation,'position_reconciliation'=>$positionReconciliation,'exchanges'=>$results,'dust_conversion'=>$dust,'host_health_sentinel'=>$hostHealth,'bale_notifications'=>$bale,'kill_switch'=>(string)($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn()?:'0')==='1'];
     $stmt=$pdo->prepare("UPDATE bot_runs SET status=:status,summary_json=:summary,finished_at=UTC_TIMESTAMP() WHERE run_id=:id");$stmt->execute([':status'=>$overall,':summary'=>json_encode($summary,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),':id'=>$runId]);
-    $heartbeat['status']=$overall;$heartbeat['finished_at']=gmdate(DATE_ATOM);$heartbeat['finished_at_iran']=IranClock::nowPayload();$heartbeat['run_id']=$runId;$heartbeat['backend_version']=$versionAfterUpdate;$writeHeartbeat($heartbeat);echo json_encode($summary,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR).PHP_EOL;exit($overall==='failed'?1:0);
+    $heartbeat['status']=$overall;$heartbeat['finished_at']=gmdate(DATE_ATOM);$heartbeat['finished_at_iran']=IranClock::nowPayload();$heartbeat['run_id']=$runId;$heartbeat['backend_version']=$versionAfterUpdate;$writeHeartbeat($heartbeat);
+
+    $nobitexResult=is_array($results['nobitex']??null)?$results['nobitex']:[];
+    $bitpinResult=is_array($results['bitpin']??null)?$results['bitpin']:[];
+    ErrorReporter::log(
+        'چرخه Cron پایان یافت. وضعیت کل: '.$overall
+        .' | Nobitex: '.(string)($nobitexResult['status']??'unknown')
+        .(($nobitexResult['reason']??'')!==''?' | دلیل Nobitex: '.(string)$nobitexResult['reason']:'')
+        .' | Bitpin: '.(string)($bitpinResult['status']??'unknown'),
+        'cron_cycle',
+        [
+            'run_id'=>$runId,
+            'status'=>$overall,
+            'exchange'=>'nobitex',
+            'nobitex_status'=>$nobitexResult['status']??null,
+            'nobitex_reason'=>$nobitexResult['reason']??null,
+            'active_positions'=>$nobitexResult['active_positions']??null,
+            'pending_orders'=>$nobitexResult['pending_orders']??null,
+            'bitpin_status'=>$bitpinResult['status']??null,
+            'backend_version'=>$versionAfterUpdate,
+        ],
+        'info'
+    );
+
+    echo json_encode($summary,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR).PHP_EOL;exit($overall==='failed'?1:0);
 }catch(Throwable $e){ErrorReporter::captureThrowable($e,'critical','cron_tick',['status'=>'failed_before_summary']);$heartbeat['status']='failed_before_summary';$heartbeat['finished_at']=gmdate(DATE_ATOM);$heartbeat['finished_at_iran']=IranClock::nowPayload();$heartbeat['error']=mb_substr($e->getMessage(),0,1000);$heartbeat['backend_version']=Updater::currentVersion();$writeHeartbeat($heartbeat);fwrite(STDERR,$e->getMessage().PHP_EOL);exit(1);}
