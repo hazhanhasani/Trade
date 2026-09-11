@@ -26,7 +26,10 @@ expectLivePanel(str_contains($api, 'Cache-Control'), 'Android live requests must
 
 expectLivePanel(str_contains($app, 'mutableStateOf(!snapshotJson.isNullOrBlank())'), 'A cached snapshot must start in offline state.');
 expectLivePanel(str_contains($app, 'delay(10_000)'), 'Android must auto-refresh live data every 10 seconds.');
-expectLivePanel(str_contains($app, 'Live Panel'), 'Android must visibly identify live panel mode.');
+expectLivePanel(
+    str_contains($app, 'داده زنده') || str_contains($app, 'Live Panel'),
+    'Android must visibly identify live panel mode, including the localized Persian label.'
+);
 expectLivePanel(str_contains($app, 'total_realized_pnl_irt'), 'Home must display total realized panel PnL.');
 expectLivePanel(str_contains($app, 'win_rate_percent'), 'Home must display panel win rate.');
 expectLivePanel(str_contains($app, 'pending_orders'), 'Home must display panel pending-order capacity.');
