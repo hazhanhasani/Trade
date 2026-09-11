@@ -6,6 +6,7 @@ namespace Trade\Trading;
 
 use PDO;
 use Trade\Database;
+use Trade\Support\IranClock;
 
 final class NobitexPerformanceAnalytics
 {
@@ -29,8 +30,11 @@ final class NobitexPerformanceAnalytics
         catch (\Throwable) {}
 
         return [
-            'model'=>'fee_aware_performance_analytics_v1',
+            'model'=>'fee_aware_performance_analytics_v2_toman_iran_day',
             'window_days'=>$days,
+            'day_timezone'=>'Asia/Tehran',
+            'calendar'=>'Solar Hijri',
+            'display_units'=>['IRT'=>'TOMAN','USDT'=>'USDT'],
             'summary_by_quote'=>$summary,
             'daily_series_by_quote'=>$series,
             'best_asset'=>$assets[0] ?? null,
@@ -39,6 +43,7 @@ final class NobitexPerformanceAnalytics
             'edge_calibration'=>$edgeCalibration,
             'strategy_performance'=>$strategies,
             'generated_at'=>gmdate(DATE_ATOM),
+            'generated_at_iran'=>IranClock::nowPayload(),
         ];
     }
 
@@ -59,15 +64,28 @@ final class NobitexPerformanceAnalytics
         $stmt->execute([':quote'=>$quote]);
         $r=$stmt->fetch() ?: [];
         $trades=(int)($r['trades']??0);$wins=(int)($r['wins']??0);$profit=(float)($r['gross_profit']??0);$loss=(float)($r['gross_loss']??0);
-        $today=$pdo->prepare("SELECT COALESCE(SUM(COALESCE(net_pnl,pnl)),0) FROM nobitex_autotrade_pnl WHERE quote_asset=:quote AND created_at>=UTC_DATE()");$today->execute([':quote'=>$quote]);
+
+        [$todayStart,$todayEnd]=IranClock::todayUtcRange();
+        $today=$pdo->prepare("SELECT COALESCE(SUM(COALESCE(net_pnl,pnl)),0) FROM nobitex_autotrade_pnl WHERE quote_asset=:quote AND created_at>=:start AND created_at<:end");
+        $today->execute([':quote'=>$quote,':start'=>$todayStart,':end'=>$todayEnd]);
         $week=$pdo->prepare("SELECT COALESCE(SUM(COALESCE(net_pnl,pnl)),0) FROM nobitex_autotrade_pnl WHERE quote_asset=:quote AND created_at >= (UTC_TIMESTAMP() - INTERVAL 7 DAY)");$week->execute([':quote'=>$quote]);
         $month=$pdo->prepare("SELECT COALESCE(SUM(COALESCE(net_pnl,pnl)),0) FROM nobitex_autotrade_pnl WHERE quote_asset=:quote AND created_at >= (UTC_TIMESTAMP() - INTERVAL 30 DAY)");$month->execute([':quote'=>$quote]);
+
+        $net=(float)($r['net_pnl']??0);$todayValue=(float)$today->fetchColumn();$weekValue=(float)$week->fetchColumn();$monthValue=(float)$month->fetchColumn();
+        if($quote==='IRT'){
+            $net=NobitexDisplayMoney::quoteValue($net,$quote);
+            $todayValue=NobitexDisplayMoney::quoteValue($todayValue,$quote);
+            $weekValue=NobitexDisplayMoney::quoteValue($weekValue,$quote);
+            $monthValue=NobitexDisplayMoney::quoteValue($monthValue,$quote);
+            $profit=NobitexDisplayMoney::quoteValue($profit,$quote);
+            $loss=NobitexDisplayMoney::quoteValue($loss,$quote);
+        }
         $curve=$this->dailySeries($pdo,$quote,$days);$maxDrawdown=$this->maxAbsoluteDrawdown(array_column($curve,'cumulative_net_pnl'));
         return [
-            'quote_asset'=>$quote,'trades'=>$trades,'wins'=>$wins,'losses'=>(int)($r['losses']??0),
+            'quote_asset'=>$quote,'display_unit'=>NobitexDisplayMoney::quoteUnit($quote),'trades'=>$trades,'wins'=>$wins,'losses'=>(int)($r['losses']??0),
             'win_rate_percent'=>$trades>0?round(($wins/$trades)*100,2):0.0,
-            'net_pnl'=>round((float)($r['net_pnl']??0),8),'today_net_pnl'=>round((float)$today->fetchColumn(),8),
-            'week_net_pnl'=>round((float)$week->fetchColumn(),8),'month_net_pnl'=>round((float)$month->fetchColumn(),8),
+            'net_pnl'=>round($net,8),'today_net_pnl'=>round($todayValue,8),
+            'week_net_pnl'=>round($weekValue,8),'month_net_pnl'=>round($monthValue,8),
             'average_return_percent'=>round((float)($r['avg_return_percent']??0),4),
             'profit_factor'=>$loss>0?round($profit/$loss,4):($profit>0?999.0:0.0),
             'max_drawdown_absolute'=>round($maxDrawdown,8),
@@ -76,16 +94,23 @@ final class NobitexPerformanceAnalytics
 
     private function dailySeries(PDO $pdo, string $quote, int $days): array
     {
-        $interval=max(1,$days);
-        $stmt=$pdo->prepare(
-            "SELECT DATE(created_at) day, COALESCE(SUM(COALESCE(net_pnl,pnl)),0) net_pnl,
-                    COUNT(*) trades, SUM(CASE WHEN COALESCE(net_pnl,pnl)>0 THEN 1 ELSE 0 END) wins
-             FROM nobitex_autotrade_pnl
-             WHERE quote_asset=:quote AND created_at >= (UTC_DATE() - INTERVAL {$interval} DAY)
-             GROUP BY DATE(created_at) ORDER BY day ASC"
-        );$stmt->execute([':quote'=>$quote]);$byDay=[];foreach($stmt->fetchAll() as $r)$byDay[(string)$r['day']]=$r;
-        $out=[];$cum=0.0;
-        for($i=$days-1;$i>=0;$i--){$day=gmdate('Y-m-d',strtotime("-{$i} days"));$r=$byDay[$day]??[];$p=(float)($r['net_pnl']??0);$cum+=$p;$trades=(int)($r['trades']??0);$wins=(int)($r['wins']??0);$out[]=['day'=>$day,'net_pnl'=>round($p,8),'cumulative_net_pnl'=>round($cum,8),'trades'=>$trades,'win_rate_percent'=>$trades>0?round(($wins/$trades)*100,2):0.0];}
+        $interval=max(2,$days+2);
+        $stmt=$pdo->prepare("SELECT COALESCE(net_pnl,pnl) net_pnl,created_at FROM nobitex_autotrade_pnl WHERE quote_asset=:quote AND created_at >= (UTC_TIMESTAMP() - INTERVAL {$interval} DAY) ORDER BY created_at ASC");
+        $stmt->execute([':quote'=>$quote]);
+        $byDay=[];
+        foreach($stmt->fetchAll() as $r){
+            $day=IranClock::tehranDateFromUtc((string)$r['created_at']);
+            $p=(float)$r['net_pnl'];
+            if($quote==='IRT')$p=NobitexDisplayMoney::quoteValue($p,$quote);
+            if(!isset($byDay[$day]))$byDay[$day]=['net_pnl'=>0.0,'trades'=>0,'wins'=>0,'sample_utc'=>(string)$r['created_at']];
+            $byDay[$day]['net_pnl']+=$p;$byDay[$day]['trades']++;if($p>0)$byDay[$day]['wins']++;
+        }
+        $out=[];$cum=0.0;$now=IranClock::now();
+        for($i=$days-1;$i>=0;$i--){
+            $dt=$now->modify("-{$i} days");$key=$dt->format('Y-m-d');$r=$byDay[$key]??[];$p=(float)($r['net_pnl']??0);$cum+=$p;$trades=(int)($r['trades']??0);$wins=(int)($r['wins']??0);
+            $fakeUtc=$dt->setTime(12,0)->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d H:i:s');
+            $out[]=['day'=>IranClock::jalaliDateFromUtc($fakeUtc),'gregorian_day_iran'=>$key,'net_pnl'=>round($p,8),'cumulative_net_pnl'=>round($cum,8),'trades'=>$trades,'win_rate_percent'=>$trades>0?round(($wins/$trades)*100,2):0.0,'display_unit'=>NobitexDisplayMoney::quoteUnit($quote)];
+        }
         return $out;
     }
 
@@ -100,8 +125,13 @@ final class NobitexPerformanceAnalytics
              WHERE r.created_at >= (UTC_TIMESTAMP() - INTERVAL {$interval} DAY)
              GROUP BY p.asset,p.quote_asset ORDER BY net_pnl DESC"
         )->fetchAll();
-        foreach($rows as &$r){$trades=(int)$r['trades'];$r['trades']=$trades;$r['net_pnl']=round((float)$r['net_pnl'],8);$r['average_return_percent']=round((float)$r['avg_return_percent'],4);unset($r['avg_return_percent']);$r['win_rate_percent']=$trades>0?round(((int)$r['wins']/$trades)*100,2):0.0;unset($r['wins']);}
-        unset($r);return $rows;
+        foreach($rows as &$r){
+            $trades=(int)$r['trades'];$quote=strtoupper((string)$r['quote_asset']);$net=(float)$r['net_pnl'];if($quote==='IRT')$net=NobitexDisplayMoney::quoteValue($net,$quote);
+            $r['trades']=$trades;$r['net_pnl']=round($net,8);$r['display_unit']=NobitexDisplayMoney::quoteUnit($quote);$r['average_return_percent']=round((float)$r['avg_return_percent'],4);unset($r['avg_return_percent']);$r['win_rate_percent']=$trades>0?round(((int)$r['wins']/$trades)*100,2):0.0;unset($r['wins']);
+        }
+        unset($r);
+        usort($rows,static fn(array $a,array $b):int=>((float)$b['net_pnl'])<=>((float)$a['net_pnl']));
+        return $rows;
     }
 
     private function edgeCalibration(PDO $pdo, int $days): array

@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use Trade\Config;
+use Trade\Observability\ErrorReporter;
+use Trade\Support\IranClock;
 
 if (PHP_VERSION_ID < 80200) {
     throw new RuntimeException('Trade requires PHP 8.2 or newer.');
@@ -28,13 +30,22 @@ if (is_file($configFile)) {
     Config::load($configFile);
 }
 
+try { ErrorReporter::install(); } catch (Throwable) {}
+
 set_exception_handler(static function (Throwable $e): void {
     $requestId = bin2hex(random_bytes(8));
+    try {
+        ErrorReporter::captureThrowable($e, 'critical', 'uncaught_exception', ['request_id'=>$requestId]);
+    } catch (Throwable) {}
+
     $logDir = TRADE_ROOT . '/storage';
     if (is_dir($logDir) && is_writable($logDir)) {
+        $displayTime = null;
+        try { $displayTime = IranClock::formatNow(); } catch (Throwable) {}
         error_log(sprintf(
-            "[%s] [%s] %s in %s:%d\n%s\n",
-            date(DATE_ATOM),
+            "[%s] [Iran %s] [%s] %s in %s:%d\n%s\n",
+            gmdate(DATE_ATOM),
+            $displayTime ?? '-',
             $requestId,
             $e->getMessage(),
             $e->getFile(),
@@ -50,6 +61,7 @@ set_exception_handler(static function (Throwable $e): void {
             'ok' => false,
             'error' => 'internal_error',
             'request_id' => $requestId,
+            'time_iran' => (static function (): ?array { try { return IranClock::nowPayload(); } catch (Throwable) { return null; } })(),
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     }
 });
