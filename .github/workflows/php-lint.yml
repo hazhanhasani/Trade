@@ -47,6 +47,10 @@ jobs:
         run: php backend/tests/nobitex_runtime_safety_test.php
       - name: External Nobitex trade reconciliation v2 regression tests
         run: php backend/tests/nobitex_external_trade_reconciliation_test.php
+      - name: Nobitex executable symbol policy regression tests
+        run: php backend/tests/nobitex_symbol_policy_test.php
+      - name: Nobitex portfolio snapshot rate-limit regression tests
+        run: php backend/tests/nobitex_portfolio_snapshot_cache_test.php
       - name: Execution Learning v1 regression tests
         run: php backend/tests/execution_learning_v1_test.php
       - name: Adaptive Execution Policy v1 regression tests
