@@ -45,8 +45,21 @@ final class BaleSystemAlert
         if (!$this->configured($pdo)) return;
         $this->ensureSchema($pdo);
         $severity = $this->severity($severity);
-        $bucket = intdiv(time(), 600); // one identical alert per ten-minute bucket
-        $eventKey = 'system:' . substr(hash('sha256', $fingerprint), 0, 40) . ':' . $bucket;
+
+        // Fixed wall-clock buckets can send two identical warnings seconds apart
+        // when the error happens on both sides of a bucket boundary. Use a true
+        // sliding window instead: first occurrence is immediate, then identical
+        // noise is suppressed while critical incidents can repeat sooner.
+        $hash = substr(hash('sha256', $fingerprint), 0, 40);
+        $windowSeconds = match ($severity) {
+            'critical' => 120,
+            'error' => 300,
+            'warning' => 600,
+            default => 900,
+        };
+        if ($this->recentlyQueued($pdo, $hash, $windowSeconds)) return;
+
+        $eventKey = 'system:' . $hash . ':' . time() . ':' . substr(bin2hex(random_bytes(3)), 0, 6);
         $stmt = $pdo->prepare("INSERT INTO bale_system_alert_deliveries
             (event_key,severity,title,body_text,context_json,status,attempts,created_at,updated_at)
             VALUES (:event,:severity,:title,:body,:context,'pending',0,UTC_TIMESTAMP(),UTC_TIMESTAMP())
@@ -90,6 +103,18 @@ final class BaleSystemAlert
             $this->ensureSchema($pdo);
             return (int)$pdo->query("SELECT COUNT(*) FROM bale_system_alert_deliveries WHERE sent_at IS NULL")->fetchColumn();
         } catch (\Throwable) { return 0; }
+    }
+
+    private function recentlyQueued(PDO $pdo, string $hash, int $seconds): bool
+    {
+        $seconds = max(30, min(3600, $seconds));
+        $stmt = $pdo->prepare("SELECT EXISTS(
+            SELECT 1 FROM bale_system_alert_deliveries
+            WHERE event_key LIKE :prefix
+              AND created_at >= (UTC_TIMESTAMP() - INTERVAL {$seconds} SECOND)
+        )");
+        $stmt->execute([':prefix'=>'system:' . $hash . ':%']);
+        return (bool)$stmt->fetchColumn();
     }
 
     private function deliver(string $eventKey, PDO $pdo): bool
