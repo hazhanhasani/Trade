@@ -1,6 +1,8 @@
 package ir.trade.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -10,6 +12,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.FileProvider
+import ir.trade.app.data.TradePreferences
 import ir.trade.app.ui.TradeEntry
 import ir.trade.app.ui.UpdateGate
 import java.io.File
@@ -23,6 +26,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         pairingUri.value = intent?.data?.toString()
+        TradeAlertWorker.schedule(this)
+        requestAlertPermissionIfNeeded()
         setContent {
             UpdateGate(onInstallReady = { requestUpdateInstall(it) }) {
                 TradeEntry(
@@ -45,6 +50,13 @@ class MainActivity : ComponentActivity() {
         if (canInstallPackages()) {
             openPackageInstaller(file)
         }
+    }
+
+    private fun requestAlertPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < 33) return
+        if (!TradePreferences(this).alertsEnabled()) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 7001)
     }
 
     private fun requestUpdateInstall(file: File) {
