@@ -118,6 +118,11 @@ final class NobitexAdaptivePolicyLearner
      */
     public static function applyToSignal(array $signal, array $market): array
     {
+        // First compare the traded spot leg with the same asset's Nobitex IRT
+        // spot, Nobitex USDT spot and Nobitex USDT/IRT conversion market. This
+        // stays exchange-internal and bounded; learning is applied afterwards.
+        $signal = NobitexCrossMarketPriceOracle::applyToSignal($signal, $market);
+
         $regime = NobitexStrategyLearning::regimeKey($signal);
         $quote = strtoupper(trim((string)($market['quote_asset'] ?? 'IRT'))) ?: 'IRT';
         $policy = self::policyFor($regime, $quote);
@@ -142,7 +147,8 @@ final class NobitexAdaptivePolicyLearner
         $signal['adaptive_policy']['base_buffer_percent'] = round($baseBuffer, 4);
         $signal['adaptive_policy']['effective_buffer_percent'] = round($effectiveBuffer, 4);
 
-        if ($ready && $tradable > 0.0 && $action === 'hold' && $reason === 'edge_below_adaptive_safety_buffer') {
+        if ($ready && $tradable > 0.0 && $action === 'hold'
+            && in_array($reason, ['edge_below_adaptive_safety_buffer','cross_market_reference_removed_tradable_edge'], true)) {
             $action = 'buy';
             $reason = 'positive_tradable_net_edge_after_learned_uncertainty';
         } elseif ($action === 'buy' && $tradable <= 0.0) {
