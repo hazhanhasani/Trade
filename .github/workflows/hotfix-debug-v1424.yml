@@ -48,8 +48,7 @@ jobs:
                   backend/public/admin/live-dashboard.php \
                   backend/src/Observability/BaleSystemAlert.php \
                   backend/tests/dashboard_truth_v1424_test.php \
-                  .github/workflows/php-lint.yml \
                   backend/version.php
           git commit -m 'Debug dashboard truth, theme consistency and cron log noise'
           git push origin HEAD:main
-      # Retry marker: 1.4.23 cache-bust regression now accepts the coordinated v7 assets.
+      # php-lint.yml is updated separately through the connected GitHub writer after this patch passes.
