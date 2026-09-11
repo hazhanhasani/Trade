@@ -2,5 +2,5 @@
 
 declare(strict_types=1);
 
-// Coordinated release: actionable failed-cron diagnostics and alert deduplication.
-return '1.4.6';
+// Coordinated release: unblock pending capacity reconciliation before new entry decisions.
+return '1.4.7';
