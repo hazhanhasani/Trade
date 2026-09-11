@@ -25,6 +25,8 @@ jobs:
         run: php backend/tests/trading_strategy_test.php
       - name: Multi-strategy regime/router regression tests
         run: php backend/tests/multi_strategy_test.php
+      - name: Signal sanity regression tests
+        run: php backend/tests/signal_sanity_test.php
       - name: Strategy Learning v2 regression tests
         run: php backend/tests/strategy_learning_v2_test.php
       - name: Adaptive Edge Calibration regression tests
