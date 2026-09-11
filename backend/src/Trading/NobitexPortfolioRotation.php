@@ -14,6 +14,11 @@ use Trade\Database;
  * weak incumbent. The normal portfolio engine owns the next entry after the
  * exit has been reconciled, so wallet state, exposure sizing and all regular
  * entry gates are re-evaluated before new risk is taken.
+ *
+ * When the configured maximum position count is lowered below the number of
+ * already-open positions, capacity alignment takes priority over optional
+ * opportunity rotation. One weak open position is sold at a time until the
+ * live count is back within the configured limit.
  */
 final class NobitexPortfolioRotation
 {
@@ -33,9 +38,6 @@ final class NobitexPortfolioRotation
         NobitexSchema::ensure();
         $pdo = Database::connection();
 
-        if (!$this->boolSetting($pdo, 'nobitex_rotation_enabled', true)) {
-            return $this->result('no_rotation', 'rotation_disabled');
-        }
         if (!NobitexSchema::botEnabled('nobitex')) {
             return $this->result('no_rotation', 'bot_disabled');
         }
@@ -62,39 +64,58 @@ final class NobitexPortfolioRotation
         $positions = $pdo->query(
             "SELECT * FROM nobitex_autotrade_positions
              WHERE status IN ('pending_open','open','pending_close')
-             ORDER BY id ASC LIMIT 20"
+             ORDER BY id ASC LIMIT 30"
         )->fetchAll();
 
         $maxPositions = $this->intSetting($pdo, 'nobitex_max_positions', 5, 1, 20);
-        if (count($positions) < $maxPositions) {
+        $activeCount = count($positions);
+        $overLimit = $activeCount > $maxPositions;
+        if ($activeCount < $maxPositions) {
             return $this->result('no_rotation', 'portfolio_has_free_slot', [
-                'active_positions'=>count($positions),
+                'active_positions'=>$activeCount,
                 'max_positions'=>$maxPositions,
             ]);
         }
 
+        // Capacity alignment is a hard portfolio invariant. It must still run
+        // when optional opportunity rotation is disabled.
+        if (!$overLimit && !$this->boolSetting($pdo, 'nobitex_rotation_enabled', true)) {
+            return $this->result('no_rotation', 'rotation_disabled');
+        }
+
+        // Never stack a new forced SELL on top of an unresolved open/close order.
+        // The normal reconciliation path will settle it first, then the next tick
+        // can continue reducing any remaining excess positions.
         foreach ($positions as $position) {
             if ((string)($position['status'] ?? '') !== 'open') {
-                return $this->result('no_rotation', 'pending_order_present');
+                return $this->result('no_rotation', 'pending_order_present', [
+                    'active_positions'=>$activeCount,
+                    'max_positions'=>$maxPositions,
+                    'excess_positions'=>max(0, $activeCount - $maxPositions),
+                ]);
             }
         }
 
-        $cooldownMinutes = $this->intSetting(
-            $pdo,
-            'nobitex_rotation_cooldown_minutes',
-            self::DEFAULT_COOLDOWN_MINUTES,
-            5,
-            240
-        );
-        $lastRotation = $this->setting($pdo, 'nobitex_last_rotation_at');
-        if ($lastRotation !== null && trim($lastRotation) !== '') {
-            $lastTs = strtotime($lastRotation . ' UTC');
-            if ($lastTs !== false) {
-                $nextTs = $lastTs + ($cooldownMinutes * 60);
-                if (time() < $nextTs) {
-                    return $this->result('no_rotation', 'rotation_cooldown_active', [
-                        'cooldown_until'=>gmdate(DATE_ATOM, $nextTs),
-                    ]);
+        // A configured rotation cooldown must not delay enforcement after the
+        // administrator lowers max positions below the current live count.
+        if (!$overLimit) {
+            $cooldownMinutes = $this->intSetting(
+                $pdo,
+                'nobitex_rotation_cooldown_minutes',
+                self::DEFAULT_COOLDOWN_MINUTES,
+                5,
+                240
+            );
+            $lastRotation = $this->setting($pdo, 'nobitex_last_rotation_at');
+            if ($lastRotation !== null && trim($lastRotation) !== '') {
+                $lastTs = strtotime($lastRotation . ' UTC');
+                if ($lastTs !== false) {
+                    $nextTs = $lastTs + ($cooldownMinutes * 60);
+                    if (time() < $nextTs) {
+                        return $this->result('no_rotation', 'rotation_cooldown_active', [
+                            'cooldown_until'=>gmdate(DATE_ATOM, $nextTs),
+                        ]);
+                    }
                 }
             }
         }
@@ -105,9 +126,12 @@ final class NobitexPortfolioRotation
         $usdt = $this->walletAvailable($wallets, ['USDT']);
         $preferredQuote = $irt > 0 ? 'IRT' : ($usdt > 0 ? 'USDT' : 'IRT');
 
-        $candidates = $this->scanner->rankedCandidates($client, $preferredQuote, 20, 60);
-        if ($candidates === []) {
-            return $this->result('no_rotation', 'no_eligible_markets');
+        $candidates = [];
+        if (!$overLimit) {
+            $candidates = $this->scanner->rankedCandidates($client, $preferredQuote, 20, 60);
+            if ($candidates === []) {
+                return $this->result('no_rotation', 'no_eligible_markets');
+            }
         }
 
         $enriched = [];
@@ -120,6 +144,7 @@ final class NobitexPortfolioRotation
                     'position_id'=>$position['id'] ?? null,
                     'symbol'=>$position['symbol'] ?? null,
                     'error'=>mb_substr($e->getMessage(), 0, 240),
+                    'capacity_alignment'=>$overLimit,
                 ]);
                 continue;
             }
@@ -127,45 +152,58 @@ final class NobitexPortfolioRotation
             $signal = is_array($market['signal'] ?? null) ? $market['signal'] : [];
             $symbol = strtoupper((string)$position['symbol']);
             $marketsBySymbol[$symbol] = $market;
+            $exitCost = max(0.0, (float)($signal['estimated_exit_cost_percent'] ?? 0.0));
+            $entryPrice = max(0.0, (float)($position['entry_price'] ?? 0.0));
+            $markPrice = max(0.0, (float)($market['price'] ?? 0.0));
+            $grossPnlPercent = $entryPrice > 0.0 && $markPrice > 0.0
+                ? (($markPrice - $entryPrice) / $entryPrice) * 100.0
+                : 0.0;
             $position['forward_edge_percent'] = $this->signalEdge($signal);
-            $position['estimated_exit_cost_percent'] = max(0.0, (float)($signal['estimated_exit_cost_percent'] ?? 0.0));
+            $position['estimated_exit_cost_percent'] = $exitCost;
+            $position['unrealized_net_pnl_percent'] = $grossPnlPercent - $exitCost;
             $enriched[] = $position;
         }
 
         if ($enriched === []) {
-            return $this->result('no_rotation', 'no_position_market_data');
+            return $this->result('no_rotation', 'no_position_market_data', [
+                'active_positions'=>$activeCount,
+                'max_positions'=>$maxPositions,
+                'capacity_alignment'=>$overLimit,
+            ]);
         }
 
-        $plan = $this->plan($enriched, $candidates, [
-            'min_advantage_percent'=>$this->floatSetting(
-                $pdo,
-                'nobitex_rotation_min_advantage_percent',
-                self::DEFAULT_MIN_ADVANTAGE_PERCENT,
-                0.25,
-                5.0
-            ),
-            'min_hold_minutes'=>$this->intSetting(
-                $pdo,
-                'nobitex_rotation_min_hold_minutes',
-                self::DEFAULT_MIN_HOLD_MINUTES,
-                10,
-                1440
-            ),
-            'max_rotation_loss_percent'=>$this->floatSetting(
-                $pdo,
-                'nobitex_rotation_max_loss_percent',
-                self::DEFAULT_MAX_ROTATION_LOSS_PERCENT,
-                0.10,
-                5.0
-            ),
-            'friction_margin_percent'=>$this->floatSetting(
-                $pdo,
-                'nobitex_rotation_friction_margin_percent',
-                self::DEFAULT_FRICTION_MARGIN_PERCENT,
-                0.05,
-                1.0
-            ),
-        ]);
+        $plan = $overLimit
+            ? self::capacityReductionPlan($enriched, $maxPositions, $activeCount)
+            : $this->plan($enriched, $candidates, [
+                'min_advantage_percent'=>$this->floatSetting(
+                    $pdo,
+                    'nobitex_rotation_min_advantage_percent',
+                    self::DEFAULT_MIN_ADVANTAGE_PERCENT,
+                    0.25,
+                    5.0
+                ),
+                'min_hold_minutes'=>$this->intSetting(
+                    $pdo,
+                    'nobitex_rotation_min_hold_minutes',
+                    self::DEFAULT_MIN_HOLD_MINUTES,
+                    10,
+                    1440
+                ),
+                'max_rotation_loss_percent'=>$this->floatSetting(
+                    $pdo,
+                    'nobitex_rotation_max_loss_percent',
+                    self::DEFAULT_MAX_ROTATION_LOSS_PERCENT,
+                    0.10,
+                    5.0
+                ),
+                'friction_margin_percent'=>$this->floatSetting(
+                    $pdo,
+                    'nobitex_rotation_friction_margin_percent',
+                    self::DEFAULT_FRICTION_MARGIN_PERCENT,
+                    0.05,
+                    1.0
+                ),
+            ]);
 
         if (($plan['rotate'] ?? false) !== true) {
             return $this->result('no_rotation', (string)($plan['reason'] ?? 'no_superior_replacement'), [
@@ -198,6 +236,10 @@ final class NobitexPortfolioRotation
             return $this->result('no_rotation', 'victim_price_unavailable');
         }
 
+        $capacityReduction = $overLimit && (string)($plan['reason'] ?? '') === 'position_limit_reduction';
+        $exitReason = $capacityReduction ? 'position_limit_reduction' : 'portfolio_rotation';
+        $source = $capacityReduction ? 'autotrade_nobitex_position_limit' : 'autotrade_nobitex_rotation';
+
         $order = $this->orders->create([
             'symbol'=>$victimSymbol,
             'amount1'=>$amount,
@@ -205,7 +247,7 @@ final class NobitexPortfolioRotation
             'mode'=>'market',
             'type'=>'sell',
             'identifier'=>$identifier,
-        ], 'autotrade_nobitex_rotation');
+        ], $source);
 
         $remote = is_array($order['order'] ?? null) ? $order['order'] : [];
         $exchangeId = trim((string)($remote['id'] ?? ''));
@@ -227,11 +269,12 @@ final class NobitexPortfolioRotation
             $this->event($pdo, 'error', 'nobitex.rotation.local_state_conflict', [
                 'victim'=>$victim,
                 'candidate'=>$candidate,
+                'exit_reason'=>$exitReason,
                 'order_local_id'=>$order['local_id'] ?? null,
                 'exchange_order_id'=>$exchangeId !== '' ? $exchangeId : null,
             ]);
             return $this->result('sell_submitted', 'rotation_state_reconcile_required', [
-                'exit_reason'=>'portfolio_rotation',
+                'exit_reason'=>$exitReason,
                 'rotation'=>$plan,
                 'order'=>$order,
             ]);
@@ -239,29 +282,130 @@ final class NobitexPortfolioRotation
 
         $now = gmdate('Y-m-d H:i:s');
         $this->setSetting($pdo, 'nobitex_last_trade_at', $now);
-        $this->setSetting($pdo, 'nobitex_last_rotation_at', $now);
+        if (!$capacityReduction) {
+            $this->setSetting($pdo, 'nobitex_last_rotation_at', $now);
+        }
         $this->setSetting($pdo, $this->symbolCooldownKey($victimSymbol), $now);
         $this->setSetting($pdo, 'nobitex_rotation_target_symbol', (string)($candidate['symbol'] ?? ''));
 
-        $this->event($pdo, 'info', 'nobitex.rotation.sell_submitted', [
-            'victim'=>$victim,
-            'candidate'=>$candidate,
-            'advantage_percent'=>$plan['advantage_percent'] ?? null,
-            'required_advantage_percent'=>$plan['required_advantage_percent'] ?? null,
-            'order_local_id'=>$order['local_id'] ?? null,
-            'exchange_order_id'=>$exchangeId !== '' ? $exchangeId : null,
-        ]);
+        $this->event(
+            $pdo,
+            'info',
+            $capacityReduction ? 'nobitex.position_limit.sell_submitted' : 'nobitex.rotation.sell_submitted',
+            [
+                'victim'=>$victim,
+                'candidate'=>$candidate,
+                'exit_reason'=>$exitReason,
+                'active_positions_before'=>$activeCount,
+                'max_positions'=>$maxPositions,
+                'remaining_excess_after_submit'=>max(0, $activeCount - $maxPositions - 1),
+                'advantage_percent'=>$plan['advantage_percent'] ?? null,
+                'required_advantage_percent'=>$plan['required_advantage_percent'] ?? null,
+                'order_local_id'=>$order['local_id'] ?? null,
+                'exchange_order_id'=>$exchangeId !== '' ? $exchangeId : null,
+            ]
+        );
 
-        return $this->result('sell_submitted', 'portfolio_rotation', [
-            'exit_reason'=>'portfolio_rotation',
+        return $this->result('sell_submitted', $exitReason, [
+            'exit_reason'=>$exitReason,
             'position'=>[
                 'position_id'=>(int)($victim['id'] ?? 0),
                 'local_id'=>$order['local_id'] ?? null,
                 'exchange_order_id'=>$exchangeId !== '' ? $exchangeId : null,
                 'amount'=>$amount,
             ],
+            'active_positions_before'=>$activeCount,
+            'max_positions'=>$maxPositions,
+            'remaining_excess_after_submit'=>max(0, $activeCount - $maxPositions - 1),
             'rotation'=>$plan,
         ]);
+    }
+
+    /**
+     * Pure capacity planner. When the live count exceeds the configured limit,
+     * it selects one open position for reduction. The weakest forward edge is
+     * removed first; if edges tie, the position with the better current net PnL
+     * is preferred to avoid realizing a larger loss, then the older position.
+     */
+    public static function capacityReductionPlan(array $positions, int $maxPositions, ?int $activeCountOverride = null): array
+    {
+        $maxPositions = max(1, $maxPositions);
+        $open = array_values(array_filter(
+            $positions,
+            static fn(array $position): bool => (string)($position['status'] ?? '') === 'open'
+        ));
+        $activeCount = max(count($open), $activeCountOverride ?? count($open));
+        if ($activeCount <= $maxPositions) {
+            return [
+                'rotate'=>false,
+                'reason'=>'position_limit_satisfied',
+                'active_positions'=>$activeCount,
+                'max_positions'=>$maxPositions,
+                'excess_positions'=>0,
+            ];
+        }
+        if ($open === []) {
+            return [
+                'rotate'=>false,
+                'reason'=>'no_scannable_position_for_limit_reduction',
+                'active_positions'=>$activeCount,
+                'max_positions'=>$maxPositions,
+                'excess_positions'=>$activeCount - $maxPositions,
+            ];
+        }
+
+        usort($open, static function(array $a, array $b): int {
+            $edgeA = is_numeric($a['forward_edge_percent'] ?? null) ? (float)$a['forward_edge_percent'] : 0.0;
+            $edgeB = is_numeric($b['forward_edge_percent'] ?? null) ? (float)$b['forward_edge_percent'] : 0.0;
+            if (abs($edgeA - $edgeB) > 0.000001) return $edgeA <=> $edgeB;
+
+            $pnlA = is_numeric($a['unrealized_net_pnl_percent'] ?? null) ? (float)$a['unrealized_net_pnl_percent'] : 0.0;
+            $pnlB = is_numeric($b['unrealized_net_pnl_percent'] ?? null) ? (float)$b['unrealized_net_pnl_percent'] : 0.0;
+            if (abs($pnlA - $pnlB) > 0.000001) return $pnlB <=> $pnlA;
+
+            $openedA = trim((string)($a['opened_at'] ?? ''));
+            $openedB = trim((string)($b['opened_at'] ?? ''));
+            $tsA = $openedA !== '' ? strtotime($openedA . ' UTC') : false;
+            $tsB = $openedB !== '' ? strtotime($openedB . ' UTC') : false;
+            $sortA = $tsA === false ? PHP_INT_MAX : $tsA;
+            $sortB = $tsB === false ? PHP_INT_MAX : $tsB;
+            if ($sortA !== $sortB) return $sortA <=> $sortB;
+            return ((int)($a['id'] ?? 0)) <=> ((int)($b['id'] ?? 0));
+        });
+
+        $position = $open[0];
+        $victimEdge = is_numeric($position['forward_edge_percent'] ?? null)
+            ? (float)$position['forward_edge_percent']
+            : 0.0;
+        $netPnl = is_numeric($position['unrealized_net_pnl_percent'] ?? null)
+            ? (float)$position['unrealized_net_pnl_percent']
+            : 0.0;
+        $exitCost = max(0.0, (float)($position['estimated_exit_cost_percent'] ?? 0.0));
+
+        return [
+            'rotate'=>true,
+            'reason'=>'position_limit_reduction',
+            'victim'=>[
+                'id'=>(int)($position['id'] ?? 0),
+                'symbol'=>strtoupper((string)($position['symbol'] ?? '')),
+                'asset'=>strtoupper((string)($position['asset'] ?? '')),
+                'quote_asset'=>strtoupper((string)($position['quote_asset'] ?? '')),
+                'amount'=>(float)($position['amount'] ?? 0.0),
+                'forward_edge_percent'=>round($victimEdge, 4),
+                'unrealized_net_pnl_percent'=>round($netPnl, 4),
+                'estimated_exit_cost_percent'=>round($exitCost, 4),
+                'opened_at'=>trim((string)($position['opened_at'] ?? '')),
+            ],
+            'candidate'=>[],
+            'active_positions'=>$activeCount,
+            'max_positions'=>$maxPositions,
+            'excess_positions'=>$activeCount - $maxPositions,
+            'selection_policy'=>[
+                'primary'=>'lowest_forward_edge',
+                'tie_breaker'=>'highest_unrealized_net_pnl_then_oldest',
+                'one_exit_at_a_time'=>true,
+            ],
+        ];
     }
 
     /**
@@ -521,7 +665,7 @@ final class NobitexPortfolioRotation
             'status'=>$status,
             'exchange'=>'nobitex',
             'reason'=>$reason,
-            'rotation_engine'=>'guarded_opportunity_replacement_v1',
+            'rotation_engine'=>'guarded_opportunity_replacement_v2',
             'time_utc'=>gmdate(DATE_ATOM),
         ] + $extra;
     }
