@@ -164,13 +164,25 @@ final class NobitexPortfolioEngine
 
             $reference = (float) (($market['best_ask'] ?? 0) > 0 ? $market['best_ask'] : $market['price']);
             $priceCeiling = $reference * 1.008;
-            $amount = $this->floorAmount(((float) $decision['budget']) / $priceCeiling, (int) $market['base_precision']);
-            $orderValue = $amount * $priceCeiling;
-            $minOrder = (float) ($market['min_order_quote'] ?? 0);
-            if ($amount <= 0 || $orderValue <= 0 || ($minOrder > 0 && $orderValue + 0.000001 < $minOrder)) {
-                $rejections[] = ['symbol'=>$symbol,'reason'=>'minimum_order_rounding'];
+            $sizing = NobitexOrderSizing::forEntry(
+                (float) $decision['budget'],
+                (float) ($decision['hard_entry_cap'] ?? $decision['budget']),
+                $priceCeiling,
+                (float) ($market['min_order_quote'] ?? 0),
+                (int) $market['base_precision']
+            );
+            if (!($sizing['allowed'] ?? false)) {
+                $rejections[] = [
+                    'symbol'=>$symbol,
+                    'reason'=>'minimum_order_rounding',
+                    'sizing_reason'=>$sizing['reason'] ?? null,
+                    'budget'=>$decision['budget'] ?? null,
+                    'hard_entry_cap'=>$decision['hard_entry_cap'] ?? null,
+                    'required_order_value'=>$sizing['required_order_value'] ?? null,
+                ];
                 continue;
             }
+            $amount = (float) $sizing['amount'];
 
             $result = $this->submitEntry($pdo, $market, $amount, $priceCeiling, $settings);
             $this->markSignalExecuted($pdo, $signalId, $result['local_id'] ?? null);
@@ -272,12 +284,23 @@ final class NobitexPortfolioEngine
 
         $reference = (float) (($chosen['best_ask'] ?? 0) > 0 ? $chosen['best_ask'] : $chosen['price']);
         $priceCeiling = $reference * 1.008;
-        $amount = $this->floorAmount(((float) $budget['budget']) / $priceCeiling, (int) $chosen['base_precision']);
-        $minOrder = (float) ($chosen['min_order_quote'] ?? 0);
-        $value = $amount * $priceCeiling;
-        if ($amount <= 0 || ($minOrder > 0 && $value + 0.000001 < $minOrder)) {
-            return $this->bootstrapBlocked($pdo, 'minimum_order_rounding', ['order_value'=>$value,'minimum_order'=>$minOrder]);
+        $sizing = NobitexOrderSizing::forEntry(
+            (float) $budget['budget'],
+            (float) ($budget['hard_entry_cap'] ?? $budget['budget']),
+            $priceCeiling,
+            (float) ($chosen['min_order_quote'] ?? 0),
+            (int) $chosen['base_precision']
+        );
+        if (!($sizing['allowed'] ?? false)) {
+            return $this->bootstrapBlocked($pdo, 'minimum_order_rounding', [
+                'sizing_reason'=>$sizing['reason'] ?? null,
+                'budget'=>$budget['budget'] ?? null,
+                'hard_entry_cap'=>$budget['hard_entry_cap'] ?? null,
+                'required_order_value'=>$sizing['required_order_value'] ?? null,
+                'minimum_order'=>$chosen['min_order_quote'] ?? 0,
+            ]);
         }
+        $amount = (float) $sizing['amount'];
 
         $result = $this->submitEntry($pdo, $chosen, $amount, $priceCeiling, $settings, $clientOrderId, 'autotrade_nobitex_first_buy');
         $this->setSetting($pdo, $this->symbolCooldownKey((string) $chosen['symbol']), gmdate('Y-m-d H:i:s'));
@@ -379,6 +402,8 @@ final class NobitexPortfolioEngine
 
         $desired = $portfolio * ($effectivePerPositionPct / 100.0);
         $perPositionCap = $portfolio * ((float) $settings['max_position_percent'] / 100.0);
+        $hardEntryCap = min($perPositionCap, $capacity, $quoteAvailable * 0.985);
+        $context['hard_entry_cap'] = round($hardEntryCap, 8);
         $minimum = max(0.0, (float) ($market['min_order_quote'] ?? 0));
         $minimumWithMargin = $minimum > 0 ? $minimum * 1.03 : 0.0;
 
@@ -394,7 +419,7 @@ final class NobitexPortfolioEngine
             ] + $context;
         }
 
-        $budget = min(max($desired, $minimumWithMargin), $perPositionCap, $capacity, $quoteAvailable * 0.985);
+        $budget = min(max($desired, $minimumWithMargin), $hardEntryCap);
         if ($minimum > 0 && $budget + 0.000001 < $minimum) {
             return ['allowed'=>false,'reason'=>'minimum_order_exceeds_budget','minimum_order'=>$minimum,'budget'=>$budget,'available_quote'=>$quoteAvailable] + $context;
         }
