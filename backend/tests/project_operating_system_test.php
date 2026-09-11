@@ -31,8 +31,8 @@ expect(is_string($nav) && str_contains($nav, '/admin/project-health.php'), 'Admi
 expect(str_contains($nav, "'health' => ['/admin/project-health.php', 'پایش پروژه']"), 'Project Health must have a dedicated navigation item.');
 
 expect(is_string($bootstrap) && str_contains($bootstrap, "header('X-Robots-Tag: noindex, nofollow, noarchive')"), 'Private web surfaces must emit X-Robots-Tag noindex.');
-expect(str_contains($bootstrap, "str_starts_with($requestPath, '/admin')"), 'Admin surface must be covered by noindex policy.');
-expect(str_contains($bootstrap, "str_starts_with($requestPath, '/api')"), 'API surface must be covered by noindex policy.');
+expect(str_contains($bootstrap, "str_starts_with(\$requestPath, '/admin')"), 'Admin surface must be covered by noindex policy.');
+expect(str_contains($bootstrap, "str_starts_with(\$requestPath, '/api')"), 'API surface must be covered by noindex policy.');
 expect(str_contains($bootstrap, "header('X-Content-Type-Options: nosniff')"), 'Baseline nosniff header must remain enabled.');
 
 expect(is_string($ops) && str_contains($ops, '/human'), 'Operating system doc must include /human workflow.');
