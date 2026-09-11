@@ -10,8 +10,8 @@ use Trade\Database;
 /**
  * Runtime safety controller for live Nobitex trading.
  *
- * This layer is deliberately entry-only when it blocks risk: SELL/reconcile
- * paths remain available so a degraded account can still reduce exposure.
+ * Entry protection is fail-safe and reduction-only: when the circuit is open,
+ * fresh BUY risk is blocked while reconciliation and SELL paths remain active.
  */
 final class NobitexRuntimeSafety
 {
@@ -30,9 +30,16 @@ final class NobitexRuntimeSafety
         $adaptive = $this->refreshAdaptiveCapacity($pdo);
         $shadow = $this->evaluateShadowSignals($pdo);
 
+        // Reset the rolling failure counter only when every exchange-facing
+        // safety component in this tick succeeded. A success in one component
+        // must not erase a repeated failure in another component.
+        $apiFailed = (bool)($watchdog['api_failed'] ?? false) || (bool)($reconciliation['api_failed'] ?? false);
+        if (!$apiFailed) $this->recordApiSuccess($pdo);
+
         return [
             'status'=>'ok',
             'entry_circuit'=>$this->entryCircuit($pdo),
+            'api_failures'=>$this->intSetting($pdo, 'nobitex_runtime_api_failures', 0, 0, 1000),
             'watchdog'=>$watchdog,
             'reconciliation'=>$reconciliation,
             'adaptive_capacity'=>$adaptive,
@@ -94,13 +101,16 @@ final class NobitexRuntimeSafety
             $criticalChanges = (int)($result['closed'] ?? 0) + (int)($result['resized'] ?? 0);
             if ($criticalChanges > 0) {
                 $this->openCircuit($pdo, 'position_wallet_drift_reconciled', self::CIRCUIT_SECONDS);
-            } else {
-                $this->recordApiSuccess($pdo);
             }
-            return ['status'=>'ok','critical_changes'=>$criticalChanges] + $result;
+            return ['status'=>'ok','critical_changes'=>$criticalChanges,'api_failed'=>false] + $result;
         } catch (\Throwable $e) {
             $failures = $this->recordApiFailure($pdo, 'wallet_reconciliation', $e->getMessage());
-            return ['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,300),'consecutive_failures'=>$failures];
+            return [
+                'status'=>'deferred',
+                'error'=>mb_substr($e->getMessage(),0,300),
+                'consecutive_failures'=>$failures,
+                'api_failed'=>true,
+            ];
         }
     }
 
@@ -113,10 +123,12 @@ final class NobitexRuntimeSafety
              WHERE status IN ('pending_open','pending_close')
              ORDER BY updated_at ASC LIMIT 10"
         )->fetchAll();
-        if ($rows === []) return ['status'=>'idle','checked'=>0,'cancel_requested'=>0,'errors'=>0];
+        if ($rows === []) return ['status'=>'idle','checked'=>0,'cancel_requested'=>0,'errors'=>0,'api_failed'=>false];
 
         $orders = new NobitexOrderService();
-        if (!$orders->credentialsConfigured()) return ['status'=>'skipped','reason'=>'credentials_missing','checked'=>0];
+        if (!$orders->credentialsConfigured()) {
+            return ['status'=>'skipped','reason'=>'credentials_missing','checked'=>0,'api_failed'=>false];
+        }
         $client = $orders->client();
         $cancelled = 0;
         $errors = 0;
@@ -155,14 +167,20 @@ final class NobitexRuntimeSafety
             }
         }
 
+        $failures = null;
         if ($errors > 0) {
             $failures = $this->recordApiFailure($pdo, 'pending_watchdog', $errors.' watchdog error(s)');
-            if ($failures >= self::API_FAILURE_THRESHOLD) $this->openCircuit($pdo, 'repeated_exchange_api_failures', self::CIRCUIT_SECONDS);
-        } else {
-            $this->recordApiSuccess($pdo);
         }
 
-        return ['status'=>'processed','checked'=>count($rows),'cancel_requested'=>$cancelled,'errors'=>$errors,'details'=>$details];
+        return [
+            'status'=>'processed',
+            'checked'=>count($rows),
+            'cancel_requested'=>$cancelled,
+            'errors'=>$errors,
+            'api_failed'=>$errors > 0,
+            'consecutive_failures'=>$failures,
+            'details'=>$details,
+        ];
     }
 
     private function refreshAdaptiveCapacity(PDO $pdo): array
@@ -197,20 +215,22 @@ final class NobitexRuntimeSafety
             $signalId = (int)$row['id'];
             $symbol = (string)$row['symbol'];
             $entry = max(0.0, (float)$row['price']);
-            if ($entry <= 0.0 || $symbol === '') continue;
+            $created = strtotime((string)$row['created_at'].' UTC');
+            if ($entry <= 0.0 || $symbol === '' || $created === false) continue;
 
             $returns = [];
             foreach ([15,60,240] as $minutes) {
                 $field = 'return_'.$minutes.'m';
                 if ($row[$field] !== null) continue;
-                $created = strtotime((string)$row['created_at'].' UTC');
-                if ($created === false || time() < $created + ($minutes * 60)) continue;
+                $targetTs = $created + ($minutes * 60);
+                if (time() < $targetTs) continue;
+
                 $stmt = $pdo->prepare(
                     "SELECT price FROM nobitex_autotrade_signals
-                     WHERE symbol=:symbol AND created_at>=DATE_ADD(:created,INTERVAL {$minutes} MINUTE)
+                     WHERE symbol=:symbol AND created_at>=:target
                      ORDER BY created_at ASC LIMIT 1"
                 );
-                $stmt->execute([':symbol'=>$symbol,':created'=>$row['created_at']]);
+                $stmt->execute([':symbol'=>$symbol,':target'=>gmdate('Y-m-d H:i:s',$targetTs)]);
                 $future = $stmt->fetchColumn();
                 if (!is_numeric($future) || (float)$future <= 0.0) continue;
                 $returns[$field] = (((float)$future - $entry) / $entry) * 100.0;
@@ -261,7 +281,9 @@ final class NobitexRuntimeSafety
         $count = $this->intSetting($pdo, 'nobitex_runtime_api_failures', 0, 0, 1000) + 1;
         $this->setSetting($pdo, 'nobitex_runtime_api_failures', (string)$count);
         $this->setSetting($pdo, 'nobitex_runtime_last_api_error', mb_substr($component.': '.$message,0,500));
-        if ($count >= self::API_FAILURE_THRESHOLD) $this->openCircuit($pdo, 'repeated_exchange_api_failures', self::CIRCUIT_SECONDS);
+        if ($count >= self::API_FAILURE_THRESHOLD) {
+            $this->openCircuit($pdo, 'repeated_exchange_api_failures', self::CIRCUIT_SECONDS);
+        }
         return $count;
     }
 
@@ -312,7 +334,9 @@ final class NobitexRuntimeSafety
     private function event(PDO $pdo,string $level,string $event,array $context=[]):void
     {
         $pdo->prepare('INSERT INTO nobitex_autotrade_events (level,event_name,context_json,created_at) VALUES (:level,:event,:context,UTC_TIMESTAMP())')->execute([
-            ':level'=>$level,':event'=>$event,':context'=>$context===[]?null:json_encode($context,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),
+            ':level'=>$level,
+            ':event'=>$event,
+            ':context'=>$context===[]?null:json_encode($context,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),
         ]);
     }
 }
