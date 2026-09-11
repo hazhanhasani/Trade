@@ -10,20 +10,21 @@ use Trade\Database;
 /**
  * Nobitex live orchestration entry point.
  *
- * The tick coordinates fee accounting, portfolio intelligence, one global
- * RLS-native/Toman-display exposure budget, bounded order repricing, smart
- * candidate fallback and guarded portfolio rotation. Runtime diagnostics use
- * NobitexRuntimeModels so stale legacy model names cannot survive upgrades.
+ * The tick coordinates reconciliation safety, adaptive position capacity,
+ * fee accounting, portfolio intelligence, one global exposure budget, bounded
+ * order repricing, smart candidate fallback and guarded opportunity rotation.
  */
 final class NobitexAutoTraderEngine
 {
     private const MAX_ACTIONS_PER_TICK = 20;
     private const MAX_FALLBACKS_PER_TICK = 8;
     private const FALLBACK_SKIP_SECONDS = 90;
+    private const MAX_CAPACITY_REDUCTIONS_PER_TICK = 4;
 
     public function run(): array
     {
         NobitexUniverseScanner::resetProcessCache();
+        $safety = $this->safeRuntimeSafety();
         $accounting = new NobitexTradeAccounting();
         $accountingBefore = $this->safeAccountingSync($accounting);
         $intelligence = new NobitexPortfolioIntelligence();
@@ -33,7 +34,7 @@ final class NobitexAutoTraderEngine
         $reprice = $this->safeExecutionReprice();
 
         try {
-            return $this->runWithPolicy($accounting, $accountingBefore, $intelligence, $policy, $globalPolicy, $reprice);
+            return $this->runWithPolicy($accounting, $accountingBefore, $intelligence, $policy, $globalPolicy, $reprice, $safety);
         } finally {
             NobitexPortfolioIntelligence::clearRuntimePolicy();
             NobitexGlobalRiskRuntime::clear();
@@ -47,21 +48,55 @@ final class NobitexAutoTraderEngine
         NobitexPortfolioIntelligence $intelligence,
         array $policy,
         array $globalPolicy,
-        array $executionReprice
+        array $executionReprice,
+        array $runtimeSafety
     ): array {
         $actions = [];
         $last = null;
         $accountingAfter = null;
         $entryLearning = [];
         $fallbackRejections = [];
+        $capacityActions = [];
+        $capacityReductions = 0;
 
         for ($i = 0; $i < self::MAX_ACTIONS_PER_TICK; $i++) {
+            // Capacity is enforced before any new entry attempt. One reduction is
+            // submitted at a time; the next loop first lets PortfolioEngine
+            // reconcile the remote fill before another reduction can be sent.
+            try {
+                $capacity = (new NobitexCapacityManager())->enforce();
+            } catch (\Throwable $e) {
+                $capacity = ['status'=>'no_reduction','reason'=>'capacity_manager_error','error'=>mb_substr($e->getMessage(),0,240)];
+            }
+            $capacityStatus = (string)($capacity['status'] ?? 'no_reduction');
+            if ($capacityStatus === 'sell_submitted') {
+                $capacityReductions++;
+                $capacityActions[] = $this->stripLegacyScores($capacity);
+                $actions[] = $this->stripLegacyScores($capacity);
+                $accountingAfter = $this->safeAccountingSync($accounting);
+                if ($capacityReductions >= self::MAX_CAPACITY_REDUCTIONS_PER_TICK) {
+                    $last = [
+                        'status'=>'capacity_reduction_batch_limit',
+                        'exchange'=>'nobitex',
+                        'reason'=>'sequential_reduction_batch_complete',
+                        'reductions_this_tick'=>$capacityReductions,
+                        'max_reductions_per_tick'=>self::MAX_CAPACITY_REDUCTIONS_PER_TICK,
+                    ];
+                    break;
+                }
+                continue;
+            }
+            if ($capacityStatus === 'waiting_reconcile') {
+                $last = ['status'=>'waiting_order','exchange'=>'nobitex','reason'=>'capacity_reduction_waiting_reconcile','capacity_reduction'=>$capacity];
+                break;
+            }
+
             try {
                 $last = (new NobitexPortfolioEngine())->run();
             } catch (NobitexCandidateRejectedException $e) {
                 $reason = $e->reasonCode();
 
-                if (str_starts_with($reason, 'global_portfolio_')) {
+                if (str_starts_with($reason, 'global_portfolio_') || in_array($reason, ['runtime_entry_circuit_open','effective_position_capacity_reached'], true)) {
                     $last = [
                         'status'=>'no_trade',
                         'exchange'=>'nobitex',
@@ -163,12 +198,19 @@ final class NobitexAutoTraderEngine
             'position_size_multiplier'=>NobitexGlobalRiskRuntime::runtimePositionMultiplier(),
             'snapshot'=>NobitexGlobalRiskRuntime::runtimeSnapshot(),
         ];
+        $capacityContext = [
+            'max_reductions_per_tick'=>self::MAX_CAPACITY_REDUCTIONS_PER_TICK,
+            'reductions_this_tick'=>$capacityReductions,
+            'actions'=>$capacityActions,
+        ];
 
         if ($actions === []) {
             $result = $this->stripLegacyScores(is_array($last) ? $last : [
                 'status'=>'no_trade','exchange'=>'nobitex','reason'=>'no_actionable_profit',
             ]);
             $result['runtime_models'] = $this->runtimeModels();
+            $result['runtime_safety'] = $runtimeSafety;
+            $result['capacity_management'] = $capacityContext;
             $result['accounting'] = ['before'=>$accountingBefore,'after'=>$accountingAfter];
             $result['intelligence'] = $intelligenceContext;
             $result['global_portfolio'] = $portfolioContext;
@@ -181,6 +223,8 @@ final class NobitexAutoTraderEngine
             $one['continuation_status'] = $last['status'];
             if (isset($last['rotation'])) $one['rotation'] = $last['rotation'];
             $one['runtime_models'] = $this->runtimeModels();
+            $one['runtime_safety'] = $runtimeSafety;
+            $one['capacity_management'] = $capacityContext;
             $one['accounting'] = ['before'=>$accountingBefore,'after'=>$accountingAfter];
             $one['intelligence'] = $intelligenceContext;
             $one['global_portfolio'] = $portfolioContext;
@@ -208,6 +252,8 @@ final class NobitexAutoTraderEngine
             'actions_count'=>count($actions),
             'actions'=>$actions,
             'continuation'=>$this->stripLegacyScores(is_array($last) ? $last : []),
+            'runtime_safety'=>$runtimeSafety,
+            'capacity_management'=>$capacityContext,
             'accounting'=>['before'=>$accountingBefore,'after'=>$accountingAfter],
             'intelligence'=>$intelligenceContext,
             'global_portfolio'=>$portfolioContext,
@@ -260,6 +306,12 @@ final class NobitexAutoTraderEngine
         ];
     }
 
+    private function safeRuntimeSafety(): array
+    {
+        try { return (new NobitexRuntimeSafety())->run(); }
+        catch (\Throwable $e) { return ['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,300)]; }
+    }
+
     private function safeActivateIntelligence(NobitexPortfolioIntelligence $intelligence): array
     {
         try { return ['status'=>'ok','snapshot'=>$intelligence->activateRuntimePolicy()]; }
@@ -287,7 +339,7 @@ final class NobitexAutoTraderEngine
     private function safeRecordIntelligence(NobitexPortfolioIntelligence $intelligence, array $action): array
     {
         try { return $intelligence->recordEntryFromAction(Database::connection(), $action); }
-        catch (\Throwable $e) { return ['status'=>'deferred','error'=>mb_substr($e->getMessage(), 0, 300)]; }
+        catch (\Throwable $e) { return ['status'=>'deferred','error'=>mb_substr($e->getMessage(), 0,300)]; }
     }
 
     private function temporarilySkipCandidate(PDO $pdo, string $symbol, int $requestedSeconds): array
