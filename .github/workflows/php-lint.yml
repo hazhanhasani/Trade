@@ -37,6 +37,8 @@ jobs:
         run: php backend/tests/strategy_learning_v2_test.php
       - name: Adaptive Policy Learner v1 regression tests
         run: php backend/tests/adaptive_policy_learner_test.php
+      - name: Nobitex cross-market price oracle regression tests
+        run: php backend/tests/nobitex_cross_market_price_oracle_test.php
       - name: Adaptive Edge Calibration regression tests
         run: php backend/tests/edge_calibration_test.php
       - name: Canonical Nobitex fill semantics regression tests
@@ -71,6 +73,8 @@ jobs:
         run: php backend/tests/nobitex_runtime_telemetry_test.php
       - name: Bale trade notification regression tests
         run: php backend/tests/bale_trade_notifier_test.php
+      - name: Bale confirmed trade delivery guarantee regression tests
+        run: php backend/tests/bale_confirmed_delivery_guarantee_test.php
       - name: Bale routine telemetry policy regression tests
         run: php backend/tests/bale_routine_telemetry_policy_test.php
       - name: Failed cron notification regression tests
