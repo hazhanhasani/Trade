@@ -32,6 +32,7 @@ if($_SERVER['REQUEST_METHOD']==='POST'){
     }catch(Throwable $e){$error=mb_substr($e->getMessage(),0,900);}
 }
 if(isset($_GET['csrf_refresh']))$error='فرم امنیتی قدیمی بود؛ هیچ تغییری انجام نشد.';
+if(isset($_GET['legacy_form']))$error='برای جلوگیری از ناهماهنگی، تنظیمات فقط از همین صفحه ذخیره می‌شوند؛ فرم قدیمی بخش معاملات هیچ تغییری اعمال نکرد.';
 
 $status=$c->status();$s=$status['settings'];$cap=$status['exchanges']['nobitex']['portfolio_capacity']??[];$version=Updater::currentVersion();$csrf=h((string)$_SESSION['csrf']);$clock=IranClock::nowPayload();
 $effective=(float)($s['nobitex_effective_position_percent']??$cap['effective_position_percent']??0);
