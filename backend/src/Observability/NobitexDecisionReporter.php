@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Trade\Observability;
 
+use Trade\Updater;
+
 /**
  * Converts the Nobitex runtime decision payload into human-readable forensic
  * messages. The full structured decision remains in bot_runs.summary_json;
@@ -16,6 +18,7 @@ final class NobitexDecisionReporter
         $status = (string)($result['status'] ?? 'unknown');
         if ($status !== 'no_trade') return;
 
+        $backendVersion = Updater::currentVersion();
         $reason = (string)($result['reason'] ?? 'unknown');
         $candidates = is_array($result['top_candidates'] ?? null) ? $result['top_candidates'] : [];
         $rejections = is_array($result['rejections'] ?? null) ? $result['rejections'] : [];
@@ -34,6 +37,7 @@ final class NobitexDecisionReporter
         foreach ($reasonCounts as $key => $count) $reasonSummary[] = $key . '=' . $count;
 
         $summary = [
+            'Backend: ' . $backendVersion . ' | مدل اصلی BUY: Profit-First v5',
             'تصمیم خرید Nobitex: هیچ سفارش BUY جدیدی ثبت نشد.',
             'علت نهایی: ' . $reason . ' — ' . self::reasonFa($reason),
             'کاندیداهای گزارش‌شده: ' . count($candidates) . ' | ردهای ثبت‌شده: ' . count($rejections),
@@ -55,6 +59,7 @@ final class NobitexDecisionReporter
                 'decision_reason'=>$reason,
                 'candidate_count'=>count($candidates),
                 'rejection_count'=>count($rejections),
+                'backend_version'=>$backendVersion,
                 'primary_entry_model'=>'profit_first_v5',
                 'multi_strategy_role'=>'shadow_diagnostics',
             ],
@@ -62,7 +67,7 @@ final class NobitexDecisionReporter
         );
 
         foreach (array_chunk(array_slice($candidates, 0, 8), 4) as $chunkIndex => $chunk) {
-            $lines = ['جزئیات کاندیداهای BUY — بخش ' . ($chunkIndex + 1)];
+            $lines = ['جزئیات کاندیداهای BUY — بخش ' . ($chunkIndex + 1) . ' | Backend ' . $backendVersion];
             foreach ($chunk as $i => $candidate) {
                 if (!is_array($candidate)) continue;
                 $symbol = strtoupper((string)($candidate['symbol'] ?? 'UNKNOWN'));
@@ -106,6 +111,7 @@ final class NobitexDecisionReporter
                     'exchange'=>'nobitex',
                     'symbol'=>$chunk[0]['symbol'] ?? null,
                     'chunk'=>$chunkIndex + 1,
+                    'backend_version'=>$backendVersion,
                 ],
                 'info'
             );
@@ -123,9 +129,9 @@ final class NobitexDecisionReporter
         }
         if ($extra !== []) {
             ErrorReporter::log(
-                "ردهای تکمیلی خارج از Top Candidates:\n" . implode("\n", $extra),
+                'Backend: ' . $backendVersion . "\nردهای تکمیلی خارج از Top Candidates:\n" . implode("\n", $extra),
                 'nobitex_candidate_rejections_extra',
-                ['run_id'=>$runId,'status'=>$status,'exchange'=>'nobitex'],
+                ['run_id'=>$runId,'status'=>$status,'exchange'=>'nobitex','backend_version'=>$backendVersion],
                 'info'
             );
         }
