@@ -24,10 +24,13 @@ final class NobitexGlobalRiskRuntime
         $valuation=(new NobitexPortfolioValuation())->snapshot($client,$wallets,$positions);
         $limit=$this->settingFloat($pdo,'nobitex_portfolio_exposure_percent',60.0,10.0,90.0);
         $configuredMax=$this->settingInt($pdo,'nobitex_max_positions',5,1,20);
-        $effectiveMax=$this->effectiveMaxPositions($pdo,$configuredMax);
+        // Adaptive capacity is advisory from 1.4.21 onward: it reduces the
+        // size of future entries, but it must never lower the user's hard
+        // configured position-count ceiling or prevent the market scan.
+        $adaptiveSoftMax=$this->effectiveMaxPositions($pdo,$configuredMax);
         $base=$pdo->query('SELECT position_percent,max_position_percent FROM autotrade_settings WHERE id=1')->fetch() ?: [];
         $configured=min(max(0.1,(float)($base['position_percent']??5.0)),max(0.1,(float)($base['max_position_percent']??10.0)));
-        $effective=min($configured,$limit/max(1,$effectiveMax));
+        $effective=min($configured,$limit/max(1,$configuredMax));
 
         // Risk math must stay in exchange-native RLS. Display fields are Toman.
         $totalRls=(float)($valuation['portfolio_value_rls']??0.0);
@@ -37,7 +40,7 @@ final class NobitexGlobalRiskRuntime
         $multiplier=$desiredRls>0.0?min(1.0,$capacityRls/$desiredRls):1.0;
         if(!($valuation['conversion_ready']??false)&&$this->isMixedPortfolio($valuation))$multiplier=0.0;
         if($this->entryCircuitOpen($pdo))$multiplier=0.0;
-        if(count($positions)>=$effectiveMax)$multiplier=0.0;
+        if(count($positions)>=$configuredMax)$multiplier=0.0;
         self::$multiplier=max(0.0,min(1.0,$multiplier));
         self::$snapshot=$valuation+[
             'global_exposure_limit_percent'=>$limit,
@@ -46,11 +49,16 @@ final class NobitexGlobalRiskRuntime
             'base_effective_position_percent'=>round($effective,4),
             'global_position_size_multiplier'=>round(self::$multiplier,4),
             'configured_max_positions'=>$configuredMax,
-            'effective_max_positions'=>$effectiveMax,
+            // Keep the legacy key for API compatibility, but expose explicit
+            // soft-cap semantics so diagnostics no longer imply a hard block.
+            'effective_max_positions'=>$adaptiveSoftMax,
+            'adaptive_soft_max_positions'=>$adaptiveSoftMax,
+            'adaptive_position_size_multiplier'=>round(max(0.25,min(1.0,$adaptiveSoftMax/max(1,$configuredMax))),4),
+            'capacity_mode'=>'configured_hard_cap_adaptive_soft_sizing',
             'active_positions'=>count($positions),
             'entry_circuit'=>$this->entryCircuitSnapshot($pdo),
             'entry_blocked'=>self::$multiplier<=0.000001,
-            'entry_block_reason'=>$this->entryBlockReason($pdo,$valuation,$capacityRls,count($positions),$effectiveMax),
+            'entry_block_reason'=>$this->entryBlockReason($pdo,$valuation,$capacityRls,count($positions),$configuredMax),
         ];
         return self::$snapshot;
     }
@@ -66,14 +74,18 @@ final class NobitexGlobalRiskRuntime
         }
 
         $configuredMax=$this->settingInt($pdo,'nobitex_max_positions',5,1,20);
-        $effectiveMax=$this->effectiveMaxPositions($pdo,$configuredMax);
+        $adaptiveSoftMax=$this->effectiveMaxPositions($pdo,$configuredMax);
         $positionRows=$pdo->query("SELECT id FROM nobitex_autotrade_positions WHERE status IN ('pending_open','open','pending_close') ORDER BY id ASC LIMIT 30")->fetchAll();
         if($excludePositionId!==null&&$excludePositionId>0){
             $positionRows=array_values(array_filter($positionRows,static fn(array $row):bool=>(int)($row['id']??0)!==$excludePositionId));
         }
-        if(count($positionRows)>=$effectiveMax){
-            throw new NobitexCandidateRejectedException($symbol,'effective_position_capacity_reached',[
-                'active_positions'=>count($positionRows),'configured_max_positions'=>$configuredMax,'effective_max_positions'=>$effectiveMax,
+        if(count($positionRows)>=$configuredMax){
+            throw new NobitexCandidateRejectedException($symbol,'configured_position_capacity_reached',[
+                'active_positions'=>count($positionRows),
+                'configured_max_positions'=>$configuredMax,
+                'effective_max_positions'=>$adaptiveSoftMax,
+                'adaptive_soft_max_positions'=>$adaptiveSoftMax,
+                'capacity_mode'=>'configured_hard_cap_adaptive_soft_sizing',
             ]);
         }
 
@@ -108,7 +120,9 @@ final class NobitexGlobalRiskRuntime
                 'projected_exposure_percent'=>round($projectedPct,4),
                 'limit_percent'=>$limit,
                 'configured_max_positions'=>$configuredMax,
-                'effective_max_positions'=>$effectiveMax,
+                'effective_max_positions'=>$adaptiveSoftMax,
+                'adaptive_soft_max_positions'=>$adaptiveSoftMax,
+                'capacity_mode'=>'configured_hard_cap_adaptive_soft_sizing',
                 'excluded_position_id'=>$excludePositionId,
             ]);
         }
@@ -119,7 +133,9 @@ final class NobitexGlobalRiskRuntime
             'projected_exposure_percent'=>round($projectedPct,4),
             'limit_percent'=>$limit,
             'configured_max_positions'=>$configuredMax,
-            'effective_max_positions'=>$effectiveMax,
+            'effective_max_positions'=>$adaptiveSoftMax,
+            'adaptive_soft_max_positions'=>$adaptiveSoftMax,
+            'capacity_mode'=>'configured_hard_cap_adaptive_soft_sizing',
             'valuation'=>$valuation,
             'excluded_position_id'=>$excludePositionId,
         ];

@@ -96,11 +96,15 @@ final class NobitexAutoTraderEngine
             } catch (NobitexCandidateRejectedException $e) {
                 $reason = $e->reasonCode();
 
-                if (str_starts_with($reason, 'global_portfolio_') || in_array($reason, ['runtime_entry_circuit_open','effective_position_capacity_reached'], true)) {
+                if (str_starts_with($reason, 'global_portfolio_') || in_array($reason, ['runtime_entry_circuit_open','effective_position_capacity_reached','configured_position_capacity_reached'], true)) {
                     $last = [
                         'status'=>'no_trade',
                         'exchange'=>'nobitex',
                         'reason'=>$reason,
+                        'active_positions'=>$e->assessment()['active_positions'] ?? null,
+                        'max_positions'=>$e->assessment()['configured_max_positions'] ?? null,
+                        'adaptive_soft_max_positions'=>$e->assessment()['adaptive_soft_max_positions'] ?? ($e->assessment()['effective_max_positions'] ?? null),
+                        'capacity_mode'=>$e->assessment()['capacity_mode'] ?? null,
                         'global_risk'=>$e->assessment(),
                     ];
                     $accountingAfter = $this->safeAccountingSync($accounting);
