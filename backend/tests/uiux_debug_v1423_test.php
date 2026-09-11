@@ -17,9 +17,14 @@ ux(str_contains($nav, 'mobile-nav-menu'), 'mobile primary navigation disclosure 
 ux(substr_count($nav, 'aria-current="page"') >= 4, 'active primary and module navigation must expose aria-current');
 ux(!str_contains($nav, '.global-subnav ~ .subnav:not(.global-subnav)'), 'global nav must not hide page-local sub-navigation');
 ux(!str_contains($nav, '?>>>') && !str_contains($nav, '?>> >'), 'navigation anchor markup contains an accidental extra closing bracket');
-$assetsV6 = str_contains($nav, 'cockpit-ui.css?v=6') && str_contains($nav, 'cockpit.js?v=6');
-$assetsV7 = str_contains($nav, 'cockpit-ui.css?v=7') && str_contains($nav, 'cockpit.js?v=7');
-ux($assetsV6 || $assetsV7, 'admin UI assets must use a coordinated cache-busted revision');
+$assetRevisionOk = false;
+foreach ([6,7,8] as $revision) {
+    if (str_contains($nav, 'cockpit-ui.css?v=' . $revision) && str_contains($nav, 'cockpit.js?v=' . $revision)) {
+        $assetRevisionOk = true;
+        break;
+    }
+}
+ux($assetRevisionOk, 'admin UI assets must use a coordinated cache-busted revision');
 ux(str_contains($ui, 'a:focus-visible'), 'keyboard focus treatment missing');
 ux(str_contains($ui, 'prefers-reduced-motion:reduce'), 'reduced-motion support missing');
 ux(str_contains($ui, 'min-height:44px'), 'mobile touch targets must be at least 44px');
@@ -32,4 +37,4 @@ ux(str_contains($app, 'modifier = Modifier.fillMaxWidth(), singleLine = true'), 
 ux(str_contains($app, 'style = MaterialTheme.typography.titleLarge, maxLines = 2'), 'metric values must not be clipped to one line');
 ux(str_contains($app, 'Text(value, fontWeight = FontWeight.Bold, maxLines = 2'), 'tiny metric values must remain readable');
 
-echo "Trade 1.4.23 UI/UX regression checks passed.\n";
+echo "Trade UI/UX regression checks passed.\n";
