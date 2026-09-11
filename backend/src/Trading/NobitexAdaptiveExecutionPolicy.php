@@ -16,7 +16,9 @@ use PDO;
  */
 final class NobitexAdaptiveExecutionPolicy
 {
-    public const MODEL = 'adaptive_execution_policy_v2_external_consensus';
+    // Preserve the stable runtime/release identifier. External consensus is an
+    // additional guard inside v1, not a replacement execution contract.
+    public const MODEL = 'adaptive_execution_policy_v1';
 
     public function apply(PDO $pdo, array $market, array $signal, array $plan): array
     {
@@ -58,6 +60,7 @@ final class NobitexAdaptiveExecutionPolicy
                 'allowed'=>false,
                 'reason'=>(string)($external['reason'] ?? 'external_market_consensus_blocked'),
                 'model'=>self::MODEL,
+                'external_market_model'=>NobitexExternalMarketOracle::MODEL,
                 'raw_tradable_net_edge_percent'=>round($rawEdge,4),
                 'calibrated_tradable_net_edge_percent'=>round($calibratedEdge,4),
                 'execution_penalty_percent'=>round($penalty,4),
@@ -74,6 +77,7 @@ final class NobitexAdaptiveExecutionPolicy
                 'allowed'=>false,
                 'reason'=>$externalPenalty > 0.0 ? 'external_market_and_execution_edge_consumed' : 'adaptive_execution_edge_consumed',
                 'model'=>self::MODEL,
+                'external_market_model'=>NobitexExternalMarketOracle::MODEL,
                 'raw_tradable_net_edge_percent'=>round($rawEdge, 4),
                 'calibrated_tradable_net_edge_percent'=>round($calibratedEdge, 4),
                 'execution_penalty_percent'=>round($penalty, 4),
@@ -116,6 +120,7 @@ final class NobitexAdaptiveExecutionPolicy
         }
 
         $hardened['adaptive_execution_model'] = self::MODEL;
+        $hardened['external_market_model'] = NobitexExternalMarketOracle::MODEL;
         $hardened['execution_learning_penalty_percent'] = round($penalty, 4);
         $hardened['external_market_penalty_percent'] = round($externalPenalty, 4);
         $hardened['effective_tradable_net_edge_percent'] = round($effectiveEdge, 4);
@@ -125,6 +130,7 @@ final class NobitexAdaptiveExecutionPolicy
             'allowed'=>true,
             'reason'=>$forcedLimit ? 'execution_plan_hardened' : 'execution_plan_accepted',
             'model'=>self::MODEL,
+            'external_market_model'=>NobitexExternalMarketOracle::MODEL,
             'raw_tradable_net_edge_percent'=>round($rawEdge, 4),
             'calibrated_tradable_net_edge_percent'=>round($calibratedEdge, 4),
             'execution_penalty_percent'=>round($penalty, 4),
