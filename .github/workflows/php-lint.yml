@@ -33,6 +33,8 @@ jobs:
         run: php backend/tests/nobitex_order_fill_test.php
       - name: Nobitex fill integration regression tests
         run: php backend/tests/nobitex_fill_integration_test.php
+      - name: Nobitex manual position reconciliation regression tests
+        run: php backend/tests/nobitex_position_reconciliation_test.php
       - name: Execution Learning v1 regression tests
         run: php backend/tests/execution_learning_v1_test.php
       - name: Adaptive Execution Policy v1 regression tests
