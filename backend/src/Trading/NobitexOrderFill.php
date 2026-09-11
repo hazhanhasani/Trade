@@ -11,6 +11,11 @@ namespace Trade\Trading;
  * Actual execution is reported in `matchedAmount` (or equivalent aliases).
  * We only fall back to the requested amount for a terminal fully-filled order
  * when the exchange omitted an explicit matched field.
+ *
+ * Nobitex takes the trading fee from the asset received by the user. For BUY
+ * orders that means `matchedAmount` is the gross base fill while the wallet
+ * receives `matchedAmount - fee`. Managed position quantity must therefore use
+ * netReceivedBase() whenever an actual BUY fee is present.
  */
 final class NobitexOrderFill
 {
@@ -53,6 +58,28 @@ final class NobitexOrderFill
         }
 
         return 0.0;
+    }
+
+    /** Actual fee amount reported by Nobitex in the received base asset for BUYs. */
+    public static function buyFeeBase(array $order): float
+    {
+        $type = strtolower(trim((string)($order['type'] ?? $order['side'] ?? '')));
+        if ($type !== '' && $type !== 'buy') return 0.0;
+        $fee = self::number($order['fee'] ?? null);
+        return max(0.0, $fee);
+    }
+
+    /**
+     * Base quantity that is actually credited to the spot wallet after a BUY.
+     * This is the canonical quantity for a managed open position.
+     */
+    public static function netReceivedBase(array $order, float $terminalDoneFallback = 0.0): float
+    {
+        $matched = self::matchedAmount($order, $terminalDoneFallback);
+        if ($matched <= 0.0) return 0.0;
+        $fee = self::buyFeeBase($order);
+        if ($fee <= 0.0) return $matched;
+        return max(0.0, $matched - min($matched, $fee));
     }
 
     public static function averagePrice(array $order, float $fallback = 0.0): float
