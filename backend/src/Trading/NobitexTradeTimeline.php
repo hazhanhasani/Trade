@@ -10,7 +10,7 @@ use Trade\Support\IranClock;
 
 final class NobitexTradeTimeline
 {
-    public const MODEL = 'confirmed_trade_timeline_v1';
+    public const MODEL = 'confirmed_trade_timeline_v2_external_reconcile';
 
     public function snapshot(?PDO $pdo = null, int $limit = 80): array
     {
@@ -36,6 +36,7 @@ final class NobitexTradeTimeline
                 'id'=>'buy:' . (int)$row['id'],
                 'type'=>'buy',
                 'status'=>'confirmed',
+                'source'=>'trade_bot',
                 'symbol'=>(string)$row['symbol'],
                 'asset'=>(string)$row['asset'],
                 'quote_asset'=>$quote,
@@ -68,6 +69,7 @@ final class NobitexTradeTimeline
                 'id'=>'sell:' . (int)$row['id'],
                 'type'=>'sell',
                 'status'=>'confirmed',
+                'source'=>'trade_bot',
                 'position_id'=>(int)$row['position_id'],
                 'symbol'=>(string)$row['symbol'],
                 'asset'=>(string)$row['asset'],
@@ -82,6 +84,47 @@ final class NobitexTradeTimeline
                 'created_at_utc'=>$utc,
                 'time_iran'=>$time,
                 'order_local_id'=>(string)($row['entry_order_local_id'] ?? ''),
+                '_sort_ts'=>(int)$time['unix'],
+            ];
+        }
+
+        // Manual/external wallet changes are visible on the timeline, but no
+        // execution price or PnL is invented. They are informational evidence
+        // that the exchange wallet and managed position were reconciled.
+        $external = $pdo->query("SELECT id,event_name,context_json,created_at
+            FROM nobitex_autotrade_events
+            WHERE event_name IN ('nobitex.position.external_close_detected','nobitex.position.external_resize_detected')
+            ORDER BY id DESC LIMIT {$fetch}")->fetchAll();
+        foreach ($external as $row) {
+            $ctx = json_decode((string)($row['context_json'] ?? ''), true);
+            if (!is_array($ctx)) continue;
+            $utc = (string)$row['created_at'];
+            $time = IranClock::fromUtc($utc);
+            $before = max(0.0, (float)($ctx['tracked_amount_before'] ?? 0));
+            $remaining = max(0.0, (float)($ctx['remaining_amount'] ?? 0));
+            $reduced = isset($ctx['reduced_amount']) ? max(0.0, (float)$ctx['reduced_amount']) : max(0.0, $before - $remaining);
+            $events[] = [
+                'id'=>'external:' . (int)$row['id'],
+                'type'=>'external_sell',
+                'status'=>'reconciled',
+                'source'=>'outside_trade',
+                'position_id'=>(int)($ctx['position_id'] ?? 0),
+                'symbol'=>(string)($ctx['symbol'] ?? ''),
+                'asset'=>(string)($ctx['asset'] ?? ''),
+                'quote_asset'=>null,
+                'display_unit'=>null,
+                'amount'=>$reduced,
+                'remaining_amount'=>$remaining,
+                'entry_price'=>null,
+                'price'=>null,
+                'value'=>null,
+                'pnl'=>null,
+                'pnl_percent'=>null,
+                'reason'=>(string)($ctx['reason'] ?? 'external_balance_changed'),
+                'note'=>'فروش/کاهش موجودی خارج از ربات شناسایی و با کیف پول نوبیتکس همگام شد؛ قیمت و سود/زیان ساختگی ثبت نشده است.',
+                'created_at_utc'=>$utc,
+                'time_iran'=>$time,
+                'order_local_id'=>'',
                 '_sort_ts'=>(int)$time['unix'],
             ];
         }
