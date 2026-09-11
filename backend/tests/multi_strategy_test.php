@@ -62,7 +62,7 @@ $chaosI=['momentum_5_percent'=>0.0,'ema_gap_percent'=>0.0,'trend_consistency'=>0
 $chaosRegime=$detector->detect($market,$chaosPrices,$chaosI,$chaosI,$chaosI);
 msAssert(($chaosRegime['regime']??'')===NobitexMarketRegimeDetector::HIGH_VOLATILITY,'extreme volatility regime was not detected');
 $chaosRoute=$router->route(['market'=>$market,'prices'=>['1m'=>$chaosPrices],'indicators'=>['1m'=>$chaosI,'5m'=>$chaosI,'15m'=>$chaosI]],$chaosRegime);
-msAssert(($chaosRoute['selected']['key']??'')==='high_volatility_momentum_v2','high-volatility regime should route to calibrated volatility strategy');
+msAssert(($chaosRoute['selected']['key']??'')==='high_volatility_momentum_v3','high-volatility regime should route to calibrated volatility strategy');
 msAssert(($chaosRoute['entry_enabled']??false)===true,'high-volatility regime should allow strategy-level evaluation');
 msAssert(($chaosRoute['selected']['entry_allowed']??true)===false,'non-directional high volatility must not allow BUY');
 msAssert((float)($chaosRoute['selected']['gross_edge_percent']??1.0)<=0.0,'failed directional gate must not expose a positive actionable edge');
@@ -86,14 +86,50 @@ $directionalRegime=[
         'volatility_percent'=>2.20,
     ],
 ];
-$directionalRoute=$router->route([
+$directionalContext=[
     'market'=>['orderbook_imbalance'=>0.28,'spread_percent'=>0.10,'quote_asset'=>'IRT'],
     'prices'=>['1m'=>$trendPrices],
     'indicators'=>['1m'=>$directionalI1,'5m'=>$directionalI5,'15m'=>$directionalI15],
-],$directionalRegime);
-msAssert(($directionalRoute['selected']['key']??'')==='high_volatility_momentum_v2','directional high volatility should use calibrated volatility strategy');
+];
+$directionalRoute=$router->route($directionalContext,$directionalRegime);
+msAssert(($directionalRoute['selected']['key']??'')==='high_volatility_momentum_v3','directional high volatility should use calibrated volatility strategy');
 msAssert(($directionalRoute['selected']['entry_allowed']??false)===true,'directional high volatility should be eligible before execution-cost gate');
 msAssert((float)($directionalRoute['selected']['gross_edge_percent']??0.0)>0.0,'directional high volatility should expose a bounded positive gross edge');
 msAssert(($directionalRoute['selected']['diagnostics']['failed_entry_guards']??['x'])===[],'directional setup should pass every entry guard');
+
+// A hot 1m RSI alone must no longer force HOLD. It is a soft exhaustion cost;
+// if the multi-timeframe structure remains strong, strategy-level entry can
+// stay enabled and the downstream net-edge gate decides whether a real BUY is
+// economically justified.
+$hotI1=$directionalI1;
+$hotI1['rsi14']=86.0;
+$hotContext=$directionalContext;
+$hotContext['indicators']['1m']=$hotI1;
+$hotRoute=$router->route($hotContext,$directionalRegime);
+msAssert(($hotRoute['selected']['entry_allowed']??false)===true,'hot 1m RSI should be penalized, not automatically veto a strong continuation');
+msAssert((float)($hotRoute['selected']['diagnostics']['rsi_1m_exhaustion_penalty_percent']??0.0)>0.0,'hot 1m RSI must add an explicit exhaustion penalty');
+msAssert((float)($hotRoute['selected']['gross_edge_percent']??0.0)<(float)($directionalRoute['selected']['gross_edge_percent']??0.0),'hot RSI continuation must expose less gross edge than a cooler setup');
+
+// Extreme 1m RSI remains a hard safety veto even if everything else is strong.
+$extremeI1=$directionalI1;
+$extremeI1['rsi14']=93.0;
+$extremeContext=$directionalContext;
+$extremeContext['indicators']['1m']=$extremeI1;
+$extremeRoute=$router->route($extremeContext,$directionalRegime);
+msAssert(($extremeRoute['selected']['entry_allowed']??true)===false,'extreme 1m RSI must still block BUY');
+msAssert(($extremeRoute['selected']['reason']??'')==='high_volatility_rsi_1m_extreme','extreme RSI must expose a stable blocker reason');
+
+// Mildly adverse flow is handled by execution economics; only clearly hostile
+// books remain a structural blocker.
+$mildAdverseContext=$directionalContext;
+$mildAdverseContext['market']['orderbook_imbalance']=-0.25;
+$mildAdverseRoute=$router->route($mildAdverseContext,$directionalRegime);
+msAssert(($mildAdverseRoute['selected']['entry_allowed']??false)===true,'mild adverse order-book flow should not be an unconditional strategy veto');
+
+$hostileContext=$directionalContext;
+$hostileContext['market']['orderbook_imbalance']=-0.35;
+$hostileRoute=$router->route($hostileContext,$directionalRegime);
+msAssert(($hostileRoute['selected']['entry_allowed']??true)===false,'clearly hostile order-book flow must still block BUY');
+msAssert(($hostileRoute['selected']['reason']??'')==='high_volatility_orderbook_adverse','hostile flow must keep an explicit blocker reason');
 
 echo "Multi-strategy regime/router regression tests passed.\n";
