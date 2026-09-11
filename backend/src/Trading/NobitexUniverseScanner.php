@@ -149,6 +149,13 @@ final class NobitexUniverseScanner
         }
 
         usort($analyzed, static function (array $a, array $b) use ($preferredQuote): int {
+            // The caller selects preferredQuote from the wallet that can actually
+            // fund entries. Keep that quote first so an unfunded USDT BUY cannot
+            // dominate an IRT-funded portfolio's candidate list or diagnostics.
+            $aPreferred = (($a['quote_asset'] ?? '') === $preferredQuote) ? 1 : 0;
+            $bPreferred = (($b['quote_asset'] ?? '') === $preferredQuote) ? 1 : 0;
+            if ($aPreferred !== $bPreferred) return $bPreferred <=> $aPreferred;
+
             $aBuy = (($a['signal']['action'] ?? '') === 'buy') ? 1 : 0;
             $bBuy = (($b['signal']['action'] ?? '') === 'buy') ? 1 : 0;
             if ($aBuy !== $bBuy) return $bBuy <=> $aBuy;
@@ -157,13 +164,10 @@ final class NobitexUniverseScanner
             $bReady = (bool) ($b['signal']['ready'] ?? false);
             if ($aReady !== $bReady) return $bReady <=> $aReady;
 
-            $aEdge = (float) ($a['expected_net_edge_percent'] ?? -999.0);
-            $bEdge = (float) ($b['expected_net_edge_percent'] ?? -999.0);
+            // Rank the actually tradable post-cost edge, not merely the raw edge.
+            $aEdge = (float) ($a['signal']['tradable_net_edge_percent'] ?? $a['expected_net_edge_percent'] ?? -999.0);
+            $bEdge = (float) ($b['signal']['tradable_net_edge_percent'] ?? $b['expected_net_edge_percent'] ?? -999.0);
             if (abs($aEdge - $bEdge) > 0.000001) return $bEdge <=> $aEdge;
-
-            $aPreferred = (($a['quote_asset'] ?? '') === $preferredQuote) ? 1 : 0;
-            $bPreferred = (($b['quote_asset'] ?? '') === $preferredQuote) ? 1 : 0;
-            if ($aPreferred !== $bPreferred) return $bPreferred <=> $aPreferred;
 
             return ((float) ($b['depth_quote'] ?? 0.0)) <=> ((float) ($a['depth_quote'] ?? 0.0));
         });
