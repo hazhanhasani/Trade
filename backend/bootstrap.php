@@ -30,6 +30,18 @@ if (is_file($configFile)) {
     Config::load($configFile);
 }
 
+// Private control/API/install surfaces are operational endpoints, not public
+// landing pages. Keep them out of search indexes and add low-risk baseline
+// browser headers without affecting CLI Cron execution.
+if (PHP_SAPI !== 'cli' && !headers_sent()) {
+    $requestPath = (string) (parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH) ?: '');
+    if (str_starts_with($requestPath, '/admin') || str_starts_with($requestPath, '/api') || str_starts_with($requestPath, '/install')) {
+        header('X-Robots-Tag: noindex, nofollow, noarchive');
+    }
+    header('X-Content-Type-Options: nosniff');
+    header('Referrer-Policy: same-origin');
+}
+
 try { ErrorReporter::install(); } catch (Throwable) {}
 
 set_exception_handler(static function (Throwable $e): void {
