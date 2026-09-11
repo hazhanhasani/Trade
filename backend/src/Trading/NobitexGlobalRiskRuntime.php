@@ -159,10 +159,10 @@ final class NobitexGlobalRiskRuntime
         return['open'=>$open,'until'=>$open?gmdate(DATE_ATOM,$ts):null,'reason'=>$open?$this->settingString($pdo,'nobitex_entry_circuit_reason'):null];
     }
 
-    private function entryBlockReason(PDO $pdo,array $valuation,float $capacityRls,int $active,int $effectiveMax):?string
+    private function entryBlockReason(PDO $pdo,array $valuation,float $capacityRls,int $active,int $configuredMax):?string
     {
         if($this->entryCircuitOpen($pdo))return'runtime_entry_circuit_open';
-        if($active>=$effectiveMax)return'effective_position_capacity_reached';
+        if($active>=$configuredMax)return'configured_position_capacity_reached';
         if(!($valuation['conversion_ready']??false)&&$this->isMixedPortfolio($valuation))return'global_portfolio_valuation_unavailable';
         if($capacityRls<=0.0)return'global_portfolio_exposure_limit_reached';
         return null;

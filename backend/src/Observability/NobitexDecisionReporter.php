@@ -46,7 +46,7 @@ final class NobitexDecisionReporter
             'محل تصمیم: backend/src/Trading/NobitexInternalSignalEngine.php → Profit-First v5 | سپس NobitexPortfolioEngine.php → entryBudget()',
         ];
         if ($reasonSummary !== []) $summary[] = 'خلاصه دلایل رد: ' . implode(' | ', array_slice($reasonSummary, 0, 8));
-        $summary[] = 'نکته: تصمیم اصلی BUY دوباره Profit-First است؛ Regime/Strategy فقط Shadow diagnostics هستند. ورود با Edge قابل معامله مثبت بعد از کارمزد/Spread/Slippage/Buffer و سپس Risk/Balance/Capacity تعیین می‌شود.';
+        $summary[] = 'نکته: Profit-First ابتدا هزینه‌های صریح اجرا را از Gross کم می‌کند؛ Buffer جدید فقط عدم‌قطعیت باقی‌مانده مدل را پوشش می‌دهد و هزینه‌ها را دوباره شارژ نمی‌کند. سپس Risk/Balance/Capacity بررسی می‌شود.';
 
         ErrorReporter::log(
             implode("\n", $summary),
@@ -79,12 +79,26 @@ final class NobitexDecisionReporter
                     . ($score !== null ? ' | Score=' . self::num($score, 2) : '')
                     . ' | Strategy=' . (string)($candidate['strategy_key'] ?? '—')
                     . ' | Regime=' . (string)($candidate['market_regime'] ?? '—')
+                    . ' | Gross=' . self::pct($candidate['expected_gross_move_percent'] ?? null)
+                    . ' | Cost=' . self::pct($candidate['estimated_roundtrip_cost_percent'] ?? null)
                     . ' | NetEdge=' . self::pct($candidate['expected_net_edge_percent'] ?? null)
+                    . ' | Buffer=' . self::pct($candidate['required_edge_buffer_percent'] ?? null)
                     . ' | TradableEdge=' . self::pct($candidate['tradable_net_edge_percent'] ?? null)
-                    . ' | RequiredBuffer=' . self::pct($candidate['required_edge_buffer_percent'] ?? null)
                     . ' | Spread=' . self::pct($candidate['spread_percent'] ?? null)
+                    . ' | Vol=' . self::pct($candidate['volatility_percent'] ?? null)
+                    . ' | Liq×=' . self::num($candidate['liquidity_multiple'] ?? '—', 2)
                     . ' | نتیجه=رد'
                     . ' | علت=' . $r . ' — ' . self::reasonFa($r);
+
+                $buffer = is_array($candidate['forecast_uncertainty_buffer'] ?? null) ? $candidate['forecast_uncertainty_buffer'] : [];
+                if ($buffer !== []) {
+                    $line .= ' | BufferParts='
+                        . 'base:' . self::pct($buffer['base_percent'] ?? null)
+                        . ',friction:' . self::pct($buffer['friction_uncertainty_percent'] ?? null)
+                        . ',vol:' . self::pct($buffer['volatility_uncertainty_percent'] ?? null)
+                        . ',dis:' . self::pct($buffer['disagreement_uncertainty_percent'] ?? null)
+                        . ',exh:' . self::pct($buffer['exhaustion_uncertainty_percent'] ?? null);
+                }
 
                 foreach ([
                     'strategy_learning_multiplier'=>'Learning×',
@@ -155,7 +169,7 @@ final class NobitexDecisionReporter
             'no_candidate_passed_signal_and_risk_filters' => 'هیچ بازار بررسی‌شده‌ای هم‌زمان Edge مثبت قابل معامله و تمام کنترل‌های اجرایی/ریسک را پاس نکرد.',
             'no_eligible_markets' => 'در این Tick بازار واجد شرایط اولیه برای تحلیل/ورود پیدا نشد.',
             'positive_tradable_net_edge_after_costs_and_buffer' => 'مدل Profit-First بعد از تمام هزینه‌ها و Buffer هنوز Edge مثبت دارد و BUY مجاز است.',
-            'edge_below_adaptive_safety_buffer' => 'پیش‌بینی حرکت پس از کارمزد، Spread، Slippage و حاشیه خطای تطبیقی Edge مثبت کافی برای BUY نساخته است.',
+            'edge_below_adaptive_safety_buffer' => 'بعد از کسر هزینه‌های واقعی اجرا، حاشیه باقی‌مانده از Buffer عدم‌قطعیت پیش‌بینی عبور نکرده است.',
             'expected_forward_move_negative_after_exit_cost' => 'برآورد حرکت آینده پس از هزینه خروج منفی است و جهت سیگنال به SELL متمایل شده است.',
             'liquidity_not_executable' => 'عمق نقدشوندگی نسبت به حداقل سفارش کافی نیست و اجرای امن سفارش تضمین نمی‌شود.',
             'spread_not_executable' => 'Spread فعلی از سقف پویا برای اجرای معامله بزرگ‌تر است.',
@@ -173,6 +187,8 @@ final class NobitexDecisionReporter
             'minimum_order_exceeds_budget' => 'حداقل ارزش سفارش صرافی از بودجه مجاز این معامله بیشتر است.',
             'minimum_order_rounding' => 'بعد از گردکردن مقدار/قیمت، سفارش به حداقل معتبر صرافی نمی‌رسد.',
             'pending_order_capacity_reached' => 'ظرفیت سفارش‌های Pending پر است و ورود تازه تا تعیین تکلیف آن‌ها متوقف است.',
+            'configured_position_capacity_reached' => 'تعداد پوزیشن‌های فعال به سقف واقعی تنظیم‌شده کاربر رسیده است.',
+            'effective_position_capacity_reached' => 'نام قدیمی محدودیت ظرفیت است؛ در نسخه جدید Adaptive فقط حجم خرید را نرم کاهش می‌دهد و سقف سخت همان مقدار تنظیم‌شده است.',
             'no_quote_balance' => 'هیچ موجودی قابل استفاده IRT/USDT برای ورود وجود ندارد.',
             'high_volatility_alignment_below_threshold',
             'high_volatility_efficiency_below_threshold',

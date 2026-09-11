@@ -662,9 +662,16 @@ final class NobitexPortfolioEngine
                 'signal'=>$signal['action'] ?? 'hold',
                 'strategy_key'=>$signal['strategy_key'] ?? $signal['selected_strategy']['key'] ?? null,
                 'market_regime'=>$signal['market_regime']['regime'] ?? null,
+                'expected_gross_move_percent'=>$signal['expected_gross_move_percent'] ?? null,
+                'estimated_roundtrip_cost_percent'=>$signal['estimated_roundtrip_cost_percent'] ?? null,
                 'expected_net_edge_percent'=>$signal['expected_net_edge_percent'] ?? null,
                 'tradable_net_edge_percent'=>$signal['tradable_net_edge_percent'] ?? null,
                 'required_edge_buffer_percent'=>$signal['required_edge_buffer_percent'] ?? null,
+                'forecast_uncertainty_buffer'=>is_array($signal['forecast_uncertainty_buffer'] ?? null) ? $signal['forecast_uncertainty_buffer'] : [],
+                'volatility_percent'=>$signal['indicators']['volatility_percent'] ?? null,
+                'liquidity_multiple'=>$signal['execution_quality']['liquidity_multiple'] ?? null,
+                'orderbook_imbalance'=>$signal['execution_quality']['orderbook_imbalance'] ?? null,
+                'dynamic_max_spread_percent'=>$signal['execution_quality']['dynamic_max_spread_percent'] ?? null,
                 'spread_percent'=>$c['spread_percent'] ?? null,
             ];
         }
