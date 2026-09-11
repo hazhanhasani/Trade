@@ -2,5 +2,5 @@
 
 declare(strict_types=1);
 
-// Coordinated release: forensic Nobitex decision tracing and disabled-exchange probe suppression.
-return '1.4.12';
+// Coordinated release: funded-quote-first Nobitex candidate ordering and post-cost edge ranking.
+return '1.4.13';
