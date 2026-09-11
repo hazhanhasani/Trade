@@ -12,8 +12,9 @@ namespace Trade\Trading;
 final class NobitexRuntimeModels
 {
     /**
-     * Profit-first v5 is again the primary entry selector. The multi-strategy
-     * router remains active as shadow telemetry only and must not hard-block BUY.
+     * Profit-first v5 is the primary economic selector. Multi-strategy remains
+     * shadow telemetry; Adaptive Policy Learner may only tune residual forecast
+     * uncertainty after explicit costs have already been deducted.
      */
     public const STRATEGY_MODE = 'profit_first_v5_shadow_multi_strategy_v1';
     public const DECISION = 'profit_first_net_edge_v5_uncertainty_buffer_v2';
@@ -21,6 +22,7 @@ final class NobitexRuntimeModels
     public const EXECUTION = 'execution_quality_v2';
     public const EXECUTION_LEARNING = NobitexExecutionLearning::MODEL;
     public const ADAPTIVE_EXECUTION = NobitexAdaptiveExecutionPolicy::MODEL;
+    public const ADAPTIVE_POLICY = NobitexAdaptivePolicyLearner::MODEL;
     public const GLOBAL_PORTFOLIO = 'global_quote_normalization_v2_toman_display';
     public const ROTATION = 'guarded_opportunity_replacement_v1';
     public const FALLBACK = 'smart_candidate_fallback_v1';
