@@ -27,6 +27,7 @@ final class ReleaseContract
         'trading.execution_quality_v2',
         'trading.execution_learning_v1',
         'trading.adaptive_execution_policy_v1',
+        'trading.adaptive_policy_learner_v1',
         'trading.multi_strategy_regime_router_v1',
         'trading.strategy_learning_v2',
         'trading.adaptive_edge_calibration_v1',

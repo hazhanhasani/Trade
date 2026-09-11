@@ -46,11 +46,13 @@ final class BaleSystemAlert
         $this->ensureSchema($pdo);
         $severity = $this->severity($severity);
 
+        // Full forensic telemetry is still persisted by ErrorReporter/bot_runs,
+        // but a human-facing Bale chat should contain actions and meaningful
+        // state changes rather than one blue message per minute. Trade fills use
+        // BaleTradeNotifier and warnings/errors remain untouched here.
+        if ($severity === 'info' && self::routineTechnicalInfo($context)) return;
+
         $hash = substr(hash('sha256', $fingerprint), 0, 40);
-        // Identical technical fingerprints are still persisted by ErrorReporter,
-        // but Bale is a human-facing channel. Routine info logs (for example a
-        // healthy cron repeatedly returning portfolio_full) are summarized at most
-        // once per ten minutes; warnings/errors retain much shorter repeat windows.
         $dedupeSeconds = match ($severity) {
             'info' => 600,
             'warning' => 120,
@@ -105,6 +107,27 @@ final class BaleSystemAlert
         } catch (\Throwable) { return 0; }
     }
 
+    /** @param array<string,mixed> $context */
+    public static function routineTechnicalInfo(array $context): bool
+    {
+        $component = strtolower(trim((string)($context['component'] ?? '')));
+        if (in_array($component, [
+            'cron_cycle',
+            'nobitex_decision_trace',
+            'nobitex_candidate_rejections',
+            'nobitex_candidate_rejections_extra',
+        ], true)) return true;
+
+        $status = strtolower(trim((string)($context['status'] ?? '')));
+        return in_array($status, [
+            'portfolio_full',
+            'no_trade',
+            'waiting_order',
+            'skipped',
+            'profit_actions_processed',
+        ], true) && $component !== 'cron_update';
+    }
+
     private function recentlyQueued(PDO $pdo, string $hash, int $seconds): bool
     {
         $seconds = max(1, min(3600, $seconds));
@@ -155,30 +178,16 @@ final class BaleSystemAlert
         if (is_array($context)) {
             if (!empty($context['diagnosis'])) $lines[]='توضیح: '.mb_substr((string)$context['diagnosis'],0,600);
             if (!empty($context['action'])) $lines[]='اقدام پیشنهادی: '.mb_substr((string)$context['action'],0,600);
-            foreach ([
-                'component'=>'بخش',
-                'file'=>'فایل دقیق',
-                'line'=>'خط دقیق',
-                'caller'=>'تابع/مسیر فراخوانی',
-                'error_type'=>'نوع رویداد',
-                'exchange'=>'صرافی',
-                'symbol'=>'بازار',
-                'status'=>'وضعیت',
-                'run_id'=>'Run ID',
-                'request_id'=>'Request ID',
-                'pid'=>'PID',
-                'sapi'=>'SAPI',
-                'method'=>'HTTP Method',
-                'request'=>'مسیر درخواست',
-                'fingerprint'=>'اثر خطا',
+            foreach([
+                'component'=>'بخش','file'=>'فایل دقیق','line'=>'خط دقیق','caller'=>'تابع/مسیر فراخوانی','error_type'=>'نوع رویداد',
+                'exchange'=>'صرافی','symbol'=>'بازار','status'=>'وضعیت','run_id'=>'Run ID','request_id'=>'Request ID','pid'=>'PID',
+                'sapi'=>'SAPI','method'=>'HTTP Method','request'=>'مسیر درخواست','fingerprint'=>'اثر خطا',
             ] as $k=>$fa) {
                 if (isset($context[$k]) && is_scalar($context[$k]) && trim((string)$context[$k])!=='') {
                     $lines[]=$fa . ': ' . mb_substr((string)$context[$k],0,300);
                 }
             }
-            if (!empty($context['trace']) && is_scalar($context['trace'])) {
-                $lines[]="Trace:\n" . mb_substr((string)$context['trace'],0,1200);
-            }
+            if (!empty($context['trace']) && is_scalar($context['trace'])) $lines[]="Trace:\n" . mb_substr((string)$context['trace'],0,1200);
         }
         return mb_substr(implode("\n",$lines),0,4000);
     }
