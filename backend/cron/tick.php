@@ -14,6 +14,7 @@ use Trade\Support\IranClock;
 use Trade\Trading\AutoTraderEngine;
 use Trade\Trading\NobitexAutoTraderEngine;
 use Trade\Trading\NobitexDustConverter;
+use Trade\Trading\NobitexPositionReconciler;
 use Trade\Trading\NobitexRuntimeModels;
 use Trade\Trading\NobitexSchema;
 use Trade\Updater;
@@ -83,6 +84,40 @@ try {
         'analysis_interval_target_seconds'=>60,'quote_priority'=>['IRT','USDT'],'execution_mode'=>'live_only','update'=>$update,'backend_version'=>$versionAfterUpdate,'time_utc'=>gmdate(DATE_ATOM),'time_iran'=>IranClock::nowPayload(),
     ];
 
+    // Reconcile the DB with actual Nobitex wallet inventory on every tick,
+    // even when the trading bot is disabled. A manual sell/transfer must not
+    // leave a ghost open position consuming capacity and exposure forever.
+    $positionReconciliation=['status'=>'skipped','reason'=>'nobitex_credentials_missing'];
+    try {
+        $hasNobitexCredentials=(bool)$pdo->query("SELECT EXISTS(SELECT 1 FROM exchange_credentials WHERE exchange_name='nobitex')")->fetchColumn();
+        if ($hasNobitexCredentials) {
+            $positionReconciliation=(new NobitexPositionReconciler())->reconcile($pdo);
+            foreach (($positionReconciliation['events']??[]) as $event) {
+                if (!is_array($event)) continue;
+                $type=(string)($event['type']??'changed');
+                $symbol=(string)($event['symbol']??'');
+                $asset=(string)($event['asset']??'');
+                $before=(float)($event['tracked_amount_before']??0);
+                $remaining=(float)($event['remaining_amount']??0);
+                $title=$type==='closed'?'فروش/خروج دستی از پوزیشن شناسایی شد':'کاهش دستی موجودی پوزیشن شناسایی شد';
+                $body='ربات موجودی واقعی نوبیتکس را با پوزیشن داخلی همگام کرد. '
+                    .'دارایی: '.($asset!==''?$asset:$symbol)
+                    .' | مقدار قبلی: '.rtrim(rtrim(number_format($before,8,'.',''),'0'),'.')
+                    .' | مقدار باقی‌مانده: '.rtrim(rtrim(number_format($remaining,8,'.',''),'0'),'.')
+                    .' | سود/زیان ساختگی ثبت نشد.';
+                (new BaleSystemAlert())->queue(
+                    'nobitex-external-position-'.$type.'-'.(int)($event['position_id']??0),
+                    'warning',$title,$body,
+                    ['component'=>'position_reconciliation','exchange'=>'nobitex','symbol'=>$symbol,'status'=>$type],
+                    true,$pdo
+                );
+            }
+        }
+    } catch (Throwable $e) {
+        $positionReconciliation=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];
+        ErrorReporter::captureThrowable($e,'warning','nobitex_position_reconciliation',['exchange'=>'nobitex']);
+    }
+
     $results=[];$enabledCount=0;$failedCount=0;
     $runExchange=static function(string $exchange,callable $runner)use(&$results,&$enabledCount,&$failedCount):void{
         if(!NobitexSchema::botEnabled($exchange)){$results[$exchange]=['status'=>'disabled','exchange'=>$exchange];return;}
@@ -110,7 +145,7 @@ try {
     }catch(Throwable $e){$bale=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];ErrorReporter::captureThrowable($e,'warning','bale_delivery',['status'=>'deferred']);}
 
     $overall=$failedCount===0?'success':(($enabledCount>$failedCount)?'partial':'failed');
-    $summary=$baseSummary+['exchanges'=>$results,'dust_conversion'=>$dust,'host_health_sentinel'=>$hostHealth,'bale_notifications'=>$bale,'kill_switch'=>(string)($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn()?:'0')==='1'];
+    $summary=$baseSummary+['position_reconciliation'=>$positionReconciliation,'exchanges'=>$results,'dust_conversion'=>$dust,'host_health_sentinel'=>$hostHealth,'bale_notifications'=>$bale,'kill_switch'=>(string)($pdo->query("SELECT value_text FROM settings WHERE key_name='kill_switch' LIMIT 1")->fetchColumn()?:'0')==='1'];
     $stmt=$pdo->prepare("UPDATE bot_runs SET status=:status,summary_json=:summary,finished_at=UTC_TIMESTAMP() WHERE run_id=:id");$stmt->execute([':status'=>$overall,':summary'=>json_encode($summary,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),':id'=>$runId]);
 
     $heartbeat['status']=$overall;$heartbeat['finished_at']=gmdate(DATE_ATOM);$heartbeat['finished_at_iran']=IranClock::nowPayload();$heartbeat['run_id']=$runId;$heartbeat['backend_version']=$versionAfterUpdate;$writeHeartbeat($heartbeat);
