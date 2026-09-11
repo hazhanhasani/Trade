@@ -12,7 +12,7 @@ use Trade\Database;
  *
  * It submits only one reduction SELL per call. The orchestrator can call it
  * again after reconciliation, which gives fast sequential reduction without
- * stacking ambiguous exits.
+ * stacking ambiguous exits. Graceful emergency close is evaluated first.
  */
 final class NobitexCapacityManager
 {
@@ -25,6 +25,20 @@ final class NobitexCapacityManager
     {
         NobitexSchema::ensure();
         $pdo ??= Database::connection();
+
+        // Emergency graceful close is reduction-only and has priority over the
+        // normal configured/adaptive capacity. It is intentionally evaluated
+        // before the bot-enabled check so an already-running drain can finish.
+        try {
+            $emergency = (new NobitexEmergencyController())->enforce($pdo);
+            if (in_array((string)($emergency['status'] ?? ''), ['sell_submitted','waiting_reconcile','complete','blocked','deferred'], true)) {
+                return ['exchange'=>'nobitex','reason'=>'emergency_graceful_close'] + $emergency;
+            }
+        } catch (\Throwable $e) {
+            $this->event($pdo,'error','trade.emergency.enforce_failed',['error'=>mb_substr($e->getMessage(),0,240)]);
+            return $this->result('no_reduction','emergency_controller_error',['error'=>mb_substr($e->getMessage(),0,240)]);
+        }
+
         if (!NobitexSchema::botEnabled('nobitex')) return $this->result('no_reduction','bot_disabled');
         if (!$this->orders->credentialsConfigured() || !$this->orders->liveEnabled()) return $this->result('no_reduction','live_execution_unavailable');
 
@@ -134,9 +148,6 @@ final class NobitexCapacityManager
         $liquidityBonus=$depth>0.0?min(1.0,log10(1.0+$depth)/8.0):0.0;
         $ageHours=0.0;$openedAt=trim((string)($position['opened_at']??''));
         if($openedAt!==''){$ts=strtotime($openedAt.' UTC');if($ts!==false)$ageHours=min(72.0,max(0.0,(time()-$ts)/3600.0));}
-        // Weak edge, better current PnL and cheap/liquid execution all make a
-        // position more attractive to remove. Expensive/volatile exits are kept
-        // unless their expected edge is sufficiently worse.
         return ($edge*1.60)-($pnl*0.35)+($spread*0.90)+($exitCost*0.70)+($vol*0.12)-($liquidityBonus*0.25)-min(0.30,$ageHours/240.0);
     }
 
