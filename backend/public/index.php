@@ -26,6 +26,7 @@ use Trade\Trading\NobitexSchema;
 use Trade\Trading\NobitexStrategyLearning;
 use Trade\Trading\NobitexTradeTimeline;
 use Trade\Trading\OrderService;
+use Trade\Trading\TradeCommandCenter;
 use Trade\Trading\TradeNotificationCenter;
 use Trade\Trading\TradingViewSignalService;
 use Trade\Trading\TradingViewWebhookException;
@@ -108,13 +109,27 @@ try{
     if($method==='GET'&&$path==='/api/market-context')respond(['ok'=>true,'data'=>(new MarketContextService())->snapshot(boolValue($_GET['force']??false))]);
     if($method==='GET'&&$path==='/api/dust-conversion')respond(['ok'=>true,'data'=>(new NobitexDustConverter())->status()]);
     if($method==='POST'&&$path==='/api/dust-conversion'){$b=jsonBody();$dust=new NobitexDustConverter();$data=$dust->configure(boolValue($b['enabled']??false),(float)($b['min_toman']??1000),(float)($b['max_toman']??100000),(int)($b['cooldown_hours']??6));respond(['ok'=>true,'data'=>$data]);}
+
+    $commandCenter=new TradeCommandCenter();
+    if($method==='GET'&&$path==='/api/command-center')respond(['ok'=>true,'data'=>$commandCenter->snapshot()]);
+    if($method==='GET'&&$path==='/api/settings/history')respond(['ok'=>true,'data'=>$commandCenter->history(null,isset($_GET['limit'])?(int)$_GET['limit']:30)]);
+    if($method==='POST'&&$path==='/api/settings/preview')respond(['ok'=>true,'data'=>$commandCenter->previewSettings(jsonBody())]);
+    if($method==='POST'&&$path==='/api/settings/preset'){$b=jsonBody();respond(['ok'=>true,'data'=>$commandCenter->applyPreset((string)($b['name']??''))]);}
+    if($method==='POST'&&$path==='/api/settings/rollback'){$b=jsonBody();respond(['ok'=>true,'data'=>$commandCenter->rollback((int)($b['history_id']??0))]);}
+    if($method==='POST'&&$path==='/api/emergency'){$b=jsonBody();respond(['ok'=>true,'data'=>$commandCenter->setEmergencyMode((string)($b['mode']??''))]);}
+    if($method==='GET'&&$path==='/api/notification-rules')respond(['ok'=>true,'data'=>$commandCenter->notificationRules()]);
+    if($method==='POST'&&$path==='/api/notification-rules')respond(['ok'=>true,'data'=>$commandCenter->configureNotificationRules(jsonBody())]);
+    if($method==='POST'&&$path==='/api/shadow-mode'){$b=jsonBody();respond(['ok'=>true,'data'=>$commandCenter->setShadowMode(boolValue($b['enabled']??true,true))]);}
+    if($method==='POST'&&$path==='/api/strategy-lab')respond(['ok'=>true,'data'=>$commandCenter->strategyLab(jsonBody())]);
+    if($method==='GET'&&preg_match('#^/api/trade-replay/(\d+)$#',$path,$m))respond(['ok'=>true,'data'=>$commandCenter->tradeReplay((int)$m[1])]);
+
     if($method==='GET'&&$path==='/api/notifications'){
         $center=new TradeNotificationCenter();$limit=isset($_GET['limit'])?(int)$_GET['limit']:50;$unread=boolValue($_GET['unread']??false);respond(['ok'=>true,'data'=>['unread_count'=>$center->unreadCount(),'items'=>$center->recent($limit,$unread),'time_iran'=>IranClock::nowPayload()]]);
     }
     if($method==='POST'&&$path==='/api/notifications/read'){
         $body=jsonBody();$center=new TradeNotificationCenter();$all=boolValue($body['all']??false);$id=isset($body['id'])?(int)$body['id']:null;if(!$all&&($id===null||$id<=0))throw new InvalidArgumentException('id or all=true is required.');$center->markRead($all?null:$id);respond(['ok'=>true,'data'=>['unread_count'=>$center->unreadCount()]]);
     }
-    if($method==='POST'&&$path==='/api/bot/settings'){$controller->updateSettings(jsonBody());respond(['ok'=>true,'data'=>$controller->status()]);}
+    if($method==='POST'&&$path==='/api/bot/settings'){$commandCenter->captureCurrentSettings('api','قبل از تغییر تنظیمات');$controller->updateSettings(jsonBody());$commandCenter->captureCurrentSettings('api','بعد از تغییر تنظیمات');respond(['ok'=>true,'data'=>$controller->status()]);}
     if($method==='POST'&&$path==='/api/bot/enabled'){$b=jsonBody();$controller->setExchangeEnabled('bitpin',boolValue($b['enabled']??null));respond(['ok'=>true,'data'=>$controller->status()]);}
     if($method==='POST'&&$path==='/api/bot/live'){$b=jsonBody();$controller->setExchangeLive('bitpin',boolValue($b['enabled']??null));respond(['ok'=>true,'data'=>$controller->status()]);}
     if($method==='POST'&&preg_match('#^/api/exchanges/(bitpin|nobitex)/bot$#',$path,$m)){$b=jsonBody();$controller->setExchangeEnabled($m[1],boolValue($b['enabled']??null));respond(['ok'=>true,'data'=>$controller->status()['exchanges'][$m[1]]]);}
@@ -125,7 +140,7 @@ try{
         $exchange=exchangeName();if($exchange==='nobitex'){$client=(new NobitexOrderService())->client();respond(['ok'=>true,'exchange'=>'nobitex','data'=>NobitexDisplayMoney::orderBooksResponse($client->allOrderBooks()),'unit_policy'=>['logical_irt'=>'TOMAN display','exchange_native'=>'RLS','rls_per_toman'=>10],'time_iran'=>IranClock::nowPayload()]);}$service=new OrderService();$client=$service->client();$query=$_GET;unset($query['exchange']);respond(['ok'=>true,'exchange'=>'bitpin','data'=>$client->markets($query)]);
     }
     if($method==='GET'&&$path==='/api/wallets'){
-        $exchange=exchangeName();if($exchange==='nobitex'){$client=(new NobitexOrderService())->client();respond(['ok'=>true,'exchange'=>'nobitex','data'=>NobitexDisplayMoney::walletResponse($client->wallets()),'time_iran'=>IranClock::nowPayload()]);}$service=new OrderService();$client=$service->client();$query=$_GET;unset($query['exchange']);$data=$client->wallets($query);$service->syncTokens($client);respond(['ok'=>true,'exchange'=>'bitpin','data'=>$data]);
+        $exchange=exchangeName();if($exchange==='nobitex'){$client=(new NobitexOrderService())->client();respond(['ok'=>true,'exchange'=>'nobitex','data'=>NobitexDisplayMoney::walletResponse($client->wallets()),'time_iran'=>IranClock::nowPayload()]);}$service=new OrderService();$client=$service->client();$query=$_GET;unset($query['exchange']);$data=$client->wallets($query);$service->syncTokens($client);respond(['ok'=>true,'exchange'=>$exchange,'data'=>$data]);
     }
     if($method==='GET'&&$path==='/api/orders'){
         $exchange=exchangeName();if($exchange==='nobitex'){$client=(new NobitexOrderService())->client();$query=$_GET;unset($query['exchange']);respond(['ok'=>true,'exchange'=>'nobitex','data'=>NobitexDisplayMoney::ordersResponse($client->orders($query)),'time_iran'=>IranClock::nowPayload()]);}$service=new OrderService();$client=$service->client();$query=$_GET;unset($query['exchange']);$data=$client->orders($query);$service->syncTokens($client);respond(['ok'=>true,'exchange'=>$exchange,'data'=>$data]);
