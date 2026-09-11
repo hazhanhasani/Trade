@@ -6,6 +6,7 @@ function tradeAdminNav(string $active, string $version): void
 {
     $path = (string) (parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH) ?: '');
     if ($path === '/admin/command-center.php') $active = 'command';
+    elseif ($path === '/admin/project-health.php') $active = 'health';
     elseif ($path === '/admin/analytics.php') $active = 'analytics';
     elseif ($path === '/admin/notifications.php') $active = 'notifications';
     elseif ($path === '/admin/market.php') $active = 'market';
@@ -17,6 +18,7 @@ function tradeAdminNav(string $active, string $version): void
     $items = [
         'dashboard' => ['/admin/', 'داشبورد'],
         'command' => ['/admin/command-center.php', 'مرکز فرمان'],
+        'health' => ['/admin/project-health.php', 'پایش پروژه'],
         'market' => ['/admin/market.php', 'بازار و اخبار'],
         'trading' => ['/admin/bot/', 'معاملات'],
         'timeline' => ['/admin/timeline.php', 'تایم‌لاین'],
