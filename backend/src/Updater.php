@@ -11,7 +11,7 @@ use ZipArchive;
 final class Updater
 {
     private const DEFAULT_MANIFEST_URL = 'https://github.com/hazhanhasani/Trade/releases/download/trade-latest/latest.json';
-    private const DEFAULT_CHECK_INTERVAL = 300;
+    private const DEFAULT_CHECK_INTERVAL = 60;
 
     public static function currentVersion(): string
     {
@@ -27,14 +27,14 @@ final class Updater
     {
         $configured = (int) Config::get('updates.check_interval_seconds', self::DEFAULT_CHECK_INTERVAL);
 
-        // Older installers wrote 3600 as their default. Treat that exact legacy
-        // value as the new five-minute production default without touching the
-        // user's protected storage/config.php during an update.
-        if ($configured <= 0 || $configured === 3600) {
+        // Older installers wrote 3600 or 300 as their defaults. Treat those
+        // exact legacy values as the new one-minute production default without
+        // touching the user's protected storage/config.php during an update.
+        if ($configured <= 0 || $configured === 3600 || $configured === 300) {
             return self::DEFAULT_CHECK_INTERVAL;
         }
 
-        return max(300, min(86400, $configured));
+        return max(60, min(86400, $configured));
     }
 
     public static function manifest(): array
