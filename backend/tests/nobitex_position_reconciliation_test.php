@@ -30,6 +30,17 @@ expect(near((float)$wallets['X'], 100.0), 'Total balance must be preferred over 
 expect(near((float)$wallets['Y'], 10.0), 'activeBalance + blockedBalance fallback must preserve total inventory.');
 expect(near((float)$wallets['Z'], 5.0), 'available + blocked fallback must preserve total inventory.');
 
+$aliases = NobitexPositionReconciler::walletTotals([
+    'wallets'=>[
+        ['currency'=>'TON','balance'=>'10'],
+        ['currency'=>'GRAM','balance'=>'2'],
+        ['currency'=>'TONCOIN','balance'=>'3'],
+    ],
+]);
+expect(NobitexPositionReconciler::canonicalAsset('GRAM') === 'TON', 'GRAM must canonicalize to TON for Nobitex wallet reconciliation.');
+expect(NobitexPositionReconciler::canonicalAsset('TONCOIN') === 'TON', 'TONCOIN must canonicalize to TON for Nobitex wallet reconciliation.');
+expect(near((float)($aliases['TON'] ?? 0), 15.0), 'TON/GRAM/TONCOIN wallet aliases must accumulate into one canonical inventory total.');
+
 $position = [['id'=>1,'symbol'=>'XIRT','amount'=>100.0]];
 $none = NobitexPositionReconciler::plan($position, 100.0);
 expect(($none['action'] ?? '') === 'none', 'Equal wallet inventory must not alter a position.');
