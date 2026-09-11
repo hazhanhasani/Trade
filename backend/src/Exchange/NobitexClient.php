@@ -125,13 +125,20 @@ final class NobitexClient
 
     public function wallets(array $query = []): array
     {
-        return $this->request('POST', '/users/wallets/list', $query === [] ? ['type'=>'spot'] : $query, true);
+        $payload = $query === [] ? ['type'=>'spot'] : $query;
+        return $this->authenticatedRead(static fn() => $this->request('POST', '/users/wallets/list', $payload, true));
     }
 
-    public function orders(array $query = []): array { return $this->request('GET', '/market/orders/list', $query, true); }
+    public function orders(array $query = []): array
+    {
+        return $this->authenticatedRead(static fn() => $this->request('GET', '/market/orders/list', $query, true));
+    }
 
     /** Authenticated spot fills/trades. Nobitex currently documents 180-day history. */
-    public function trades(array $query = []): array { return $this->request('GET', '/market/trades/list', $query, true); }
+    public function trades(array $query = []): array
+    {
+        return $this->authenticatedRead(static fn() => $this->request('GET', '/market/trades/list', $query, true));
+    }
 
     public function orderStatus(?string $id = null, ?string $clientOrderId = null): array
     {
@@ -139,7 +146,7 @@ final class NobitexClient
         if($id!==null&&$id!==''){if(!ctype_digit($id))throw new \InvalidArgumentException('Invalid Nobitex order id.');$payload['id']=(int)$id;}
         elseif($clientOrderId!==null&&$clientOrderId!==''){$payload['clientOrderId']=$this->safeClientOrderId($clientOrderId);}
         else throw new \InvalidArgumentException('Nobitex order id or clientOrderId is required.');
-        return $this->request('POST','/market/orders/status',$payload,true);
+        return $this->authenticatedRead(static fn() => $this->request('POST','/market/orders/status',$payload,true));
     }
 
     public function createOrder(array $payload): array { return $this->request('POST','/market/orders/add',$payload,true); }
@@ -151,6 +158,28 @@ final class NobitexClient
         elseif($clientOrderId!==null&&$clientOrderId!==''){$payload['clientOrderId']=$this->safeClientOrderId($clientOrderId);}
         else throw new \InvalidArgumentException('Nobitex order id or clientOrderId is required.');
         return $this->request('POST','/market/orders/update-status',$payload,true);
+    }
+
+    /**
+     * One retry is allowed only for authenticated read operations. These calls
+     * are idempotent, so a DNS/connect/timeout retry cannot duplicate a trade.
+     * Order creation/cancellation deliberately bypass this helper because their
+     * remote outcome can be ambiguous after a network failure.
+     */
+    private function authenticatedRead(callable $operation): array
+    {
+        try {
+            return $operation();
+        } catch (\RuntimeException $e) {
+            if (!self::isTransientNetworkError($e->getMessage())) throw $e;
+            usleep(300000);
+            return $operation();
+        }
+    }
+
+    public static function isTransientNetworkError(string $message): bool
+    {
+        return preg_match('/Nobitex network error \((?:6|7|28)\):/i', $message) === 1;
     }
 
     private function request(string $method,string $path,array $data=[],bool $authenticated=false,bool $requireStatusOk=true):array
