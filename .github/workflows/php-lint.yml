@@ -5,11 +5,15 @@ on:
     paths:
       - 'backend/**'
       - 'android/app/src/main/java/ir/trade/app/data/ReleaseContract.kt'
+      - 'android/app/src/main/java/ir/trade/app/data/TradeApi.kt'
+      - 'android/app/src/main/java/ir/trade/app/ui/TradeAppV4.kt'
       - '.github/workflows/php-lint.yml'
   pull_request:
     paths:
       - 'backend/**'
       - 'android/app/src/main/java/ir/trade/app/data/ReleaseContract.kt'
+      - 'android/app/src/main/java/ir/trade/app/data/TradeApi.kt'
+      - 'android/app/src/main/java/ir/trade/app/ui/TradeAppV4.kt'
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -71,6 +75,8 @@ jobs:
         run: php backend/tests/trading_admin_settings_regression_test.php
       - name: Trading command center regression tests
         run: php backend/tests/command_center_test.php
+      - name: Android live panel parity regression tests
+        run: php backend/tests/android_live_panel_parity_test.php
       - name: Validate Backend ↔ Android API contract parity
         shell: bash
         run: |
