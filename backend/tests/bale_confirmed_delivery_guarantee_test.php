@@ -21,7 +21,7 @@ expectBaleDelivery(str_contains($notifier, "sent_at IS NULL"), 'Unsent trade not
 expectBaleDelivery(str_contains($notifier, "last_attempt_at < (UTC_TIMESTAMP() - INTERVAL 45 SECOND)"), 'Retry spacing must remain bounded to avoid Bale flooding.');
 expectBaleDelivery(str_contains($notifier, 'UNIQUE KEY uq_bale_trade_event (event_key)'), 'Durable outbox must prevent duplicate trade notifications.');
 
-expectBaleDelivery(preg_match('/syncConfirmedTrades\(\s*100\s*,/',$cron) === 1, 'Cron must continuously discover confirmed trades for Bale delivery.');
-expectBaleDelivery(preg_match('/flushPending\(\s*25\s*,/',$cron) === 1, 'Cron must continuously retry pending Bale trade deliveries.');
+expectBaleDelivery(preg_match('/syncConfirmedTrades\(\s*[1-9][0-9]*\s*,\s*\$pdo\s*\)/',$cron) === 1, 'Cron must continuously discover confirmed trades for Bale delivery.');
+expectBaleDelivery(preg_match('/flushPending\(\s*[1-9][0-9]*\s*,\s*\$pdo\s*\)/',$cron) === 1, 'Cron must continuously retry pending Bale trade deliveries.');
 
 fwrite(STDOUT, "Bale confirmed trade delivery guarantee regression tests passed.\n");
