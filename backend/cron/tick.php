@@ -10,6 +10,7 @@ use Trade\Integrations\BaleTradeNotifier;
 use Trade\Observability\BaleSystemAlert;
 use Trade\Observability\ErrorReporter;
 use Trade\Observability\HostHealthSentinel;
+use Trade\Observability\NobitexDecisionReporter;
 use Trade\Support\IranClock;
 use Trade\Trading\AutoTraderEngine;
 use Trade\Trading\NobitexAutoTraderEngine;
@@ -98,6 +99,11 @@ try{
 
     $nobitexResult=is_array($results['nobitex']??null)?$results['nobitex']:[];
     $bitpinResult=is_array($results['bitpin']??null)?$results['bitpin']:[];
+    try{
+        (new NobitexDecisionReporter())->report($nobitexResult,$runId);
+    }catch(Throwable $e){
+        ErrorReporter::captureThrowable($e,'warning','nobitex_decision_reporter',['exchange'=>'nobitex','run_id'=>$runId]);
+    }
     ErrorReporter::log(
         'چرخه Cron پایان یافت. وضعیت کل: '.$overall
         .' | Nobitex: '.(string)($nobitexResult['status']??'unknown')
