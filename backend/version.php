@@ -2,5 +2,5 @@
 
 declare(strict_types=1);
 
-// Coordinated release: funded-quote-first Nobitex candidate ordering and post-cost edge ranking.
-return '1.4.13';
+// Coordinated release: guarded high-volatility strategy routing without bypassing execution-cost or risk gates.
+return '1.4.14';
