@@ -2,5 +2,5 @@
 
 declare(strict_types=1);
 
-// Coordinated release: high-volatility v3 converts hot 1m RSI into a priced exhaustion penalty, keeps extreme RSI/hostile flow as hard blockers, and still requires positive post-cost tradable edge before live BUY.
-return '1.4.17';
+// Coordinated release: restore the proven profit-first v5 entry selector as the primary BUY path; multi-strategy/regime analysis remains shadow diagnostics, while execution, balance and portfolio risk guards stay active.
+return '1.4.18';

@@ -15,7 +15,9 @@ function telemetryAssert(bool $condition, string $message): void
     }
 }
 
-telemetryAssert(NobitexRuntimeModels::DECISION === 'multi_strategy_regime_router_net_edge_v1', 'Decision model must identify the current multi-strategy router.');
+telemetryAssert(NobitexRuntimeModels::STRATEGY_MODE === 'profit_first_v5_shadow_multi_strategy_v1', 'Strategy mode must identify restored profit-first primary with shadow multi-strategy diagnostics.');
+telemetryAssert(NobitexRuntimeModels::DECISION === 'profit_first_net_edge_v5_restored', 'Decision model must identify the restored profit-first entry engine.');
+telemetryAssert(NobitexRuntimeModels::SELECTION === 'positive_tradable_net_edge_after_costs_and_buffer_v5', 'Selection model must identify the positive post-cost edge gate.');
 telemetryAssert(NobitexRuntimeModels::GLOBAL_PORTFOLIO === 'global_quote_normalization_v2_toman_display', 'Global portfolio model must identify the Toman-display v2 normalizer.');
 telemetryAssert(NobitexRuntimeModels::STRATEGY_LEARNING === 'strategy_learning_v2', 'Strategy Learning model mismatch.');
 telemetryAssert(NobitexRuntimeModels::EDGE_CALIBRATION === 'adaptive_edge_calibration_v1', 'Adaptive Edge Calibration model mismatch.');
@@ -31,7 +33,10 @@ $orderService = file_get_contents(dirname(__DIR__) . '/src/Trading/NobitexOrderS
 $cron = file_get_contents(dirname(__DIR__) . '/cron/tick.php');
 telemetryAssert(is_string($signal) && is_string($engine) && is_string($orderService) && is_string($cron), 'Unable to inspect runtime telemetry sources.');
 telemetryAssert(str_contains($signal, "'decision_model'=>'" . NobitexRuntimeModels::DECISION . "'"), 'Signal engine decision model drifted from the runtime contract.');
-telemetryAssert(!str_contains($engine, 'net_edge_after_execution_quality_and_adaptive_forecast_buffer_v5'), 'Legacy v5 decision model leaked into NobitexAutoTraderEngine telemetry.');
+telemetryAssert(str_contains($signal, "'strategy_key'=>'profit_first_v5'"), 'Profit-first v5 is not marked as the primary runtime entry strategy.');
+telemetryAssert(str_contains($signal, "'shadow_multi_strategy'=>["), 'Multi-strategy diagnostics are no longer exposed as shadow telemetry.');
+telemetryAssert(!str_contains($signal, '$buyGate = $executionReady && $entryAllowed'), 'Binary multi-strategy entry gate leaked back into the primary BUY path.');
+telemetryAssert(str_contains($signal, '$buyGate = $ready && $expectedNetProfit;'), 'Primary BUY gate must be executable market plus positive tradable net edge.');
 telemetryAssert(!str_contains($engine, "'global_portfolio_model'=>'global_quote_normalization_v1'"), 'Legacy global portfolio v1 label leaked into runtime telemetry.');
 telemetryAssert(str_contains($engine, 'NobitexRuntimeModels::DECISION'), 'AutoTrader is not using canonical decision telemetry.');
 telemetryAssert(str_contains($engine, 'NobitexRuntimeModels::GLOBAL_PORTFOLIO'), 'AutoTrader is not using canonical global portfolio telemetry.');

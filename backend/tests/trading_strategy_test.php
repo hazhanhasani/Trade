@@ -35,19 +35,23 @@ $baseMarket = [
 
 $engine = new NobitexInternalSignalEngine();
 $signal = $engine->analyze($baseMarket, $prices);
-assertTrue(($signal['source'] ?? '') === 'nobitex_multi_strategy_regime_engine_v1', 'multi-strategy source marker missing');
-assertTrue(($signal['decision_model'] ?? '') === 'multi_strategy_regime_router_net_edge_v1', 'multi-strategy decision model missing');
-assertTrue(isset($signal['market_regime']['regime']), 'market regime missing');
-assertTrue(isset($signal['selected_strategy']['key']), 'selected strategy missing');
+assertTrue(($signal['source'] ?? '') === 'nobitex_profit_first_v5_shadow_multi_strategy_v1', 'restored profit-first source marker missing');
+assertTrue(($signal['decision_model'] ?? '') === 'profit_first_net_edge_v5_restored', 'restored profit-first decision model missing');
+assertTrue(($signal['strategy_key'] ?? '') === 'profit_first_v5', 'profit-first primary strategy marker missing');
+assertTrue(isset($signal['market_regime']['regime']), 'shadow market regime missing');
+assertTrue(isset($signal['selected_strategy']['key']), 'primary strategy diagnostics missing');
+assertTrue(isset($signal['shadow_multi_strategy']) && is_array($signal['shadow_multi_strategy']), 'shadow multi-strategy diagnostics missing');
 assertTrue(isset($signal['strategy_candidates']) && is_array($signal['strategy_candidates']), 'strategy candidate diagnostics missing');
-assertTrue(count($signal['strategy_candidates']) === 4, 'all four strategies should be evaluated');
+assertTrue(count($signal['strategy_candidates']) === 4, 'all four shadow strategies should still be evaluated');
 assertTrue(isset($signal['execution_quality']) && is_array($signal['execution_quality']), 'execution quality diagnostics missing');
 assertTrue((float)($signal['execution_quality']['liquidity_multiple'] ?? 0) >= 15.9, 'liquidity multiple was not calculated');
 assertTrue(isset($signal['execution_quality_score']), 'execution quality score missing');
 assertTrue(isset($signal['cost_model']['liquidity_slippage_reserve_percent']), 'liquidity cost reserve missing');
 assertTrue(isset($signal['cost_model']['adverse_flow_reserve_percent']), 'adverse flow reserve missing');
-assertTrue(isset($signal['cost_model']['regime_uncertainty_buffer_percent']), 'regime uncertainty reserve missing');
-assertTrue(isset($signal['cost_model']['strategy_uncertainty_buffer_percent']), 'strategy uncertainty reserve missing');
+assertTrue(array_key_exists('regime_uncertainty_buffer_percent', $signal['cost_model']), 'shadow regime uncertainty marker missing');
+assertTrue(array_key_exists('strategy_uncertainty_buffer_percent', $signal['cost_model']), 'shadow strategy uncertainty marker missing');
+assertTrue((float)$signal['cost_model']['regime_uncertainty_buffer_percent'] === 0.0, 'shadow regime must not harden the primary BUY gate');
+assertTrue((float)$signal['cost_model']['strategy_uncertainty_buffer_percent'] === 0.0, 'shadow strategy must not harden the primary BUY gate');
 
 $illiquid = $baseMarket;
 $illiquid['depth_quote'] = 6_000_000.0;
@@ -129,4 +133,4 @@ $weakPlan = $rotation->plan($positions, $weakCandidate, $rotationConfig, $now);
 assertTrue(($weakPlan['rotate'] ?? true) === false, 'insufficient replacement edge should not churn the portfolio');
 assertTrue(($weakPlan['reason'] ?? '') === 'replacement_advantage_insufficient', 'insufficient advantage rejection reason mismatch');
 
-echo "Nobitex multi-strategy + execution quality + portfolio rotation regression tests passed.\n";
+echo "Nobitex restored profit-first entry + shadow multi-strategy + execution quality + portfolio rotation regression tests passed.\n";

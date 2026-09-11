@@ -14,9 +14,7 @@ final class NobitexDecisionReporter
     public function report(array $result, ?string $runId = null): void
     {
         $status = (string)($result['status'] ?? 'unknown');
-        if ($status !== 'no_trade') {
-            return;
-        }
+        if ($status !== 'no_trade') return;
 
         $reason = (string)($result['reason'] ?? 'unknown');
         $candidates = is_array($result['top_candidates'] ?? null) ? $result['top_candidates'] : [];
@@ -33,9 +31,7 @@ final class NobitexDecisionReporter
 
         arsort($reasonCounts);
         $reasonSummary = [];
-        foreach ($reasonCounts as $key => $count) {
-            $reasonSummary[] = $key . '=' . $count;
-        }
+        foreach ($reasonCounts as $key => $count) $reasonSummary[] = $key . '=' . $count;
 
         $summary = [
             'تصمیم خرید Nobitex: هیچ سفارش BUY جدیدی ثبت نشد.',
@@ -43,12 +39,10 @@ final class NobitexDecisionReporter
             'کاندیداهای گزارش‌شده: ' . count($candidates) . ' | ردهای ثبت‌شده: ' . count($rejections),
             'پوزیشن فعال: ' . (string)($result['active_positions'] ?? '—') . '/' . (string)($result['max_positions'] ?? '—')
                 . ' | Pending: ' . (string)($result['pending_orders'] ?? '—') . '/' . (string)($result['max_pending_orders'] ?? '—'),
-            'محل تصمیم: backend/src/Trading/NobitexPortfolioEngine.php → runLocked() / entryBudget()',
+            'محل تصمیم: backend/src/Trading/NobitexInternalSignalEngine.php → Profit-First v5 | سپس NobitexPortfolioEngine.php → entryBudget()',
         ];
-        if ($reasonSummary !== []) {
-            $summary[] = 'خلاصه دلایل رد: ' . implode(' | ', array_slice($reasonSummary, 0, 8));
-        }
-        $summary[] = 'نکته: Edge فقط وقتی قابل معامله است که خود Strategy اجازه ورود داده باشد؛ Edge خام یا مدل تشخیصی به‌تنهایی مجوز BUY نیست.';
+        if ($reasonSummary !== []) $summary[] = 'خلاصه دلایل رد: ' . implode(' | ', array_slice($reasonSummary, 0, 8));
+        $summary[] = 'نکته: تصمیم اصلی BUY دوباره Profit-First است؛ Regime/Strategy فقط Shadow diagnostics هستند. ورود با Edge قابل معامله مثبت بعد از کارمزد/Spread/Slippage/Buffer و سپس Risk/Balance/Capacity تعیین می‌شود.';
 
         ErrorReporter::log(
             implode("\n", $summary),
@@ -61,6 +55,8 @@ final class NobitexDecisionReporter
                 'decision_reason'=>$reason,
                 'candidate_count'=>count($candidates),
                 'rejection_count'=>count($rejections),
+                'primary_entry_model'=>'profit_first_v5',
+                'multi_strategy_role'=>'shadow_diagnostics',
             ],
             'info'
         );
@@ -78,7 +74,7 @@ final class NobitexDecisionReporter
                     . ($score !== null ? ' | Score=' . self::num($score, 2) : '')
                     . ' | Strategy=' . (string)($candidate['strategy_key'] ?? '—')
                     . ' | Regime=' . (string)($candidate['market_regime'] ?? '—')
-                    . ' | RawEdge=' . self::pct($candidate['expected_net_edge_percent'] ?? null)
+                    . ' | NetEdge=' . self::pct($candidate['expected_net_edge_percent'] ?? null)
                     . ' | TradableEdge=' . self::pct($candidate['tradable_net_edge_percent'] ?? null)
                     . ' | RequiredBuffer=' . self::pct($candidate['required_edge_buffer_percent'] ?? null)
                     . ' | Spread=' . self::pct($candidate['spread_percent'] ?? null)
@@ -116,10 +112,11 @@ final class NobitexDecisionReporter
         }
 
         $extra = [];
+        $candidateSet = $this->candidateSymbolSet($candidates);
         foreach ($rejections as $row) {
             if (!is_array($row)) continue;
             $symbol = strtoupper((string)($row['symbol'] ?? ''));
-            if ($symbol === '' || array_key_exists($symbol, $this->candidateSymbolSet($candidates))) continue;
+            if ($symbol === '' || isset($candidateSet[$symbol])) continue;
             $r = (string)($row['reason'] ?? 'unknown');
             $extra[] = $symbol . ': ' . $r . ' — ' . self::reasonFa($r);
             if (count($extra) >= 6) break;
@@ -149,11 +146,17 @@ final class NobitexDecisionReporter
     private static function reasonFa(string $reason): string
     {
         return match ($reason) {
-            'no_candidate_passed_signal_and_risk_filters' => 'هیچ بازار بررسی‌شده‌ای همه شروط سیگنال، هزینه اجرا و ریسک را هم‌زمان پاس نکرد.',
+            'no_candidate_passed_signal_and_risk_filters' => 'هیچ بازار بررسی‌شده‌ای هم‌زمان Edge مثبت قابل معامله و تمام کنترل‌های اجرایی/ریسک را پاس نکرد.',
             'no_eligible_markets' => 'در این Tick بازار واجد شرایط اولیه برای تحلیل/ورود پیدا نشد.',
+            'positive_tradable_net_edge_after_costs_and_buffer' => 'مدل Profit-First بعد از تمام هزینه‌ها و Buffer هنوز Edge مثبت دارد و BUY مجاز است.',
+            'edge_below_adaptive_safety_buffer' => 'پیش‌بینی حرکت پس از کارمزد، Spread، Slippage و حاشیه خطای تطبیقی Edge مثبت کافی برای BUY نساخته است.',
+            'expected_forward_move_negative_after_exit_cost' => 'برآورد حرکت آینده پس از هزینه خروج منفی است و جهت سیگنال به SELL متمایل شده است.',
+            'liquidity_not_executable' => 'عمق نقدشوندگی نسبت به حداقل سفارش کافی نیست و اجرای امن سفارش تضمین نمی‌شود.',
+            'spread_not_executable' => 'Spread فعلی از سقف پویا برای اجرای معامله بزرگ‌تر است.',
+            'market_quality_not_ready' => 'یکی از مؤلفه‌های کیفیت اجرای بازار معتبر/قابل استفاده نیست.',
             'already_positioned' => 'همین دارایی از قبل پوزیشن فعال دارد و ورود تکراری مسدود است.',
-            'range_reversion_not_entry_ready' => 'بازار رنج است اما شرایط برگشت به میانگین هنوز نقطه ورود معتبر نساخته است.',
-            'strategy_edge_below_execution_costs' => 'برتری پیش‌بینی‌شده بعد از Spread، Buffer و هزینه اجرا برای معامله کافی نیست.',
+            'range_reversion_not_entry_ready' => 'این علت مربوط به Shadow/نسخه چنداستراتژی است و دیگر به‌تنهایی گیت اصلی Profit-First را نمی‌بندد.',
+            'strategy_edge_below_execution_costs' => 'این علت مربوط به مدل چنداستراتژی است؛ در مسیر اصلی، Edge Profit-First بعد از کل هزینه‌ها ملاک است.',
             'insufficient_balance' => 'موجودی Quote لازم برای این بازار کافی نیست.',
             'daily_loss_limit_reached' => 'حد زیان روزانه تنظیم‌شده فعال شده و BUY جدید را متوقف کرده است.',
             'symbol_cooldown_active' => 'Cooldown همین نماد هنوز تمام نشده است.',
@@ -165,21 +168,20 @@ final class NobitexDecisionReporter
             'minimum_order_rounding' => 'بعد از گردکردن مقدار/قیمت، سفارش به حداقل معتبر صرافی نمی‌رسد.',
             'pending_order_capacity_reached' => 'ظرفیت سفارش‌های Pending پر است و ورود تازه تا تعیین تکلیف آن‌ها متوقف است.',
             'no_quote_balance' => 'هیچ موجودی قابل استفاده IRT/USDT برای ورود وجود ندارد.',
-            'high_volatility_alignment_below_threshold' => 'هم‌جهتی تایم‌فریم‌ها در بازار پرنوسان کمتر از حد لازم است؛ حرکت هنوز تأیید چندتایم‌فریمی ندارد.',
-            'high_volatility_efficiency_below_threshold' => 'Efficiency حرکت پایین است؛ بخش زیادی از نوسان رفت‌وبرگشتی/نویز است و روند جهت‌دار قابل اتکا نیست.',
-            'high_volatility_directional_move_below_threshold' => 'حرکت جهت‌دار ۳۰ دقیقه‌ای برای ورود در وضعیت پرنوسان هنوز به حد لازم نرسیده است.',
-            'high_volatility_momentum_1m_not_positive' => 'مومنتوم کوتاه‌مدت ۱ دقیقه مثبت نیست و تأیید ورود سریع وجود ندارد.',
-            'high_volatility_momentum_5m_not_positive' => 'مومنتوم ۵ دقیقه مثبت نیست و حرکت پایدار کوتاه‌مدت تأیید نشده است.',
-            'high_volatility_momentum_15m_negative' => 'مومنتوم ۱۵ دقیقه منفی است و جهت بزرگ‌تر با BUY هم‌سو نیست.',
-            'high_volatility_orderbook_adverse' => 'عدم‌تعادل Order Book به‌شکل واضح علیه خریدار است و فشار فروش برای ورود زیاد است.',
-            // Historical v2 code kept for old stored runs.
-            'high_volatility_rsi_1m_exhausted' => 'در نسخه قبلی، RSI یک‌دقیقه‌ای داغ به‌صورت سخت BUY را رد می‌کرد.',
-            'high_volatility_rsi_1m_extreme' => 'RSI یک‌دقیقه‌ای به ناحیه افراطی رسیده؛ حتی در روند قوی، ورود تازه برای جلوگیری از تعقیب سقف مسدود است.',
-            'high_volatility_rsi_5m_exhausted' => 'RSI پنج‌دقیقه‌ای وارد ناحیه فرسودگی شده و ورود جدید پرریسک است.',
-            'high_volatility_not_directional_enough' => 'بازار پرنوسان است اما مجموعه شروط جهت‌داری برای BUY کامل نشده است.',
-            'high_volatility_edge_not_positive' => 'ساختار جهت‌دار تأیید شده ولی Edge اقتصادی نهایی هنوز مثبت نیست.',
+            'high_volatility_alignment_below_threshold',
+            'high_volatility_efficiency_below_threshold',
+            'high_volatility_directional_move_below_threshold',
+            'high_volatility_momentum_1m_not_positive',
+            'high_volatility_momentum_5m_not_positive',
+            'high_volatility_momentum_15m_negative',
+            'high_volatility_orderbook_adverse',
+            'high_volatility_rsi_1m_exhausted',
+            'high_volatility_rsi_1m_extreme',
+            'high_volatility_rsi_5m_exhausted',
+            'high_volatility_not_directional_enough',
+            'high_volatility_edge_not_positive' => 'این وضعیت در Shadow Multi-Strategy ثبت شده است؛ در نسخه اصلاح‌شده به‌تنهایی BUY اصلی Profit-First را قفل نمی‌کند.',
             'not_explicitly_recorded' => 'این Candidate در Top List دیده شده ولی دلیل جداگانه‌ای در آرایه Rejections ثبت نشده است.',
-            default => 'Guard یا شرط داخلی موتور معامله این Candidate را برای BUY نپذیرفته است.',
+            default => 'یکی از شروط سیگنال، اجرا یا ریسک این Candidate را برای BUY نپذیرفته است.',
         };
     }
 
