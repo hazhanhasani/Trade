@@ -2,5 +2,5 @@
 
 declare(strict_types=1);
 
-// Coordinated release: project health, operator workflow, documentation, and private-surface indexing hardening.
-return '1.4.8';
+// Coordinated release: authoritative Bitpin IP diagnostics and clear post-update Cron state.
+return '1.4.9';

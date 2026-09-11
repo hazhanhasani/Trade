@@ -43,13 +43,28 @@ function detectEgressIp(): ?string {
     if (!extension_loaded('curl')) return null;
     $ch=curl_init('https://api.ipify.org');
     if($ch===false)return null;
-    curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_CONNECTTIMEOUT=>2,CURLOPT_TIMEOUT=>3,CURLOPT_FOLLOWLOCATION=>false,CURLOPT_PROTOCOLS=>CURLPROTO_HTTPS,CURLOPT_HTTPHEADER=>['Accept: text/plain','User-Agent: Trade/repair']]);
+    curl_setopt_array($ch,[
+        CURLOPT_RETURNTRANSFER=>true,
+        CURLOPT_CONNECTTIMEOUT=>2,
+        CURLOPT_TIMEOUT=>3,
+        CURLOPT_FOLLOWLOCATION=>false,
+        CURLOPT_PROTOCOLS=>CURLPROTO_HTTPS,
+        CURLOPT_IPRESOLVE=>CURL_IPRESOLVE_V4,
+        CURLOPT_PROXY=>'',
+        CURLOPT_NOPROXY=>'*',
+        CURLOPT_HTTPHEADER=>['Accept: text/plain','User-Agent: Trade/repair'],
+    ]);
     $body=curl_exec($ch);
     $status=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE);
     curl_close($ch);
     if(!is_string($body)||$status!==200)return null;
     $ip=trim($body);
     return filter_var($ip,FILTER_VALIDATE_IP)?$ip:null;
+}
+function bitpinReportedIp(string $message): ?string {
+    if(!preg_match('/wrong\s+ip\s+((?:\d{1,3}\.){3}\d{1,3})/i',$message,$m))return null;
+    $ip=(string)($m[1]??'');
+    return filter_var($ip,FILTER_VALIDATE_IP,FILTER_FLAG_IPV4)?$ip:null;
 }
 function exchangeError(?array $summary): string {
     if (!$summary) return '';
@@ -145,6 +160,11 @@ if(is_file($heartbeatPath)){
 }
 $heartbeatFresh=$heartbeatAge!==null&&$heartbeatAge<=150;
 if($heartbeatFresh)$cronFresh=true;
+$heartbeatStatus=strtolower(trim((string)($heartbeat['status']??'')));
+$heartbeatVersion=trim((string)($heartbeat['backend_version']??''));
+$heartbeatOnCurrent=$heartbeatVersion!==''&&version_compare($heartbeatVersion,$currentVersion,'==');
+$updateDeferredCurrent=$heartbeatFresh&&$heartbeatOnCurrent&&$heartbeatStatus==='updated_deferred';
+$currentVersionRunPending=$updateDeferredCurrent&&($runVersion===''||$runIsOldVersion);
 
 $cronPath=realpath(dirname(__DIR__,2).'/cron/tick.php')?:dirname(__DIR__,2).'/cron/tick.php';
 $phpVersionPath='/opt/cpanel/ea-php'.PHP_MAJOR_VERSION.PHP_MINOR_VERSION.'/root/usr/bin/php';
@@ -153,20 +173,26 @@ $cronLog=dirname($cronPath).'/../storage/cron.log';
 $cpanelCommand=escapeshellarg($phpCli).' '.escapeshellarg($cronPath).' >> '.escapeshellarg($cronLog).' 2>&1';
 $rawCrontab='* * * * * '.$cpanelCommand;
 $egressIp=detectEgressIp();
+$bitpinIp=bitpinReportedIp($bitpinStatus);
+$bitpinIpMismatch=$bitpinIp!==null&&$egressIp!==null&&$bitpinIp!==$egressIp;
 $csrf=h((string)$_SESSION['csrf']);
-?><!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Trade Repair Center</title><style>*{box-sizing:border-box}body{margin:0;background:#f4f7fb;color:#172033;font-family:Tahoma,Arial,sans-serif}.wrap{max-width:900px;margin:auto;padding:18px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center}.card{background:#fff;border:1px solid #e3e9f2;border-radius:20px;padding:18px;margin-top:14px;box-shadow:0 8px 28px #14213a0b}.good{background:#ecfff5;border-color:#bfe8d3}.bad{background:#fff4f4;border-color:#f3c8c8}.msg{background:#ebfff4;color:#176548;padding:12px;border-radius:12px;margin:12px 0}.err{background:#fff0f0;color:#a11;padding:12px;border-radius:12px;margin:12px 0}.warnbox{background:#fff8e8;color:#7b5200;padding:12px;border-radius:12px;margin:12px 0}.muted{color:#68748a;font-size:13px}.btn{border:0;border-radius:11px;padding:11px 14px;font-weight:700;cursor:pointer;background:#1769ff;color:#fff;text-decoration:none;display:inline-block}.btn.secondary{background:#edf4ff;color:#1454aa}.btn.warn{background:#9b5d00}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}input{width:100%;padding:12px;border:1px solid #ccd5e3;border-radius:10px;margin:6px 0 12px}.code{direction:ltr;text-align:left;white-space:pre-wrap;word-break:break-all;background:#101827;color:#eef5ff;padding:13px;border-radius:12px;font-family:monospace;font-size:12px}.status{font-weight:700}.ok{color:#087857}.no{color:#b42318}.warntext{color:#9b5d00}h1,h2{margin-top:0}@media(max-width:650px){.wrap{padding:11px}.top{align-items:flex-start;flex-direction:column}.btn{width:100%;text-align:center}}</style></head><body><div class="wrap">
+?><!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Trade Repair Center</title><style>*{box-sizing:border-box}body{margin:0;background:#f4f7fb;color:#172033;font-family:Tahoma,Arial,sans-serif}.wrap{max-width:900px;margin:auto;padding:18px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center}.card{background:#fff;border:1px solid #e3e9f2;border-radius:20px;padding:18px;margin-top:14px;box-shadow:0 8px 28px #14213a0b}.good{background:#ecfff5;border-color:#bfe8d3}.bad{background:#fff4f4;border-color:#f3c8c8}.msg{background:#ebfff4;color:#176548;padding:12px;border-radius:12px;margin:12px 0}.err{background:#fff0f0;color:#a11;padding:12px;border-radius:12px;margin:12px 0}.warnbox{background:#fff8e8;color:#7b5200;padding:12px;border-radius:12px;margin:12px 0}.infobox{background:#edf6ff;color:#174f9f;padding:12px;border-radius:12px;margin:12px 0}.muted{color:#68748a;font-size:13px}.btn{border:0;border-radius:11px;padding:11px 14px;font-weight:700;cursor:pointer;background:#1769ff;color:#fff;text-decoration:none;display:inline-block}.btn.secondary{background:#edf4ff;color:#1454aa}.btn.warn{background:#9b5d00}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}input{width:100%;padding:12px;border:1px solid #ccd5e3;border-radius:10px;margin:6px 0 12px}.code{direction:ltr;text-align:left;white-space:pre-wrap;word-break:break-all;background:#101827;color:#eef5ff;padding:13px;border-radius:12px;font-family:monospace;font-size:12px;max-height:420px;overflow:auto}.status{font-weight:700}.ok{color:#087857}.no{color:#b42318}.warntext{color:#9b5d00}details{margin-top:12px}summary{cursor:pointer;font-weight:700}h1,h2{margin-top:0}@media(max-width:650px){.wrap{padding:11px}.top{align-items:flex-start;flex-direction:column}.btn{width:100%;text-align:center}}</style></head><body><div class="wrap">
 <div class="top"><div><h1 style="margin-bottom:5px">مرکز تعمیر Trade</h1><div class="muted">Backend <?=h($currentVersion)?> — Bitpin Authentication + Cron Diagnostics</div></div><div class="row"><a class="btn secondary" href="/admin/cron-run.php">اجرای تست Cron</a><a class="btn secondary" href="/admin/">بازگشت به پنل</a></div></div>
 <?php if($message):?><div class="msg"><?=h($message)?></div><?php endif;?><?php if($error):?><div class="err"><?=h($error)?></div><?php endif;?>
-<div class="card <?=$bitpinOk?'good':'bad'?>"><h2>Bitpin API</h2><p class="status <?=$bitpinOk?'ok':'no'?>">● <?=h($bitpinStatus)?></p><p class="muted">نتیجه خطای خود Bitpin برای تشخیص IP معتبرتر از IP عمومی ipify است.</p><div class="row"><form method="post"><input type="hidden" name="csrf" value="<?=$csrf?>"><input type="hidden" name="action" value="test_current"><button class="btn" type="submit">ورود مجدد و تست Bitpin</button></form><form method="post"><input type="hidden" name="csrf" value="<?=$csrf?>"><input type="hidden" name="action" value="reset_tokens"><button class="btn warn" type="submit">پاک‌سازی توکن‌های قدیمی و ورود مجدد</button></form></div><?php if($egressIp):?><p class="muted">IP مشاهده‌شده توسط سرویس عمومی: <b dir="ltr"><?=h($egressIp)?></b></p><?php endif;?></div>
-<div class="card"><h2>جایگزینی API Key / Secret Key</h2><p class="muted">کلید جدید فقط در صورت موفق شدن Authentication و Wallet API ذخیره می‌شود.</p><form method="post" autocomplete="off"><input type="hidden" name="csrf" value="<?=$csrf?>"><input type="hidden" name="action" value="save_credentials"><label>Bitpin API Key</label><input name="api_key" required autocomplete="off" spellcheck="false" dir="ltr"><label>Bitpin Secret Key</label><input type="password" name="secret_key" required autocomplete="new-password" spellcheck="false" dir="ltr"><button class="btn" type="submit">ذخیره، ورود مجدد و تست</button></form></div>
+<div class="card <?=$bitpinOk?'good':'bad'?>"><h2>Bitpin API</h2><p class="status <?=$bitpinOk?'ok':'no'?>">● <?=h($bitpinStatus)?></p>
+<?php if($bitpinIp!==null):?><div class="warnbox"><b>IP معتبر برای Whitelist از دید خود Bitpin:</b> <span dir="ltr"><b><?=h($bitpinIp)?></b></span><br>این همان IPی است که Bitpin روی درخواست Authentication دیده است. تا وقتی این IP در محدودیت IP کلید Bitpin مجاز نباشد، تعویض Token یا API Key به‌تنهایی خطای <span dir="ltr">wrong ip</span> را حل نمی‌کند.</div><?php endif;?>
+<?php if($bitpinIpMismatch):?><div class="infobox"><b>مسیر خروجی مقصدها متفاوت است.</b><br>Bitpin درخواست را از <span dir="ltr"><?=h($bitpinIp)?></span> می‌بیند، ولی سرویس عمومی ipify آدرس <span dir="ltr"><?=h($egressIp)?></span> را می‌بیند. روی Shared Hosting/NAT این حالت ممکن است رخ دهد؛ برای Allowed IP باید مقدار اعلام‌شده توسط خود Bitpin ملاک باشد.</div><?php endif;?>
+<p class="muted">نتیجه خطای خود Bitpin برای تشخیص IP معتبرتر از IP عمومی است. تست عمومی فقط برای مقایسه مسیر شبکه نمایش داده می‌شود.</p><div class="row"><form method="post"><input type="hidden" name="csrf" value="<?=$csrf?>"><input type="hidden" name="action" value="test_current"><button class="btn" type="submit">ورود مجدد و تست Bitpin</button></form><form method="post"><input type="hidden" name="csrf" value="<?=$csrf?>"><input type="hidden" name="action" value="reset_tokens"><button class="btn warn" type="submit">پاک‌سازی توکن‌های قدیمی و ورود مجدد</button></form></div><?php if($egressIp):?><p class="muted">IP مشاهده‌شده توسط سرویس عمومی: <b dir="ltr"><?=h($egressIp)?></b></p><?php endif;?></div>
+<div class="card"><h2>جایگزینی API Key / Secret Key</h2><p class="muted">کلید جدید فقط در صورت موفق شدن Authentication و Wallet API ذخیره می‌شود. اگر خطا «wrong ip» است ابتدا Allowed IP کلید را با IP اعلام‌شده توسط خود Bitpin هماهنگ کن.</p><form method="post" autocomplete="off"><input type="hidden" name="csrf" value="<?=$csrf?>"><input type="hidden" name="action" value="save_credentials"><label>Bitpin API Key</label><input name="api_key" required autocomplete="off" spellcheck="false" dir="ltr"><label>Bitpin Secret Key</label><input type="password" name="secret_key" required autocomplete="new-password" spellcheck="false" dir="ltr"><button class="btn" type="submit">ذخیره، ورود مجدد و تست</button></form></div>
 <div class="card <?=$cronFresh?'good':($lastRun?'':'bad')?>"><h2>Cron</h2>
 <?php if($heartbeat):?><p class="status <?=$heartbeatFresh?'ok':'warntext'?>">● Heartbeat واقعی CLI: <?=h($heartbeatAge===null?'نامشخص':$heartbeatAge.' ثانیه قبل')?> — <?=h($heartbeat['status']??'unknown')?> — v<?=h($heartbeat['backend_version']??'?')?></p><?php else:?><p class="status warntext">● هنوز Heartbeat نسخه جدید ثبت نشده است؛ یعنی cron/tick.php جدید هنوز واقعاً اجرا نشده.</p><?php endif;?>
-<?php if($lastRun):?><?php if($cronFresh):?><p class="status ok">● Cron تازه اجرا شده است.</p><?php else:?><p class="status warntext">● آخرین bot_run بیش از ۱۵۰ ثانیه قبل بوده؛ این نتیجه جاری نیست.</p><?php endif;?>
+<?php if($updateDeferredCurrent):?><div class="infobox"><b>آپدیت <?=h($currentVersion)?> با موفقیت داخل Cron نصب شده است.</b><br>وضعیت <span dir="ltr">updated_deferred</span> خطا نیست؛ Trade عمداً همان Tick را بعد از جایگزینی Backend متوقف می‌کند تا کد قدیمی و جدید در یک Process مخلوط نشوند. اجرای بعدی Cron باید یک <span dir="ltr">bot_run</span> کامل با نسخه <?=h($currentVersion)?> بسازد.</div><?php endif;?>
+<?php if($lastRun):?><?php if($cronFresh):?><p class="status ok">● Cron فعال و تازه است<?=$currentVersionRunPending?'؛ اجرای کامل نسخه جدید در Tick بعدی ثبت می‌شود.':'.'?></p><?php else:?><p class="status warntext">● آخرین bot_run بیش از ۱۵۰ ثانیه قبل بوده؛ این نتیجه جاری نیست.</p><?php endif;?>
 <p>آخرین نتیجه ذخیره‌شده: <b class="<?=($lastRun['status']??'')==='success'?'ok':'no'?>"><?=h($lastRun['status'])?></b><?php if($runVersion!==''):?> — نسخه <?=h($runVersion)?><?php endif;?></p>
-<?php if($runIsOldVersion):?><div class="warnbox"><b>این خطا قدیمی است.</b><br>آخرین اجرای ذخیره‌شده متعلق به Backend <?=h($runVersion)?> است، ولی نسخه نصب‌شده <?=h($currentVersion)?> است. این پیام نباید به‌عنوان خطای فعلی نسخه جدید تفسیر شود.</div><?php endif;?>
+<?php if($runIsOldVersion):?><div class="warnbox"><b>این bot_run متعلق به نسخه قبلی است.</b><br>آخرین اجرای ذخیره‌شده متعلق به Backend <?=h($runVersion)?> است، ولی نسخه نصب‌شده <?=h($currentVersion)?> است. <?=$currentVersionRunPending?'Heartbeat نسخه جدید موجود است؛ یک Tick دیگر لازم است تا نتیجه کامل نسخه جدید جایگزین این رکورد شود.':'این رکورد را به‌عنوان وضعیت فعلی نسخه جدید تفسیر نکن.'?></div><?php endif;?>
 <?php if(($lastRun['status']??'')==='failed'&&!$runIsOldVersion):?><div class="err"><b>خطای اجرای آخر نسخه فعلی:</b><br><?=h($lastRunError!==''?$lastRunError:'جزئیات در summary_json ثبت شده است.')?></div><?php endif;?>
-<?php if($lastSummary):?><div class="code"><?=h(json_encode($lastSummary,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES))?></div><?php endif;?>
+<?php if($lastSummary):?><details <?=$runIsOldVersion?'':'open'?>><summary><?=$runIsOldVersion?'نمایش JSON اجرای نسخه قبلی':'نمایش JSON اجرای آخر'?></summary><div class="code"><?=h(json_encode($lastSummary,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES))?></div></details><?php endif;?>
 <?php else:?><p class="status no">● هنوز هیچ اجرای Cron ثبت نشده است.</p><?php endif;?>
-<div class="row" style="margin-top:12px"><a class="btn" href="/admin/cron-run.php">اجرای Cron همین حالا و دیدن Heartbeat/Log</a></div>
+<div class="row" style="margin-top:12px"><a class="btn" href="/admin/cron-run.php"><?=$currentVersionRunPending?'اجرای Tick بعدی همین حالا':'اجرای Cron همین حالا و دیدن Heartbeat/Log'?></a></div>
 <p><b>در cPanel → Cron Jobs:</b> زمان‌بندی را روی Every Minute بگذار و فقط Command زیر را وارد کن؛ ستاره‌ها را داخل Command وارد نکن.</p><div class="code"><?=h($cpanelCommand)?></div><p class="muted">معادل خط کامل crontab:</p><div class="code"><?=h($rawCrontab)?></div><p class="muted">خروجی در storage/cron.log ثبت می‌شود.</p></div>
 </div></body></html>
