@@ -9,14 +9,14 @@ use Trade\Trading\NobitexMarketRegimeDetector;
 /**
  * A deliberately strict strategy for HIGH_VOLATILITY regimes.
  *
- * High volatility is no longer an unconditional dead zone. The strategy only
- * advertises a positive gross edge when volatility is directional, aligned
- * across timeframes and not obviously exhausted. The main signal engine still
- * requires positive tradable net edge after fees, spread, slippage and buffer.
+ * High volatility is not an unconditional dead zone, but a positive edge is
+ * actionable only when the move is directional, aligned across timeframes and
+ * not obviously exhausted. The main signal engine still requires positive
+ * tradable net edge after fees, spread, slippage and uncertainty buffer.
  */
 final class HighVolatilityMomentumStrategy implements NobitexStrategyInterface
 {
-    public function key(): string { return 'high_volatility_momentum_v1'; }
+    public function key(): string { return 'high_volatility_momentum_v2'; }
 
     public function evaluate(array $context, array $regime): array
     {
@@ -62,7 +62,7 @@ final class HighVolatilityMomentumStrategy implements NobitexStrategyInterface
             + max(0.0, (0.72 - $upAlignment) * 0.90)
             + max(0.0, -$imbalance) * 0.25;
 
-        $gross = ($momentum * 0.48)
+        $rawGross = ($momentum * 0.48)
             + ($trend * 0.34)
             + ($macd * 0.70)
             + (max(0.0, $directionalMove) * 0.16)
@@ -70,19 +70,32 @@ final class HighVolatilityMomentumStrategy implements NobitexStrategyInterface
             - $exhaustion
             - $noisePenalty;
 
-        $directionalUp = $m1 > 0.0
-            && $m5 > 0.0
-            && $m15 >= 0.0
-            && $upAlignment >= 0.66
-            && $efficiency >= 0.30
-            && $directionalMove > 0.20
-            && $imbalance > -0.20
-            && $rsi1 < 84.0
-            && $rsi5 < 82.0;
+        $entryChecks = [
+            'up_alignment_below_0_66'=>$upAlignment >= 0.66,
+            'efficiency_below_0_30'=>$efficiency >= 0.30,
+            'directional_move_below_0_20'=>$directionalMove > 0.20,
+            'momentum_1m_not_positive'=>$m1 > 0.0,
+            'momentum_5m_not_positive'=>$m5 > 0.0,
+            'momentum_15m_negative'=>$m15 >= 0.0,
+            'orderbook_imbalance_adverse'=>$imbalance > -0.20,
+            'rsi_1m_exhausted'=>$rsi1 < 84.0,
+            'rsi_5m_exhausted'=>$rsi5 < 82.0,
+        ];
+        $failedEntryGuards = [];
+        foreach ($entryChecks as $guard => $passed) {
+            if (!$passed) $failedEntryGuards[] = $guard;
+        }
+        $directionalUp = $failedEntryGuards === [];
 
         $directionalDown = $downAlignment >= 0.66
             && $directionalMove < -0.20
             && ($m1 < 0.0 || $m5 < 0.0);
+
+        // A positive model estimate must never be exposed as an actionable
+        // strategy edge when the directional gate itself failed. Keep the raw
+        // estimate in diagnostics for forensics, but cap the advertised edge at
+        // zero until every directional condition is satisfied.
+        $gross = $directionalUp ? $rawGross : min(0.0, $rawGross);
 
         $entry = $eligible && $directionalUp && $gross > 0.0;
         $exit = $eligible && ($directionalDown || $gross < 0.0);
@@ -101,7 +114,7 @@ final class HighVolatilityMomentumStrategy implements NobitexStrategyInterface
         if ($eligible) {
             if ($entry) $reason = 'directional_high_volatility_momentum';
             elseif ($directionalDown) $reason = 'high_volatility_downside_bias';
-            elseif (!$directionalUp) $reason = 'high_volatility_not_directional_enough';
+            elseif (!$directionalUp) $reason = $this->primaryGuardReason($failedEntryGuards);
             else $reason = 'high_volatility_edge_not_positive';
         }
 
@@ -115,6 +128,17 @@ final class HighVolatilityMomentumStrategy implements NobitexStrategyInterface
             'reason'=>$reason,
             'holding_horizon_minutes'=>60,
             'diagnostics'=>[
+                'raw_model_gross_edge_percent'=>round(is_finite($rawGross) ? $rawGross : 0.0, 4),
+                'actionable_gross_edge_percent'=>round(is_finite($gross) ? $gross : 0.0, 4),
+                'directional_up'=>$directionalUp,
+                'directional_down'=>$directionalDown,
+                'failed_entry_guards'=>$failedEntryGuards,
+                'entry_checks'=>$entryChecks,
+                'momentum_1m_percent'=>round($m1,4),
+                'momentum_5m_percent'=>round($m5,4),
+                'momentum_15m_percent'=>round($m15,4),
+                'rsi_1m'=>round($rsi1,4),
+                'rsi_5m'=>round($rsi5,4),
                 'momentum_blend_percent'=>round($momentum,4),
                 'trend_blend_percent'=>round($trend,4),
                 'macd_pressure_percent'=>round($macd,4),
@@ -128,6 +152,26 @@ final class HighVolatilityMomentumStrategy implements NobitexStrategyInterface
                 'noise_penalty_percent'=>round($noisePenalty,4),
             ],
         ];
+    }
+
+    /** @param list<string> $failed */
+    private function primaryGuardReason(array $failed): string
+    {
+        $priority = [
+            'up_alignment_below_0_66'=>'high_volatility_alignment_below_threshold',
+            'efficiency_below_0_30'=>'high_volatility_efficiency_below_threshold',
+            'directional_move_below_0_20'=>'high_volatility_directional_move_below_threshold',
+            'momentum_5m_not_positive'=>'high_volatility_momentum_5m_not_positive',
+            'momentum_15m_negative'=>'high_volatility_momentum_15m_negative',
+            'momentum_1m_not_positive'=>'high_volatility_momentum_1m_not_positive',
+            'orderbook_imbalance_adverse'=>'high_volatility_orderbook_adverse',
+            'rsi_1m_exhausted'=>'high_volatility_rsi_1m_exhausted',
+            'rsi_5m_exhausted'=>'high_volatility_rsi_5m_exhausted',
+        ];
+        foreach ($priority as $guard => $reason) {
+            if (in_array($guard, $failed, true)) return $reason;
+        }
+        return 'high_volatility_not_directional_enough';
     }
 
     private function clamp(float $value, float $min, float $max): float
