@@ -378,12 +378,16 @@ final class NobitexPortfolioEngine
 
         $portfolioMaxPct = $this->floatSetting($pdo, 'nobitex_portfolio_exposure_percent', 60.0, 10.0, 90.0);
         $maxPositions = $this->intSetting($pdo, 'nobitex_max_positions', 5, 1, 20);
+        $adaptiveSoftMax = min($maxPositions, $this->intSetting($pdo, 'nobitex_effective_max_positions', $maxPositions, 1, 20));
+        $adaptivePositionMultiplier = max(0.25, min(1.0, $adaptiveSoftMax / max(1, $maxPositions)));
         $capacity = max(0.0, ($portfolio * ($portfolioMaxPct / 100.0)) - $exposure);
         $exposurePct = $portfolio > 0 ? ($exposure / $portfolio) * 100.0 : 0.0;
         $configuredPerPositionPct = min((float) $settings['position_percent'], (float) $settings['max_position_percent']);
         $slotAlignedPct = $portfolioMaxPct / max(1, $maxPositions);
         $baseEffectivePerPositionPct = min($configuredPerPositionPct, $slotAlignedPct);
-        $effectivePerPositionPct = $baseEffectivePerPositionPct * $learningMultiplier;
+        // Adaptive capacity is deliberately soft: it scales new position size
+        // instead of lowering the hard number of positions the user configured.
+        $effectivePerPositionPct = $baseEffectivePerPositionPct * $learningMultiplier * $adaptivePositionMultiplier;
         $context = [
             'configured_position_percent'=>round($configuredPerPositionPct, 4),
             'base_effective_position_percent'=>round($baseEffectivePerPositionPct, 4),
@@ -392,6 +396,9 @@ final class NobitexPortfolioEngine
             'market_regime'=>$marketRegime,
             'strategy_learning_multiplier'=>round($learningMultiplier, 4),
             'strategy_learning_reason'=>$learning['reason'] ?? null,
+            'adaptive_soft_max_positions'=>$adaptiveSoftMax,
+            'adaptive_position_size_multiplier'=>round($adaptivePositionMultiplier, 4),
+            'capacity_mode'=>'configured_hard_cap_adaptive_soft_sizing',
             'strategy_learning_stats'=>$learning['stats'] ?? null,
             'portfolio_exposure_percent'=>round($exposurePct, 4),
             'portfolio_exposure_limit_percent'=>$portfolioMaxPct,

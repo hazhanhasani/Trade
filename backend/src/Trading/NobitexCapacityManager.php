@@ -43,10 +43,20 @@ final class NobitexCapacityManager
         if (!$this->orders->credentialsConfigured() || !$this->orders->liveEnabled()) return $this->result('no_reduction','live_execution_unavailable');
 
         $configured = $this->intSetting($pdo,'nobitex_max_positions',5,1,20);
-        $effective = min($configured,$this->intSetting($pdo,'nobitex_effective_max_positions',$configured,1,20));
+        $adaptiveSoftMax = min($configured,$this->intSetting($pdo,'nobitex_effective_max_positions',$configured,1,20));
+        // Only the user's configured max is a hard count limit. Adaptive
+        // capacity is a sizing hint and must not liquidate an otherwise valid
+        // position merely because recent performance became defensive.
+        $effective = $configured;
         $positions = $pdo->query("SELECT * FROM nobitex_autotrade_positions WHERE status IN ('pending_open','open','pending_close') ORDER BY id ASC LIMIT 30")->fetchAll();
         $activeCount = count($positions);
-        if ($activeCount <= $effective) return $this->result('no_reduction','within_effective_limit',['active_positions'=>$activeCount,'configured_max'=>$configured,'effective_max'=>$effective]);
+        if ($activeCount <= $effective) return $this->result('no_reduction','within_configured_limit',[
+            'active_positions'=>$activeCount,
+            'configured_max'=>$configured,
+            'effective_max'=>$adaptiveSoftMax,
+            'adaptive_soft_max'=>$adaptiveSoftMax,
+            'capacity_mode'=>'configured_hard_cap_adaptive_soft_sizing',
+        ]);
 
         foreach ($positions as $position) {
             if ((string)($position['status'] ?? '') !== 'open') {
@@ -56,7 +66,7 @@ final class NobitexCapacityManager
                 // returning waiting_reconcile here would make the orchestrator stop
                 // before reconciliation and could deadlock all future BUY activity.
                 return $this->result('no_reduction','pending_order_present',[
-                    'active_positions'=>$activeCount,'configured_max'=>$configured,'effective_max'=>$effective,'excess_positions'=>max(0,$activeCount-$effective),
+                    'active_positions'=>$activeCount,'configured_max'=>$configured,'effective_max'=>$effective,'adaptive_soft_max'=>$adaptiveSoftMax,'excess_positions'=>max(0,$activeCount-$effective),
                 ]);
             }
         }
@@ -121,7 +131,7 @@ final class NobitexCapacityManager
 
         $context = [
             'position_id'=>(int)$victim['id'],'symbol'=>$symbol,'amount'=>$amount,
-            'active_positions_before'=>$activeCount,'configured_max'=>$configured,'effective_max'=>$effective,
+            'active_positions_before'=>$activeCount,'configured_max'=>$configured,'effective_max'=>$effective,'adaptive_soft_max'=>$adaptiveSoftMax,
             'remaining_excess_after_submit'=>max(0,$activeCount-$effective-1),
             'victim_score'=>round((float)$victim['victim_score'],5),
             'forward_edge_percent'=>round((float)$victim['forward_edge_percent'],4),
@@ -135,7 +145,7 @@ final class NobitexCapacityManager
 
         return $this->result('sell_submitted','position_limit_reduction',[
             'position'=>['position_id'=>(int)$victim['id'],'symbol'=>$symbol,'amount'=>$amount,'local_id'=>$created['local_id'] ?? null,'exchange_order_id'=>$exchangeId ?: null],
-            'active_positions_before'=>$activeCount,'configured_max'=>$configured,'effective_max'=>$effective,'remaining_excess_after_submit'=>max(0,$activeCount-$effective-1),
+            'active_positions_before'=>$activeCount,'configured_max'=>$configured,'effective_max'=>$effective,'adaptive_soft_max'=>$adaptiveSoftMax,'remaining_excess_after_submit'=>max(0,$activeCount-$effective-1),
             'execution'=>['reference_price'=>$reference,'price_bound'=>$priceBound,'dynamic_exit_buffer_percent'=>$buffer],
             'selection'=>array_intersect_key($context,array_flip(['victim_score','forward_edge_percent','net_pnl_percent','spread_percent','estimated_exit_cost_percent','depth_quote','volatility_percent'])),
         ]);
