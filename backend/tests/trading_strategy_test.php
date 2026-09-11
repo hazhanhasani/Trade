@@ -40,7 +40,7 @@ assertTrue(($signal['decision_model'] ?? '') === 'multi_strategy_regime_router_n
 assertTrue(isset($signal['market_regime']['regime']), 'market regime missing');
 assertTrue(isset($signal['selected_strategy']['key']), 'selected strategy missing');
 assertTrue(isset($signal['strategy_candidates']) && is_array($signal['strategy_candidates']), 'strategy candidate diagnostics missing');
-assertTrue(count($signal['strategy_candidates']) === 3, 'all three strategies should be evaluated');
+assertTrue(count($signal['strategy_candidates']) === 4, 'all four strategies should be evaluated');
 assertTrue(isset($signal['execution_quality']) && is_array($signal['execution_quality']), 'execution quality diagnostics missing');
 assertTrue((float)($signal['execution_quality']['liquidity_multiple'] ?? 0) >= 15.9, 'liquidity multiple was not calculated');
 assertTrue(isset($signal['execution_quality_score']), 'execution quality score missing');
