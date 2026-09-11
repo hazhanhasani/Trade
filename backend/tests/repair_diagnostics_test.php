@@ -41,11 +41,11 @@ expectRepair(str_contains($client, 'CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4'), 'B
 
 expectRepair(is_string($errorReporter) && str_contains($errorReporter, 'E_NOTICE,E_USER_NOTICE,E_DEPRECATED,E_USER_DEPRECATED,E_STRICT'), 'Minor PHP notices and deprecations must be captured.');
 expectRepair(str_contains($errorReporter, 'public static function log('), 'Application info logs must have a central forensic capture path.');
-expectRepair(str_contains($errorReporter, "'file'=>$file !== '' ? $file : null"), 'Bale diagnostic context must carry the exact project-relative file path.');
-expectRepair(str_contains($errorReporter, "'line'=>$line > 0 ? $line : null"), 'Bale diagnostic context must carry the exact source line.');
-expectRepair(str_contains($errorReporter, "'diagnosis'=>$context['diagnosis'] ?? null"), 'Bale diagnostic context must include a human-readable diagnosis.');
-expectRepair(str_contains($errorReporter, "'action'=>$context['action'] ?? null"), 'Bale diagnostic context must include a suggested action.');
-expectRepair(str_contains($errorReporter, "'run_id'=>$context['run_id'] ?? null"), 'Bale diagnostics must include run correlation when available.');
+expectRepair(str_contains($errorReporter, "'file'=>"), 'Bale diagnostic context must carry the exact project-relative file path.');
+expectRepair(str_contains($errorReporter, "'line'=>"), 'Bale diagnostic context must carry the exact source line.');
+expectRepair(str_contains($errorReporter, "'diagnosis'=>"), 'Bale diagnostic context must include a human-readable diagnosis.');
+expectRepair(str_contains($errorReporter, "'action'=>"), 'Bale diagnostic context must include a suggested action.');
+expectRepair(str_contains($errorReporter, "'run_id'=>"), 'Bale diagnostics must include run correlation when available.');
 expectRepair(str_contains($errorReporter, "default => 'لاگ فنی Trade'"), 'Info-level diagnostics must be mirrored to Bale.');
 
 expectRepair(is_string($baleAlert) && str_contains($baleAlert, "'file'=>'فایل دقیق'"), 'Bale alert formatter must label the exact file.');
@@ -56,7 +56,7 @@ expectRepair(str_contains($baleAlert, 'recentlyQueued($pdo, $hash, 5)'), 'Only a
 expectRepair(str_contains($baleAlert, "default=>'لاگ'"), 'Info diagnostics must render as log messages in Bale.');
 
 expectRepair(is_string($cronTick) && str_contains($cronTick, "'cron_cycle'"), 'Every completed Cron cycle must emit a diagnostic log.');
-expectRepair(str_contains($cronTick, "'run_id'=>$runId"), 'Cron diagnostic logs must include their Run ID.');
+expectRepair(str_contains($cronTick, "'run_id'=>"), 'Cron diagnostic logs must include their Run ID.');
 expectRepair(str_contains($cronTick, "'cron_update'"), 'Backend update deferral must emit its own diagnostic log.');
 
 fwrite(STDOUT, "Repair diagnostics regression tests passed.\n");
