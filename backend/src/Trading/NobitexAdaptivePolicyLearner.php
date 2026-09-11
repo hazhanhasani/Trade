@@ -93,10 +93,6 @@ final class NobitexAdaptivePolicyLearner
         if ($quoteAsset === '') $quoteAsset = 'IRT';
         $snapshot = self::$runtimeSnapshot;
         if (!is_array($snapshot)) {
-            // First market in each PHP/Cron process trains one snapshot; all other
-            // markets in that tick reuse it. If DB history is temporarily
-            // unavailable, trading falls back to a neutral policy rather than
-            // failing the signal engine.
             try {
                 $snapshot = (new self())->snapshot();
                 self::$runtimeSnapshot = $snapshot;
@@ -113,7 +109,13 @@ final class NobitexAdaptivePolicyLearner
         return self::neutralPolicy($regime, $quoteAsset, 'profile_not_learned');
     }
 
-    /** @return array<string,mixed> */
+    /**
+     * Apply learned policy to the residual Profit-First uncertainty and forward
+     * sell bias. Explicit trading costs and structural executability are never
+     * rewritten. Hard stop-loss/take-profit/trailing rules remain authoritative.
+     *
+     * @return array<string,mixed>
+     */
     public static function applyToSignal(array $signal, array $market): array
     {
         $regime = NobitexStrategyLearning::regimeKey($signal);
@@ -141,16 +143,40 @@ final class NobitexAdaptivePolicyLearner
         $signal['adaptive_policy']['effective_buffer_percent'] = round($effectiveBuffer, 4);
 
         if ($ready && $tradable > 0.0 && $action === 'hold' && $reason === 'edge_below_adaptive_safety_buffer') {
-            $signal['action'] = 'buy';
-            $signal['reason'] = 'positive_tradable_net_edge_after_learned_uncertainty';
+            $action = 'buy';
+            $reason = 'positive_tradable_net_edge_after_learned_uncertainty';
         } elseif ($action === 'buy' && $tradable <= 0.0) {
-            $signal['action'] = 'hold';
-            $signal['reason'] = 'adaptive_policy_tightened_edge_below_margin';
+            $action = 'hold';
+            $reason = 'adaptive_policy_tightened_edge_below_margin';
             $signal['expected_net_profit'] = false;
         }
+
+        // Learn WHEN to accept a forward SELL bias, while hard portfolio exits
+        // remain untouched. Strong profitable profiles get slightly more room to
+        // continue; weak mature profiles require less negative forward evidence.
+        $quality = self::clamp((float)($policy['quality_score'] ?? 0.0), -1.0, 1.0);
+        $exitCost = max(0.0, (float)($signal['estimated_exit_cost_percent'] ?? 0.0));
+        $gross = (float)($signal['expected_gross_move_percent'] ?? 0.0);
+        $baseSellTrigger = max(0.05, $exitCost);
+        $sellThresholdMultiplier = self::clamp(1.0 + ($quality * 0.20), 0.82, 1.18);
+        $learnedSellTrigger = $baseSellTrigger * $sellThresholdMultiplier;
+        $signal['adaptive_policy']['sell_threshold_multiplier'] = round($sellThresholdMultiplier, 4);
+        $signal['adaptive_policy']['learned_sell_trigger_percent'] = round($learnedSellTrigger, 4);
+
+        if ($ready && $action === 'sell' && $gross >= -$learnedSellTrigger) {
+            $action = 'hold';
+            $reason = 'adaptive_policy_holds_forward_sell_bias';
+        } elseif ($ready && $action === 'hold' && $tradable <= 0.0 && $gross < -$learnedSellTrigger) {
+            $action = 'sell';
+            $reason = 'adaptive_policy_forward_sell_bias';
+        }
+
+        $signal['action'] = $action;
+        $signal['reason'] = $reason;
         if (is_array($signal['selected_strategy'] ?? null)) {
-            $signal['selected_strategy']['entry_allowed'] = (string)($signal['action'] ?? '') === 'buy';
-            $signal['selected_strategy']['reason'] = $signal['reason'] ?? null;
+            $signal['selected_strategy']['entry_allowed'] = $action === 'buy';
+            $signal['selected_strategy']['exit_bias'] = $action === 'sell';
+            $signal['selected_strategy']['reason'] = $reason;
         }
         if (is_array($signal['cost_model'] ?? null)) {
             $signal['cost_model']['base_forecast_buffer_percent'] = round($baseBuffer, 4);
