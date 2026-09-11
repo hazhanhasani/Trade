@@ -7,16 +7,17 @@ namespace Trade\Trading\Strategy;
 use Trade\Trading\NobitexMarketRegimeDetector;
 
 /**
- * A deliberately strict strategy for HIGH_VOLATILITY regimes.
+ * High-volatility continuation strategy.
  *
- * High volatility is not an unconditional dead zone, but a positive edge is
- * actionable only when the move is directional, aligned across timeframes and
- * not obviously exhausted. The main signal engine still requires positive
- * tradable net edge after fees, spread, slippage and uncertainty buffer.
+ * v3 keeps the structural direction, liquidity/economic and risk gates intact,
+ * but stops treating a hot 1m RSI as an automatic BUY veto. A hot 1m RSI is
+ * now priced as an exhaustion penalty; only an extreme 1m RSI remains a hard
+ * blocker. This lets genuinely strong continuation moves become executable
+ * when their post-cost tradable edge is still positive.
  */
 final class HighVolatilityMomentumStrategy implements NobitexStrategyInterface
 {
-    public function key(): string { return 'high_volatility_momentum_v2'; }
+    public function key(): string { return 'high_volatility_momentum_v3'; }
 
     public function evaluate(array $context, array $regime): array
     {
@@ -50,11 +51,19 @@ final class HighVolatilityMomentumStrategy implements NobitexStrategyInterface
         $trend = ($e1 * 0.18) + ($e5 * 0.44) + ($e15 * 0.38);
         $macd = ($h1 * 0.15) + ($h5 * 0.45) + ($h15 * 0.40);
 
-        $exhaustion = 0.0;
-        if ($rsi1 >= 82.0) $exhaustion += 0.80;
-        elseif ($rsi1 >= 77.0) $exhaustion += 0.40;
-        if ($rsi5 >= 80.0) $exhaustion += 0.55;
-        elseif ($rsi5 >= 74.0) $exhaustion += 0.24;
+        // 1m RSI is deliberately a soft cost until it reaches an extreme level.
+        // This avoids turning every fast continuation move into an automatic HOLD
+        // while still making late/chasing entries progressively harder to justify.
+        $rsi1Penalty = 0.0;
+        if ($rsi1 >= 90.0) $rsi1Penalty = 1.35;
+        elseif ($rsi1 >= 86.0) $rsi1Penalty = 0.95;
+        elseif ($rsi1 >= 82.0) $rsi1Penalty = 0.62;
+        elseif ($rsi1 >= 77.0) $rsi1Penalty = 0.32;
+
+        $rsi5Penalty = 0.0;
+        if ($rsi5 >= 80.0) $rsi5Penalty = 0.70;
+        elseif ($rsi5 >= 74.0) $rsi5Penalty = 0.28;
+        $exhaustion = $rsi1Penalty + $rsi5Penalty;
 
         // Extra penalty prevents pure noise from looking profitable just because
         // one short timeframe printed a large candle.
@@ -77,8 +86,10 @@ final class HighVolatilityMomentumStrategy implements NobitexStrategyInterface
             'momentum_1m_not_positive'=>$m1 > 0.0,
             'momentum_5m_not_positive'=>$m5 > 0.0,
             'momentum_15m_negative'=>$m15 >= 0.0,
-            'orderbook_imbalance_adverse'=>$imbalance > -0.20,
-            'rsi_1m_exhausted'=>$rsi1 < 84.0,
+            // Execution/economic layers already price adverse flow. Keep only
+            // clearly hostile books as a structural veto.
+            'orderbook_imbalance_adverse'=>$imbalance > -0.30,
+            'rsi_1m_extreme'=>$rsi1 < 92.0,
             'rsi_5m_exhausted'=>$rsi5 < 82.0,
         ];
         $failedEntryGuards = [];
@@ -92,9 +103,7 @@ final class HighVolatilityMomentumStrategy implements NobitexStrategyInterface
             && ($m1 < 0.0 || $m5 < 0.0);
 
         // A positive model estimate must never be exposed as an actionable
-        // strategy edge when the directional gate itself failed. Keep the raw
-        // estimate in diagnostics for forensics, but cap the advertised edge at
-        // zero until every directional condition is satisfied.
+        // strategy edge when the structural directional gate itself failed.
         $gross = $directionalUp ? $rawGross : min(0.0, $rawGross);
 
         $entry = $eligible && $directionalUp && $gross > 0.0;
@@ -112,7 +121,9 @@ final class HighVolatilityMomentumStrategy implements NobitexStrategyInterface
 
         $reason = 'regime_not_high_volatility';
         if ($eligible) {
-            if ($entry) $reason = 'directional_high_volatility_momentum';
+            if ($entry) $reason = $rsi1 >= 82.0
+                ? 'directional_high_volatility_continuation_after_exhaustion_penalty'
+                : 'directional_high_volatility_momentum';
             elseif ($directionalDown) $reason = 'high_volatility_downside_bias';
             elseif (!$directionalUp) $reason = $this->primaryGuardReason($failedEntryGuards);
             else $reason = 'high_volatility_edge_not_positive';
@@ -139,6 +150,8 @@ final class HighVolatilityMomentumStrategy implements NobitexStrategyInterface
                 'momentum_15m_percent'=>round($m15,4),
                 'rsi_1m'=>round($rsi1,4),
                 'rsi_5m'=>round($rsi5,4),
+                'rsi_1m_exhaustion_penalty_percent'=>round($rsi1Penalty,4),
+                'rsi_5m_exhaustion_penalty_percent'=>round($rsi5Penalty,4),
                 'momentum_blend_percent'=>round($momentum,4),
                 'trend_blend_percent'=>round($trend,4),
                 'macd_pressure_percent'=>round($macd,4),
@@ -165,7 +178,7 @@ final class HighVolatilityMomentumStrategy implements NobitexStrategyInterface
             'momentum_15m_negative'=>'high_volatility_momentum_15m_negative',
             'momentum_1m_not_positive'=>'high_volatility_momentum_1m_not_positive',
             'orderbook_imbalance_adverse'=>'high_volatility_orderbook_adverse',
-            'rsi_1m_exhausted'=>'high_volatility_rsi_1m_exhausted',
+            'rsi_1m_extreme'=>'high_volatility_rsi_1m_extreme',
             'rsi_5m_exhausted'=>'high_volatility_rsi_5m_exhausted',
         ];
         foreach ($priority as $guard => $reason) {

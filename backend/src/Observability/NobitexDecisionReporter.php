@@ -171,8 +171,10 @@ final class NobitexDecisionReporter
             'high_volatility_momentum_1m_not_positive' => 'مومنتوم کوتاه‌مدت ۱ دقیقه مثبت نیست و تأیید ورود سریع وجود ندارد.',
             'high_volatility_momentum_5m_not_positive' => 'مومنتوم ۵ دقیقه مثبت نیست و حرکت پایدار کوتاه‌مدت تأیید نشده است.',
             'high_volatility_momentum_15m_negative' => 'مومنتوم ۱۵ دقیقه منفی است و جهت بزرگ‌تر با BUY هم‌سو نیست.',
-            'high_volatility_orderbook_adverse' => 'عدم‌تعادل Order Book علیه خریدار است و فشار فروش برای ورود زیاد است.',
-            'high_volatility_rsi_1m_exhausted' => 'RSI یک‌دقیقه‌ای بیش‌ازحد داغ شده و احتمال تعقیب قیمت/بازگشت بالا است.',
+            'high_volatility_orderbook_adverse' => 'عدم‌تعادل Order Book به‌شکل واضح علیه خریدار است و فشار فروش برای ورود زیاد است.',
+            // Historical v2 code kept for old stored runs.
+            'high_volatility_rsi_1m_exhausted' => 'در نسخه قبلی، RSI یک‌دقیقه‌ای داغ به‌صورت سخت BUY را رد می‌کرد.',
+            'high_volatility_rsi_1m_extreme' => 'RSI یک‌دقیقه‌ای به ناحیه افراطی رسیده؛ حتی در روند قوی، ورود تازه برای جلوگیری از تعقیب سقف مسدود است.',
             'high_volatility_rsi_5m_exhausted' => 'RSI پنج‌دقیقه‌ای وارد ناحیه فرسودگی شده و ورود جدید پرریسک است.',
             'high_volatility_not_directional_enough' => 'بازار پرنوسان است اما مجموعه شروط جهت‌داری برای BUY کامل نشده است.',
             'high_volatility_edge_not_positive' => 'ساختار جهت‌دار تأیید شده ولی Edge اقتصادی نهایی هنوز مثبت نیست.',
