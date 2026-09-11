@@ -2,5 +2,5 @@
 
 declare(strict_types=1);
 
-// Coordinated release: dashboard truth is rendered in Persian on first paint; Nobitex wallet totals prefer official rialBalance/rialBalanceSell values and available cash uses active balance, removing transient Latin digits and local order-book valuation drift while keeping trading/risk arithmetic unchanged.
-return '1.4.27';
+// Coordinated release: Profit-First now cross-checks each tradable Nobitex asset against its IRT spot, USDT spot/global reference and Nobitex USDT/IRT conversion rate with bounded basis-aware adjustments; confirmed BUY/SELL Bale deliveries use an immediate durable outbox and keep retrying until sent while Bale is enabled and configured.
+return '1.4.28';
