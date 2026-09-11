@@ -26,6 +26,12 @@ final class NobitexPositionReconciler
     {
         NobitexSchema::ensure();
         $pdo ??= Database::connection();
+
+        // Only settled open positions are wallet-reconciled here. Pending BUY/
+        // SELL states belong to the order-status reconciler because a filled
+        // Trade-owned SELL can legitimately reduce wallet inventory and must
+        // still be accounted with its real fill/PnL rather than misclassified
+        // as an external manual sale.
         $positions = $pdo->query("SELECT id,symbol,asset,quote_asset,amount,entry_price,status,opened_at,updated_at
             FROM nobitex_autotrade_positions
             WHERE status='open'
@@ -39,8 +45,10 @@ final class NobitexPositionReconciler
         $walletTotals = self::walletTotals($wallets);
         $byAsset = [];
         foreach ($positions as $position) {
-            $asset = strtoupper(trim((string)($position['asset'] ?? '')));
+            $rawAsset = strtoupper(trim((string)($position['asset'] ?? '')));
+            $asset = self::canonicalAsset($rawAsset);
             if ($asset === '') continue;
+            $position['_raw_asset'] = $rawAsset;
             $byAsset[$asset][] = $position;
         }
 
@@ -63,9 +71,10 @@ final class NobitexPositionReconciler
                 $before = (float)$change['before_amount'];
                 $after = (float)$change['after_amount'];
                 $action = (string)$change['action'];
+                $rawAsset = strtoupper(trim((string)($change['raw_asset'] ?? $asset)));
 
                 if ($action === 'close') {
-                    // Preserve the historical managed amount. Status alone removes
+                    // Preserve historical managed amount. Status alone removes
                     // the position from active exposure/capacity calculations.
                     $stmt = $pdo->prepare("UPDATE nobitex_autotrade_positions
                         SET status='closed', exit_price=NULL,
@@ -78,7 +87,8 @@ final class NobitexPositionReconciler
                     $result['closed']++;
                     $event = [
                         'position_id'=>$positionId,
-                        'asset'=>$asset,
+                        'asset'=>$rawAsset,
+                        'canonical_asset'=>$asset,
                         'symbol'=>$change['symbol'],
                         'reason'=>'external_balance_depleted',
                         'tracked_amount_before'=>$before,
@@ -100,7 +110,8 @@ final class NobitexPositionReconciler
                     $result['resized']++;
                     $event = [
                         'position_id'=>$positionId,
-                        'asset'=>$asset,
+                        'asset'=>$rawAsset,
+                        'canonical_asset'=>$asset,
                         'symbol'=>$change['symbol'],
                         'reason'=>'external_balance_reduced',
                         'tracked_amount_before'=>$before,
@@ -144,6 +155,7 @@ final class NobitexPositionReconciler
                 $changes[] = [
                     'id'=>(int)($position['id'] ?? 0),
                     'symbol'=>(string)($position['symbol'] ?? ''),
+                    'raw_asset'=>(string)($position['_raw_asset'] ?? $position['asset'] ?? ''),
                     'before_amount'=>$before,
                     'after_amount'=>0.0,
                     'action'=>'close',
@@ -163,6 +175,7 @@ final class NobitexPositionReconciler
             $changes[] = [
                 'id'=>(int)($position['id'] ?? 0),
                 'symbol'=>(string)($position['symbol'] ?? ''),
+                'raw_asset'=>(string)($position['_raw_asset'] ?? $position['asset'] ?? ''),
                 'before_amount'=>$before,
                 'after_amount'=>$after,
                 'action'=>$after <= max(self::ABSOLUTE_EPSILON, $before * self::DUST_CLOSE_RATIO) ? 'close' : 'resize',
@@ -182,7 +195,8 @@ final class NobitexPositionReconciler
         $out = [];
         foreach ($rows as $key => $row) {
             if (!is_array($row)) continue;
-            $asset = strtoupper(trim((string)($row['currency'] ?? $row['asset'] ?? $row['currencyCode'] ?? (is_string($key) ? $key : ''))));
+            $rawAsset = strtoupper(trim((string)($row['currency'] ?? $row['asset'] ?? $row['currencyCode'] ?? (is_string($key) ? $key : ''))));
+            $asset = self::canonicalAsset($rawAsset);
             if ($asset === '') continue;
 
             // Nobitex balance is total wallet inventory. activeBalance may be
@@ -203,9 +217,19 @@ final class NobitexPositionReconciler
                 }
             }
             if (!is_finite($total)) $total = 0.0;
-            $out[$asset] = max(0.0, $total);
+            // Multiple aliases must be accumulated rather than overwritten.
+            $out[$asset] = ($out[$asset] ?? 0.0) + max(0.0, $total);
         }
         return $out;
+    }
+
+    public static function canonicalAsset(string $asset): string
+    {
+        $asset = strtoupper(trim($asset));
+        return match ($asset) {
+            'GRAM', 'TONCOIN' => 'TON',
+            default => $asset,
+        };
     }
 
     private function event(PDO $pdo, string $level, string $event, array $context): void
