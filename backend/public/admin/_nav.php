@@ -5,7 +5,8 @@ declare(strict_types=1);
 function tradeAdminNav(string $active, string $version): void
 {
     $path = (string) (parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH) ?: '');
-    if ($path === '/admin/analytics.php') $active = 'analytics';
+    if ($path === '/admin/command-center.php') $active = 'command';
+    elseif ($path === '/admin/analytics.php') $active = 'analytics';
     elseif ($path === '/admin/notifications.php') $active = 'notifications';
     elseif ($path === '/admin/market.php') $active = 'market';
     elseif ($path === '/admin/timeline.php') $active = 'timeline';
@@ -15,6 +16,7 @@ function tradeAdminNav(string $active, string $version): void
 
     $items = [
         'dashboard' => ['/admin/', 'داشبورد'],
+        'command' => ['/admin/command-center.php', 'مرکز فرمان'],
         'market' => ['/admin/market.php', 'بازار و اخبار'],
         'trading' => ['/admin/bot/', 'معاملات'],
         'timeline' => ['/admin/timeline.php', 'تایم‌لاین'],
@@ -24,8 +26,8 @@ function tradeAdminNav(string $active, string $version): void
         'system' => ['/admin/system.php', 'سیستم'],
     ];
     ?>
-    <link rel="stylesheet" href="/admin/assets/cockpit-ui.css?v=4">
-    <script defer src="/admin/assets/cockpit.js?v=4"></script>
+    <link rel="stylesheet" href="/admin/assets/cockpit-ui.css?v=5">
+    <script defer src="/admin/assets/cockpit.js?v=5"></script>
     <style id="trade-mobile-overflow-guard">
     html,body{max-width:100%!important;overflow-x:clip!important}.admin-shell,.admin-shell>*{max-width:100%!important;min-width:0!important}
     .global-subnav ~ .subnav:not(.global-subnav){display:none!important}
