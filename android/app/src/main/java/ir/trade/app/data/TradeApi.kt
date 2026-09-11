@@ -13,6 +13,7 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
     @Volatile private var contractLoaded = false
     @Volatile private var backendApiContract: Int? = null
     @Volatile private var backendCapabilities: Set<String> = emptySet()
+    @Volatile private var latestStatusDataJson: String? = null
 
     suspend fun health(): Response = request("GET", "/api/health", authenticated = false)
     suspend fun updateInfo(): Response = request("GET", "/api/update", authenticated = false)
@@ -20,13 +21,17 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
 
     suspend fun status(): Response {
         val response = request("GET", "/api/status")
-        if (response.ok) captureContract(response)
+        if (response.ok) {
+            captureContract(response)
+            cacheStatusData(response)
+        }
         return response
     }
 
     suspend fun commandCenter(): Response {
         requireCapability("analytics.command_center_v1")
-        return request("GET", "/api/command-center")
+        val response = request("GET", "/api/command-center")
+        return if (response.ok) mergeLivePanelStatus(response) else response
     }
 
     suspend fun settingsHistory(limit: Int = 30): Response {
@@ -168,6 +173,110 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
     fun capabilities(): Set<String> = backendCapabilities
     fun missingCapabilities(): Set<String> = ReleaseContract.missingCapabilities(backendCapabilities)
 
+    private fun cacheStatusData(response: Response) {
+        latestStatusDataJson = try {
+            val root = JSONObject(response.body)
+            (root.optJSONObject("data") ?: root).toString()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * The Admin panel and /api/status both use BotController::status() for live
+     * account/performance/capacity values. Command Center contributes richer
+     * analytics, but Android must not replace those live panel numbers with a
+     * second independently aggregated set.
+     */
+    private fun mergeLivePanelStatus(response: Response): Response {
+        val cached = latestStatusDataJson ?: return response
+        return try {
+            val root = JSONObject(response.body)
+            val data = root.optJSONObject("data") ?: root
+            val status = JSONObject(cached)
+            val nobitex = status.optJSONObject("exchanges")?.optJSONObject("nobitex")
+            val performance = nobitex?.optJSONObject("performance")
+            val capacity = nobitex?.optJSONObject("portfolio_capacity")
+            val global = status.optJSONObject("global_portfolio")
+            val cron = status.optJSONObject("cron_health")
+            val headline = data.optJSONObject("headline") ?: JSONObject().also { data.put("headline", it) }
+            val strip = data.optJSONObject("status_strip") ?: JSONObject().also { data.put("status_strip", it) }
+
+            fun number(obj: JSONObject?, key: String): Double? {
+                if (obj == null || !obj.has(key) || obj.isNull(key)) return null
+                val value = obj.optDouble(key, Double.NaN)
+                return value.takeIf { it.isFinite() }
+            }
+
+            val liveTotal = number(global, "wallet_total_toman") ?: number(global, "portfolio_value_irt")
+            liveTotal?.let { headline.put("portfolio_value_irt", it) }
+            global?.let { data.put("global_portfolio", it) }
+
+            number(performance, "today_realized_pnl")?.let { today ->
+                headline.put("today_net_pnl_irt", today)
+                headline.put("today_realized_bot_pnl_irt", today)
+                val reports = data.optJSONObject("reports") ?: JSONObject().also { data.put("reports", it) }
+                reports.put(
+                    "daily",
+                    JSONObject()
+                        .put("net_pnl", today)
+                        .put("unit", "TOMAN")
+                        .put("scope", "live_panel_realized_bot_pnl"),
+                )
+            }
+            number(performance, "total_realized_pnl")?.let { total ->
+                headline.put("total_realized_pnl_irt", total)
+                headline.put("total_realized_bot_pnl_irt", total)
+                val reports = data.optJSONObject("reports") ?: JSONObject().also { data.put("reports", it) }
+                reports.put(
+                    "total",
+                    JSONObject()
+                        .put("net_pnl", total)
+                        .put("unit", "TOMAN")
+                        .put("scope", "live_panel_realized_bot_pnl"),
+                )
+            }
+            number(performance, "win_rate_percent")?.let { winRate ->
+                headline.put("win_rate_percent", winRate)
+                val reports = data.optJSONObject("reports") ?: JSONObject().also { data.put("reports", it) }
+                reports.put("win_rate_percent", winRate)
+            }
+            performance?.let {
+                headline.put("closed_positions", it.optInt("closed_positions", 0))
+                headline.put("winning_positions", it.optInt("winning_positions", 0))
+            }
+
+            capacity?.let {
+                headline.put("active_positions", it.optInt("active_positions", headline.optInt("active_positions", 0)))
+                headline.put("configured_max_positions", it.optInt("max_positions", headline.optInt("configured_max_positions", 0)))
+                headline.put("pending_orders", it.optInt("pending_orders", 0))
+                headline.put("max_pending_orders", it.optInt("max_pending_orders", 0))
+                strip.put("positions", it.optInt("active_positions", 0))
+            }
+            nobitex?.let {
+                strip.put("bot", if (it.optBoolean("bot_enabled", false)) "live" else "off")
+                strip.put("api", if (it.optBoolean("credentials_configured", false)) "ready" else "missing")
+                strip.put("live_execution", if (it.optBoolean("live_execution_enabled", false)) "on" else "off")
+            }
+            cron?.let { strip.put("cron_healthy", it.optBoolean("healthy", false)) }
+
+            val livePanel = JSONObject()
+                .put("source", "api_status_bot_controller")
+                .put("synced", true)
+            performance?.let { livePanel.put("performance", it) }
+            capacity?.let { livePanel.put("portfolio_capacity", it) }
+            nobitex?.optJSONObject("latest_signal")?.let { livePanel.put("latest_signal", it) }
+            nobitex?.optJSONObject("latest_order")?.let { livePanel.put("latest_order", it) }
+            status.optJSONObject("time_iran")?.let { livePanel.put("time_iran", it) }
+            data.put("live_panel", livePanel)
+            data.put("live_source", "api_status_panel_truth")
+
+            Response(response.code, root.toString())
+        } catch (_: Exception) {
+            response
+        }
+    }
+
     private fun captureContract(response: Response) {
         try {
             val root = JSONObject(response.body)
@@ -214,6 +323,8 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
             readTimeout = 20_000
             instanceFollowRedirects = true
             setRequestProperty("Accept", "application/json")
+            setRequestProperty("Cache-Control", "no-cache, no-store, max-age=0")
+            setRequestProperty("Pragma", "no-cache")
             setRequestProperty("X-Trade-App-Api-Contract", ReleaseContract.API_CONTRACT.toString())
             if (authenticated) setRequestProperty("Authorization", "Bearer $apiToken")
             if (body != null) {

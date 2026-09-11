@@ -111,7 +111,8 @@ fun TradeAppV4() {
     var nav by rememberSaveable { mutableIntStateOf(0) }
     var snapshotJson by rememberSaveable { mutableStateOf(prefs.offlineSnapshot()) }
     var loading by remember { mutableStateOf(snapshotJson.isNullOrBlank()) }
-    var offline by remember { mutableStateOf(false) }
+    // A cached snapshot must never look live while the first network refresh is pending.
+    var offline by remember { mutableStateOf(!snapshotJson.isNullOrBlank()) }
     var error by remember { mutableStateOf<String?>(null) }
     var locked by remember { mutableStateOf(prefs.biometricEnabled() && Build.VERSION.SDK_INT >= 28) }
     var historyJson by remember { mutableStateOf<String?>(null) }
@@ -122,6 +123,8 @@ fun TradeAppV4() {
         loading = snapshotJson.isNullOrBlank()
         error = null
         try {
+            // status() is the same live BotController source used by the Admin panel.
+            // commandCenter() overlays those exact live values onto the richer payload.
             val status = api.status()
             check(status.ok) { "Backend ${status.code}" }
             check(api.isContractCompatible()) { "نسخه Backend و اپ هماهنگ نیست." }
@@ -142,7 +145,7 @@ fun TradeAppV4() {
     LaunchedEffect(Unit) {
         refresh()
         while (true) {
-            delay(30_000)
+            delay(10_000)
             refresh()
         }
     }
@@ -292,7 +295,11 @@ private fun V4TopBar(offline: Boolean, loading: Boolean, onRefresh: () -> Unit) 
     ) {
         Column(Modifier.weight(1f)) {
             Text("Trade", fontWeight = FontWeight.Black, color = V4Ink, style = MaterialTheme.typography.titleLarge)
-            Text("Command Center • v${BuildConfig.RELEASE_VERSION}${if (offline) " • Offline Snapshot" else ""}", color = if (offline) V4Amber else V4Muted, style = MaterialTheme.typography.labelMedium)
+            Text(
+                "${if (offline) "Offline Snapshot" else "Live Panel"} • v${BuildConfig.RELEASE_VERSION}",
+                color = if (offline) V4Amber else V4Green,
+                style = MaterialTheme.typography.labelMedium,
+            )
         }
         IconButton(onClick = onRefresh, enabled = !loading) {
             if (loading) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.Refresh, "بروزرسانی", tint = V4Primary)
@@ -331,16 +338,23 @@ private fun V4Home(root: JSONObject, offline: Boolean) {
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                V4Metric("ارزش کل", money(headline.optDouble("portfolio_value_irt")), "تومان", Modifier.weight(1f))
-                V4Metric("PnL امروز", signedMoney(headline.optDouble("today_net_pnl_irt")), "تومان", Modifier.weight(1f))
+                V4Metric("ارزش کل", money(headline.optDouble("portfolio_value_irt")), "تومان • کیف پول زنده", Modifier.weight(1f))
+                V4Metric("PnL امروز ربات", signedMoney(headline.optDouble("today_net_pnl_irt")), "تومان • پنل زنده", Modifier.weight(1f))
             }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                V4Metric("PnL ماه", signedMoney(headline.optDouble("month_net_pnl_irt")), "تومان", Modifier.weight(1f))
-                V4Metric("Drawdown", "${fmt(headline.optDouble("current_drawdown_percent"), 2)}%", "جاری", Modifier.weight(1f))
+                V4Metric("PnL کل ربات", signedMoney(headline.optDouble("total_realized_pnl_irt")), "تومان • پنل زنده", Modifier.weight(1f))
+                V4Metric("Drawdown", "${fmt(headline.optDouble("current_drawdown_percent"), 2)}%", "افت واقعی حساب", Modifier.weight(1f))
             }
         }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                V4Metric("Win Rate", "${fmt(headline.optDouble("win_rate_percent"), 1)}%", "${headline.optInt("closed_positions")} معامله بسته", Modifier.weight(1f))
+                V4Metric("Pending", "${headline.optInt("pending_orders")}/${headline.optInt("max_pending_orders")}", "سفارش در انتظار", Modifier.weight(1f))
+            }
+        }
+        if (!offline) item { V4Banner("همگام با داده زنده پنل • بروزرسانی خودکار هر ۱۰ ثانیه", V4GreenSoft, V4Green) }
         if (offline) item { V4Banner("اطلاعات آفلاین است و برای تصمیم اجرایی نباید به‌عنوان وضعیت لحظه‌ای صرافی استفاده شود.", V4AmberSoft, V4Amber) }
         item { V4SectionTitle("چرا این تصمیم؟", "آخرین توضیح موتور") }
         item {
@@ -454,13 +468,13 @@ private fun V4Trades(root: JSONObject, onReplay: (Long) -> Unit) {
                     Text("${if (pnl >= 0) "+" else ""}${fmt(pnl, 2)}%", fontWeight = FontWeight.Black, color = if (pnl >= 0) V4Green else V4Red)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    V4TinyMetric("Entry", fmt(p.optDouble("entry_price"), 4), Modifier.weight(1f))
-                    V4TinyMetric("Mark", fmt(p.optDouble("mark_price"), 4), Modifier.weight(1f))
-                    V4TinyMetric("Fee", fmt(p.optDouble("total_estimated_fees_quote"), 4), Modifier.weight(1f))
+                    V4TinyMetric("Entry", fmt(positionMoney(p, "entry_price"), 4), Modifier.weight(1f))
+                    V4TinyMetric("Mark", fmt(positionMoney(p, "mark_price"), 4), Modifier.weight(1f))
+                    V4TinyMetric("Fee", fmt(positionMoney(p, "total_estimated_fees_quote"), 4), Modifier.weight(1f))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    V4TinyMetric("SL", fmt(p.optDouble("stop_loss"), 4), Modifier.weight(1f))
-                    V4TinyMetric("TP", fmt(p.optDouble("take_profit"), 4), Modifier.weight(1f))
+                    V4TinyMetric("SL", fmt(positionMoney(p, "stop_loss"), 4), Modifier.weight(1f))
+                    V4TinyMetric("TP", fmt(positionMoney(p, "take_profit"), 4), Modifier.weight(1f))
                     V4TinyMetric("Exit", p.optString("probable_exit_reason", "—"), Modifier.weight(1f))
                 }
             }
@@ -519,7 +533,7 @@ private fun V4Reports(root: JSONObject, api: TradeApi, onRefresh: () -> Unit) {
                 V4Metric("Profit Factor", fmt(reports.optDouble("profit_factor"), 2), "تحقق‌یافته", Modifier.weight(1f))
             }
         }
-        item { V4SectionTitle("Equity Curve", "PnL تجمعی تحقق‌یافته") }
+        item { V4SectionTitle("Equity Curve", "ارزش واقعی کیف پول در طول زمان") }
         item { V4EquityBars(curve) }
         item { V4SectionTitle("Performance by Strategy", "استراتژی و پروفایل") }
         items(strategies.take(12)) { s ->
@@ -895,14 +909,16 @@ private fun V4EquityBars(curve: List<JSONObject>) {
             Text("داده کافی برای نمودار وجود ندارد.", color = V4Muted)
             return@V4Card
         }
-        val values = curve.map { it.optDouble("cumulative_net_pnl") }
+        val metricKey = if (curve.any { it.has("portfolio_value_toman") }) "portfolio_value_toman" else "cumulative_net_pnl"
+        val values = curve.map { it.optDouble(metricKey) }
         val min = values.minOrNull() ?: 0.0
         val max = values.maxOrNull() ?: 0.0
         val span = (max - min).takeIf { abs(it) > 0.000001 } ?: 1.0
         Row(Modifier.fillMaxWidth().height(150.dp), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.Bottom) {
             curve.takeLast(30).forEach { point ->
-                val normalized = ((point.optDouble("cumulative_net_pnl") - min) / span).coerceIn(0.0, 1.0)
-                Box(Modifier.weight(1f).height((20 + normalized * 120).dp).background(if (point.optDouble("cumulative_net_pnl") >= 0) V4Green else V4Red, RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)))
+                val value = point.optDouble(metricKey)
+                val normalized = ((value - min) / span).coerceIn(0.0, 1.0)
+                Box(Modifier.weight(1f).height((20 + normalized * 120).dp).background(if (metricKey == "portfolio_value_toman" || value >= 0) V4Green else V4Red, RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)))
             }
         }
         Text("کمینه ${money(min)} • بیشینه ${money(max)} تومان", color = V4Muted, style = MaterialTheme.typography.labelSmall)
@@ -932,6 +948,13 @@ private fun categoryColor(category: String): Color = when (category.lowercase())
     "watch", "medium" -> V4AmberSoft
     "avoid", "high", "critical" -> V4RedSoft
     else -> V4Bg
+}
+
+private fun positionMoney(position: JSONObject, key: String): Double {
+    val raw = position.optDouble(key)
+    val displayUnit = position.optString("display_unit", "")
+    if (displayUnit.equals("TOMAN", ignoreCase = true)) return raw
+    return if (position.optString("quote_asset", "").equals("IRT", ignoreCase = true)) raw / 10.0 else raw
 }
 
 private fun fmt(value: Double, digits: Int = 2): String = String.format(Locale.US, "%.${digits}f", value)
