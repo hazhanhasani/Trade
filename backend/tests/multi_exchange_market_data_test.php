@@ -42,6 +42,26 @@ $insufficient = MarketDataHub::consensusFromQuotes([
 ]);
 mdAssert(($insufficient['available'] ?? true) === false, 'One source is not enough to influence execution.');
 
+// Provider parser isolation: a multi-asset response must select only the exact
+// requested asset instead of taking a median across unrelated currencies.
+$hub = new MarketDataHub();
+$abanParser = new ReflectionMethod(MarketDataHub::class, 'abanPrices');
+$abanFixture = [
+    'data'=>[
+        ['symbol'=>'BTC','buy_price'=>'100000','sell_price'=>'100200'],
+        ['symbol'=>'ETH','buy_price'=>'5000','sell_price'=>'5050'],
+    ],
+];
+[$abanBid,$abanAsk,$abanLast] = $abanParser->invoke($hub, $abanFixture, 'BTC');
+mdNear((float)$abanBid, 100000.0, 0.0001, 'Aban parser mixed another asset into BTC bid.');
+mdNear((float)$abanAsk, 100200.0, 0.0001, 'Aban parser mixed another asset into BTC ask.');
+mdNear((float)$abanLast, 0.0, 0.0001, 'Aban fixture should not manufacture a last price.');
+
+$unknownAssetRejected = false;
+try { $abanParser->invoke($hub, $abanFixture, 'SOL'); }
+catch (Throwable $e) { $unknownAssetRejected = str_contains($e->getMessage(), 'requested asset'); }
+mdAssert($unknownAssetRejected, 'Aban parser must reject a multi-asset payload when the requested symbol is absent.');
+
 $bitpinEngine = (new AutoTraderEngine())->run();
 mdAssert(($bitpinEngine['status'] ?? '') === 'market_data_only', 'Legacy Bitpin engine must be a deterministic market-data-only no-op.');
 mdAssert(($bitpinEngine['execution_allowed'] ?? true) === false, 'Bitpin execution must stay disabled.');
