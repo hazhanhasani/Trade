@@ -15,7 +15,7 @@ foreach([
     'take_profit_percent','daily_loss_limit_percent',
 ] as $field){expect(str_contains($trading,'name="'.$field.'"'),'Core trading setting disappeared from admin: '.$field);}
 expect(str_contains($trading,'function positionAnalytics(?array $position,?array $signal)'), 'Trading panel positionAnalytics must remain null-safe.');
-expect(str_contains($trading,"array_filter($e['active_positions'],'is_array')"), 'Trading panel must filter invalid/null position rows before rendering.');
+expect(str_contains($trading,"array_filter(\$e['active_positions'],'is_array')"), 'Trading panel must filter invalid/null position rows before rendering.');
 
 $advanced=source('public/admin/bot/settings.php');
 expect(str_contains($advanced,'nobitex_max_buy_orders_per_hour'),'Advanced trading page must expose the real hourly BUY safety limit.');
@@ -29,10 +29,10 @@ expect(!preg_match('/SET\s+amount=:amount[^;]+amount>:amount/s',$reconciler),'Na
 
 $client=source('src/Exchange/NobitexClient.php');
 expect(str_contains($client,'authenticatedRead(fn() => $this->request'), 'Safe authenticated Nobitex reads must use transient-network retry protection.');
-expect(str_contains($client,"(?:6|7|28)"),'Retry protection must cover DNS/connect/timeout cURL errors 6/7/28.');
+expect(str_contains($client,'(?:6|7|28)'),'Retry protection must cover DNS/connect/timeout cURL errors 6/7/28.');
 
 $scanner=source('src/Trading/NobitexUniverseScanner.php');
 expect(str_contains($scanner,'unset($legacyLimit, $legacyThreshold);'),'Legacy scan limit must remain non-gating.');
-expect(str_contains($scanner,"'full_universe_analysis' = true") || str_contains($scanner,"['full_universe_analysis'] = true"),'Scanner must preserve full-universe analysis marker.');
+expect(str_contains($scanner,"['full_universe_analysis'] = true"),'Scanner must preserve full-universe analysis marker.');
 
 fwrite(STDOUT,"Trading admin settings and live hotfix regression tests passed.\n");
