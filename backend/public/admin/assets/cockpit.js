@@ -41,21 +41,12 @@
   function statCard(labels){const wanted=(Array.isArray(labels)?labels:[labels]).map(x=>String(x).trim());return [...document.querySelectorAll('.stat-card')].find(c=>wanted.includes((c.querySelector(':scope > span')?.textContent||'').trim()));}
   function updateStatCard(labels,newLabel,value,small=null){const card=statCard(labels);if(!card)return;setText(card.querySelector(':scope > span'),newLabel);setText(card.querySelector(':scope > b'),value);if(small!==null)setText(card.querySelector(':scope > small'),small);card.classList.add('live-truth-card');}
   function setHero(prefix,value){const pill=[...document.querySelectorAll('.hero-pill')].find(x=>(x.textContent||'').trim().startsWith(prefix));if(pill)setText(pill,value);}
-  function prepareLiveDashboard(){
-    updateStatCard(['PnL امروز Nobitex','ارزش کیف پول نوبیتکس'],'ارزش کیف پول نوبیتکس','…','در حال همگام‌سازی با کیف پول واقعی');
-    updateStatCard(['PnL کل Nobitex','نقد قابل معامله نوبیتکس'],'نقد قابل معامله نوبیتکس','…','در حال دریافت موجودی آزاد');
-    updateStatCard(['Win Rate','PnL امروز ربات'],'PnL امروز ربات','…','فقط معاملات بسته‌شده Trade');
-    updateStatCard(['پوزیشن فعال','پوزیشن فعال ربات'],'پوزیشن فعال ربات','…','در حال تطبیق ظرفیت');
-    updateStatCard(['سفارش امروز','سفارش امروز Trade'],'سفارش امروز Trade','…','Order Ledger • روز جاری ایران');
-    updateStatCard('Pending','Pending','…','در حال تطبیق سفارش‌های معلق');
-    updateStatCard(['Risk Multiplier','اکسپوژر ربات'],'اکسپوژر ربات','…','نسبت پوزیشن‌های Trade به کل کیف پول');
-    updateStatCard(['Android Devices','Win Rate ربات'],'Win Rate ربات','…','معاملات بسته‌شده Trade');
-  }
   function liveDashboard(d){
     const status=d.status||{},nb=status.exchanges?.nobitex||{},perf=nb.performance||{},perfIrt=perf.by_quote?.IRT||((perf.quote_asset==='IRT'||perf.display_unit==='TOMAN')?perf:{}),cap=nb.portfolio_capacity||{},wallet=d.portfolio_truth||{};
     const assets=Array.isArray(wallet.wallet_assets)?wallet.wallet_assets:[];
-    const cashRow=assets.find(x=>['RLS','IRT'].includes(String(x?.asset||'').toUpperCase()));
-    const walletTotal=Number(wallet.wallet_total_toman),cashAvailable=Number(cashRow?.available_value_toman??wallet.cash_by_quote?.IRT),exposure=Number(wallet.exposure_percent);
+    const cashRows=assets.filter(x=>['RLS','IRT'].includes(String(x?.asset||'').toUpperCase()));
+    const cashFallback=cashRows.reduce((sum,x)=>{const value=Number(x?.available_value_toman);return sum+(Number.isFinite(value)?value:0);},0);
+    const walletTotal=Number(wallet.wallet_total_toman),cashAvailable=Number(wallet.available_cash_by_quote?.IRT??(cashRows.length?cashFallback:wallet.cash_by_quote?.IRT)),exposure=Number(wallet.exposure_percent);
     const cacheAge=Number(wallet.cache_age_seconds??0),cacheState=String(wallet.cache_state||wallet.status||'unknown');
     const walletReady=Number.isFinite(walletTotal)&&walletTotal>=0;
     const cashReady=Number.isFinite(cashAvailable)&&cashAvailable>=0;
@@ -74,7 +65,11 @@
   }
   function startPageSpecificLive(){
     const path=location.pathname.replace(/\/+$/,'/');
-    if((path==='/admin/'||path==='/admin/index.php')&&document.querySelector('.admin-shell')){prepareLiveDashboard();poll(async()=>{const j=await json('/admin/live-dashboard.php');liveDashboard(j.data);},4000);}
+    if((path==='/admin/'||path==='/admin/index.php')&&document.querySelector('.admin-shell')){
+      // Initial dashboard truth is rendered by PHP. Do not replace it with
+      // English/placeholder values while the first live request is in flight.
+      poll(async()=>{const j=await json('/admin/live-dashboard.php');liveDashboard(j.data);},4000);
+    }
   }
   function wireMobileMenus(){
     document.querySelectorAll('.mobile-nav-menu').forEach(details=>{
