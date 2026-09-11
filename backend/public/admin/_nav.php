@@ -56,10 +56,10 @@ function tradeAdminNav(string $active, string $version): void
             ['/admin/bot/','معاملات'],['/admin/bot/settings.php','تنظیمات معاملات'],['/admin/bot/reconcile.php','همگام‌سازی پوزیشن‌ها'],['/admin/bot/intelligence.php','ریسک هوشمند'],['/admin/bot/learning.php','یادگیری استراتژی'],
             ['/admin/bot/execution.php','یادگیری اجرا'],['/admin/bot/calibration.php','کالیبراسیون Edge'],['/admin/bot/rotation.php','تعویض فرصت‌ها'],['/admin/bot/advanced.php','پیشرفته'],['/admin/tradingview.php','TradingView'],
         ]; ?>
-        <nav class="subnav global-subnav" aria-label="ماژول‌های معاملات"><?php foreach($mods as [$href,$label]):?><a class="<?=$path===$href?'active':''?>" href="<?=$href?>" <?=$path===$href?'aria-current="page"':''?>>><?=$label?></a><?php endforeach?></nav>
+        <nav class="subnav global-subnav" aria-label="ماژول‌های معاملات"><?php foreach($mods as [$href,$label]):?><a class="<?=$path===$href?'active':''?>" href="<?=$href?>" <?=$path===$href?'aria-current="page"':''?>><?=$label?></a><?php endforeach?></nav>
     <?php elseif($active==='system'):
         $mods=[['/admin/system.php','سلامت سیستم'],['/admin/logs.php','خطا و لاگ'],['/admin/devices.php','دستگاه‌ها'],['/admin/update/','بروزرسانی'],['/admin/repair.php','عیب‌یابی']]; ?>
-        <nav class="subnav global-subnav" aria-label="ماژول‌های سیستم"><?php foreach($mods as [$href,$label]):?><a class="<?=($path===$href||($href==='/admin/update/'&&str_starts_with($path,'/admin/update/')))?'active':''?>" href="<?=$href?>"><?=$label?></a><?php endforeach?></nav>
+        <nav class="subnav global-subnav" aria-label="ماژول‌های سیستم"><?php foreach($mods as [$href,$label]):?><a class="<?=($path===$href||($href==='/admin/update/'&&str_starts_with($path,'/admin/update/')))?'active':''?>" href="<?=$href?>" <?=($path===$href||($href==='/admin/update/'&&str_starts_with($path,'/admin/update/')))?'aria-current="page"':''?>><?=$label?></a><?php endforeach?></nav>
     <?php endif;
 }
 
