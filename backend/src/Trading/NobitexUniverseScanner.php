@@ -45,8 +45,6 @@ final class NobitexUniverseScanner
         int $legacyLimit = 20,
         int $legacyThreshold = 60
     ): array {
-        // Kept only for backward-compatible method signatures. Neither value can
-        // remove a Nobitex market from profitability analysis.
         unset($legacyLimit, $legacyThreshold);
 
         $preferredQuote = $this->quote($preferredQuote);
@@ -69,9 +67,6 @@ final class NobitexUniverseScanner
         $this->ensureCacheSchema($pdo);
         $cache = $this->loadHistoryCache($pdo);
 
-        // Refresh missing/oldest histories first. This is scheduling only: every
-        // market below is still analyzed, including markets not refreshed in this
-        // tick, using its persisted history plus the current live price.
         $refreshQueue = $markets;
         usort($refreshQueue, static function (array $a, array $b) use ($cache): int {
             $aAt = trim((string) ($cache[(string) $a['symbol']]['fetched_at'] ?? ''));
@@ -153,9 +148,6 @@ final class NobitexUniverseScanner
             self::$processSnapshotCache[$symbol] = $market;
         }
 
-        // Sorting happens only after every executable market has been analyzed.
-        // It decides execution order when capital/risk constraints prevent all
-        // profitable entries from being sent at once; it never creates eligibility.
         usort($analyzed, static function (array $a, array $b) use ($preferredQuote): int {
             $aBuy = (($a['signal']['action'] ?? '') === 'buy') ? 1 : 0;
             $bBuy = (($b['signal']['action'] ?? '') === 'buy') ? 1 : 0;
@@ -190,6 +182,9 @@ final class NobitexUniverseScanner
 
         [$base, $quote] = $this->parseSymbol($symbol);
         if ($base === '' || $quote === '') throw new \InvalidArgumentException('Invalid Nobitex market symbol.');
+        if (!NobitexSymbolPolicy::isOrderApiCompatibleBase($base)) {
+            throw new \RuntimeException('Nobitex scaled market alias is not executable via order API: ' . $symbol);
+        }
 
         $response = $client->orderBook($symbol);
         $book = $this->extractBook($response, $symbol);
@@ -269,11 +264,6 @@ final class NobitexUniverseScanner
         self::$cacheSchemaEnsured = true;
     }
 
-    /**
-     * Reserves request slots transactionally across cron/manual runs. We cap at
-     * 55 per rolling local 60-second budget, leaving headroom below Nobitex's
-     * documented 60 OHLC requests/minute limit.
-     */
     private function reserveOhlcBudget(PDO $pdo, int $desired): int
     {
         $desired = max(0, $desired);
@@ -408,7 +398,12 @@ final class NobitexUniverseScanner
             if (!is_string($rawSymbol) || !is_array($book)) continue;
             $symbol = strtoupper(preg_replace('/[^A-Z0-9]/', '', $rawSymbol) ?? '');
             [$base, $quote] = $this->parseSymbol($symbol);
-            if ($base === '' || $quote === '' || in_array($base, self::EXCLUDED_BASES, true)) continue;
+            if (
+                $base === '' ||
+                $quote === '' ||
+                in_array($base, self::EXCLUDED_BASES, true) ||
+                !NobitexSymbolPolicy::isOrderApiCompatibleBase($base)
+            ) continue;
 
             $market = $this->market($symbol, $book, $stats, $options);
             if ($market !== null) $out[] = $market;
@@ -416,15 +411,10 @@ final class NobitexUniverseScanner
         return $out;
     }
 
-    /**
-     * Executability filter only. It rejects malformed/crossed books, very wide
-     * spreads and markets whose visible depth cannot cover a minimal order. It
-     * never ranks assets by momentum, popularity or a synthetic score.
-     */
     private function market(string $symbol, array $book, array $stats, array $options): ?array
     {
         [$base, $quote] = $this->parseSymbol($symbol);
-        if ($base === '' || $quote === '') return null;
+        if ($base === '' || $quote === '' || !NobitexSymbolPolicy::isOrderApiCompatibleBase($base)) return null;
 
         $last = $this->number($book['lastTradePrice'] ?? $book['last_trade_price'] ?? $book['lastPrice'] ?? 0);
         $bestAsk = $this->levelPrice($book['asks'][0] ?? null);

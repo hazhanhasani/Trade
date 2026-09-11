@@ -46,10 +46,6 @@ final class BaleSystemAlert
         $this->ensureSchema($pdo);
         $severity = $this->severity($severity);
 
-        // Fixed wall-clock buckets can send two identical warnings seconds apart
-        // when the error happens on both sides of a bucket boundary. Use a true
-        // sliding window instead: first occurrence is immediate, then identical
-        // noise is suppressed while critical incidents can repeat sooner.
         $hash = substr(hash('sha256', $fingerprint), 0, 40);
         $windowSeconds = match ($severity) {
             'critical' => 120,
@@ -153,8 +149,18 @@ final class BaleSystemAlert
         ];
         $context=json_decode((string)($row['context_json']??''),true);
         if (is_array($context)) {
-            foreach (['component'=>'بخش','exchange'=>'صرافی','symbol'=>'بازار','request_id'=>'شناسه','status'=>'وضعیت'] as $k=>$fa) {
-                if (isset($context[$k]) && is_scalar($context[$k]) && trim((string)$context[$k])!=='') $lines[]=$fa . ': ' . mb_substr((string)$context[$k],0,180);
+            foreach ([
+                'component'=>'بخش',
+                'file'=>'فایل',
+                'line'=>'خط',
+                'exchange'=>'صرافی',
+                'symbol'=>'بازار',
+                'request_id'=>'شناسه',
+                'status'=>'وضعیت',
+            ] as $k=>$fa) {
+                if (isset($context[$k]) && is_scalar($context[$k]) && trim((string)$context[$k])!=='') {
+                    $lines[]=$fa . ': ' . mb_substr((string)$context[$k],0,180);
+                }
             }
         }
         return mb_substr(implode("\n",$lines),0,4000);
