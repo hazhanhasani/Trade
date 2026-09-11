@@ -1,0 +1,51 @@
+name: Apply Trade 1.4.22 full debug hotfix
+
+on:
+  push:
+    paths:
+      - '.github/workflows/hotfix-full-debug-v1422.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: curl, pdo_mysql, openssl
+      - name: Apply full debug patch
+        run: python3 tools/apply_full_debug_v1422.py
+      - name: Validate focused debug regressions
+        run: |
+          php -l backend/src/Trading/NobitexInternalSignalEngine.php
+          php -l backend/src/Trading/NobitexStrategyLearning.php
+          php -l backend/src/Trading/NobitexGlobalRiskRuntime.php
+          php -l backend/src/Trading/NobitexPortfolioEngine.php
+          php -l backend/src/Observability/NobitexDecisionReporter.php
+          php -l backend/src/Trading/NobitexRuntimeModels.php
+          php backend/tests/nobitex_full_debug_v1422_test.php
+          php backend/tests/nobitex_soft_capacity_test.php
+          php backend/tests/trading_strategy_test.php
+          php backend/tests/strategy_learning_v2_test.php
+      - name: Commit debug fixes to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add backend/src/Trading/NobitexInternalSignalEngine.php \
+                  backend/src/Trading/NobitexStrategyLearning.php \
+                  backend/src/Trading/NobitexGlobalRiskRuntime.php \
+                  backend/src/Trading/NobitexPortfolioEngine.php \
+                  backend/src/Observability/NobitexDecisionReporter.php \
+                  backend/src/Trading/NobitexRuntimeModels.php \
+                  backend/tests/nobitex_full_debug_v1422_test.php \
+                  .github/workflows/php-lint.yml
+          git commit -m 'Fix Profit-First buffer saturation and debug pipeline'
+          git push origin HEAD:main
