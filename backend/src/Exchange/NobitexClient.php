@@ -130,6 +130,9 @@ final class NobitexClient
 
     public function orders(array $query = []): array { return $this->request('GET', '/market/orders/list', $query, true); }
 
+    /** Authenticated spot fills/trades. Nobitex currently documents 180-day history. */
+    public function trades(array $query = []): array { return $this->request('GET', '/market/trades/list', $query, true); }
+
     public function orderStatus(?string $id = null, ?string $clientOrderId = null): array
     {
         $payload=[];
