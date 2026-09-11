@@ -20,7 +20,7 @@ use Trade\Trading\NobitexEdgeCalibration;
 use Trade\Trading\NobitexExecutionLearning;
 use Trade\Trading\NobitexOrderService;
 use Trade\Trading\NobitexPerformanceAnalytics;
-use Trade\Trading\NobitexPortfolioValuation;
+use Trade\Trading\NobitexPortfolioSnapshotCache;
 use Trade\Trading\NobitexRotationMonitor;
 use Trade\Trading\NobitexSchema;
 use Trade\Trading\NobitexStrategyLearning;
@@ -51,10 +51,11 @@ function credentialExists(string $exchange):bool{$s=Database::connection()->prep
 function globalPortfolioSnapshot():array{
     if(!credentialExists('nobitex'))return['status'=>'unavailable','reason'=>'credentials_missing'];
     try{
-        $pdo=Database::connection();$service=new NobitexOrderService();$client=$service->client();$wallets=$client->wallets();
-        $positions=$pdo->query("SELECT symbol,asset,quote_asset,amount,entry_price,mark_price,status FROM nobitex_autotrade_positions WHERE status IN ('pending_open','open','pending_close') ORDER BY id ASC LIMIT 30")->fetchAll();
-        return['status'=>'ok']+(new NobitexPortfolioValuation())->snapshot($client,$wallets,$positions);
-    }catch(Throwable $e){ErrorReporter::captureThrowable($e,'warning','global_portfolio');return['status'=>'deferred','reason'=>'valuation_failed','message'=>mb_substr($e->getMessage(),0,240)];}
+        return (new NobitexPortfolioSnapshotCache())->snapshot(Database::connection());
+    }catch(Throwable $e){
+        ErrorReporter::captureThrowable($e,'warning','global_portfolio');
+        return['status'=>'deferred','reason'=>'valuation_failed','message'=>mb_substr($e->getMessage(),0,240)];
+    }
 }
 
 try{
