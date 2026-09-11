@@ -1,0 +1,39 @@
+name: Apply adaptive capacity soft-sizing hotfix
+
+on:
+  push:
+    paths:
+      - '.github/workflows/hotfix-soft-capacity.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: curl, pdo_mysql, openssl
+      - name: Apply patch
+        run: python3 tools/apply_soft_capacity_hotfix.py
+      - name: Validate patch
+        run: |
+          php -l backend/src/Trading/NobitexGlobalRiskRuntime.php
+          php -l backend/src/Trading/NobitexCapacityManager.php
+          php -l backend/src/Trading/NobitexPortfolioEngine.php
+          php -l backend/src/Trading/NobitexAutoTraderEngine.php
+          php backend/tests/nobitex_soft_capacity_test.php
+      - name: Commit hotfix to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add backend/src/Trading/NobitexGlobalRiskRuntime.php backend/src/Trading/NobitexCapacityManager.php backend/src/Trading/NobitexPortfolioEngine.php backend/src/Trading/NobitexAutoTraderEngine.php backend/tests/nobitex_soft_capacity_test.php
+          git commit -m 'Make adaptive capacity soft sizing only'
+          git push origin HEAD:main
