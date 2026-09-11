@@ -346,10 +346,8 @@ final class NobitexAutoTraderEngine
     {
         $symbol = strtoupper(preg_replace('/[^A-Z0-9]/', '', $symbol) ?? '');
         if ($symbol === '') return ['applied'=>false,'reason'=>'invalid_symbol'];
-        $stmt = $pdo->prepare("SELECT value_text FROM settings WHERE key_name='cooldown_minutes' LIMIT 1");
-        $stmt->execute();
-        $raw=$stmt->fetchColumn();
-        $cooldownMinutes=is_numeric($raw)?(int)$raw:15;
+        $sharedSettings=Schema::settings($pdo);
+        $cooldownMinutes=(int)($sharedSettings['cooldown_minutes']??15);
         $cooldownMinutes=max(1,min(1440,$cooldownMinutes));
         $cooldownSeconds=$cooldownMinutes*60;
         $remainingSeconds=max(15,min($cooldownSeconds,max(15,$requestedSeconds)));

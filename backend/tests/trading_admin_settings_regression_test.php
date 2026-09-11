@@ -13,7 +13,11 @@ foreach([
     'nobitex_portfolio_exposure_percent','nobitex_max_positions','nobitex_max_pending_orders',
     'nobitex_pending_timeout_seconds','cooldown_minutes','stop_loss_percent',
     'take_profit_percent','daily_loss_limit_percent',
-] as $field){expect(str_contains($trading,'name="'.$field.'"'),'Core trading setting disappeared from admin: '.$field);}
+] as $field){expect(!str_contains($trading,'name="'.$field.'"'),'Trading dashboard must not expose a second editable settings field: '.$field);}
+expect(!str_contains($trading,'$c->updateSettings($_POST)'),'Trading dashboard must never persist settings.');
+expect(str_contains($trading,"/admin/bot/settings.php?legacy_form=1"),'Legacy settings POST must be redirected without applying stale values.');
+expect(str_contains($trading,'href="/admin/bot/settings.php"'),'Trading dashboard must link to the canonical settings editor.');
+expect(str_contains($trading,'منبع واحد'),'Trading dashboard must explain the single source of truth.');
 expect(str_contains($trading,'function positionAnalytics(?array $position,?array $signal)'), 'Trading panel positionAnalytics must remain null-safe.');
 expect(str_contains($trading,"array_filter(\$e['active_positions'],'is_array')"), 'Trading panel must filter invalid/null position rows before rendering.');
 
@@ -26,6 +30,12 @@ foreach([
 ] as $field){expect(str_contains($simple,'name="'.$field.'"'),'Simple trading settings page missing: '.$field);}
 foreach(['سه عدد مهم','سرمایه هدف هر خرید','سقف کل سرمایه درگیر','حفاظت از سرمایه و خروج','سفارش‌های در انتظار','واژه‌ها یعنی چه؟'] as $label){expect(str_contains($simple,$label),'Simple settings explanation missing: '.$label);}
 expect(str_contains($simple,'/admin/bot/advanced.php'),'Simple settings must link to advanced controls.');
+expect(str_contains($simple,'$c->updateSettings($_POST)'),'Canonical settings page must remain the admin write surface.');
+expect(str_contains($simple,"legacy_form"),'Canonical settings page must explain rejected legacy-form submissions.');
+
+$legacyEngine=source('src/Trading/NobitexAutoTraderEngine.php');
+expect(str_contains($legacyEngine,'$sharedSettings=Schema::settings($pdo);'),'Nobitex cooldown must read canonical autotrade settings.');
+expect(!str_contains($legacyEngine,"key_name='cooldown_minutes'"),'Nobitex runtime must not read cooldown from the legacy generic settings table.');
 
 $advanced=source('public/admin/bot/advanced.php');
 expect(str_contains($advanced,'nobitex_max_buy_orders_per_hour'),'Advanced trading page must expose the real hourly BUY safety limit.');
