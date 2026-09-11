@@ -85,6 +85,8 @@ jobs:
         run: php backend/tests/command_center_test.php
       - name: Project operating system regression tests
         run: php backend/tests/project_operating_system_test.php
+      - name: Repair and Cron diagnostics regression tests
+        run: php backend/tests/repair_diagnostics_test.php
       - name: Android live panel parity regression tests
         run: php backend/tests/android_live_panel_parity_test.php
       - name: Validate Backend ↔ Android API contract parity
