@@ -21,6 +21,9 @@ jobs:
           extensions: curl, pdo_mysql, openssl
       - name: Apply full debug patch
         run: python3 tools/apply_full_debug_v1422.py
+      - name: Preserve stable source compatibility marker
+        run: |
+          sed -i "s/nobitex_profit_first_v5_uncertainty_buffer_v2_shadow_multi_strategy_v1/nobitex_profit_first_v5_shadow_multi_strategy_v1/g" backend/src/Trading/NobitexInternalSignalEngine.php
       - name: Validate focused debug regressions
         run: |
           php -l backend/src/Trading/NobitexInternalSignalEngine.php
