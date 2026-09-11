@@ -60,7 +60,11 @@ expectRepair(is_string($baleAlert) && str_contains($baleAlert, "'file'=>'فای�
 expectRepair(str_contains($baleAlert, "'line'=>'خط دقیق'"), 'Bale alert formatter must label the exact line.');
 expectRepair(str_contains($baleAlert, 'توضیح:'), 'Bale alert formatter must show the diagnosis text.');
 expectRepair(str_contains($baleAlert, 'اقدام پیشنهادی:'), 'Bale alert formatter must show remediation guidance.');
-expectRepair(str_contains($baleAlert, 'recentlyQueued($pdo, $hash, 5)'), 'Only a tiny anti-recursion dedupe guard may remain.');
+expectRepair(str_contains($baleAlert, '$dedupeSeconds = match ($severity)'), 'Bale must use severity-aware dedupe for repeated human-facing technical alerts.');
+expectRepair(str_contains($baleAlert, "'info' => 600"), 'Repeated info fingerprints such as healthy portfolio_full cron logs must be limited to one Bale alert per ten minutes.');
+expectRepair(str_contains($baleAlert, "'warning' => 120"), 'Repeated warning fingerprints must retain a short two-minute Bale repeat window.');
+expectRepair(str_contains($baleAlert, "'error', 'critical' => 30"), 'Errors and critical alerts must retain a fast thirty-second repeat window.');
+expectRepair(str_contains($baleAlert, 'recentlyQueued($pdo, $hash, $dedupeSeconds)'), 'Bale dedupe must apply the severity-specific repeat window.');
 expectRepair(str_contains($baleAlert, "default=>'لاگ'"), 'Info diagnostics must render as log messages in Bale.');
 
 expectRepair(is_string($decisionReporter) && str_contains($decisionReporter, 'no_candidate_passed_signal_and_risk_filters'), 'Nobitex decision reporter must explain the final no-buy reason.');
