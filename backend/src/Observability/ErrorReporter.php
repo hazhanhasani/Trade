@@ -118,7 +118,15 @@ final class ErrorReporter
                         $severity,
                         $severity === 'critical' ? 'خطای بحرانی Trade' : ($severity === 'error' ? 'خطای Trade' : 'هشدار Trade'),
                         $message,
-                        ['component'=>$component,'request_id'=>$payload['context']['request_id'] ?? null,'status'=>$payload['context']['status'] ?? null,'exchange'=>$payload['context']['exchange'] ?? null,'symbol'=>$payload['context']['symbol'] ?? null],
+                        [
+                            'component'=>$component,
+                            'file'=>$file !== '' ? basename($file) : null,
+                            'line'=>$line > 0 ? $line : null,
+                            'request_id'=>$payload['context']['request_id'] ?? null,
+                            'status'=>$payload['context']['status'] ?? null,
+                            'exchange'=>$payload['context']['exchange'] ?? null,
+                            'symbol'=>$payload['context']['symbol'] ?? null,
+                        ],
                         true
                     );
                 } catch (\Throwable) {}
