@@ -67,7 +67,8 @@ expectRepair(str_contains($decisionReporter, 'TradableEdge='), 'Nobitex decision
 expectRepair(str_contains($decisionReporter, 'RequiredBuffer='), 'Nobitex decision reporter must include the required execution buffer.');
 expectRepair(str_contains($decisionReporter, 'Spread='), 'Nobitex decision reporter must include spread.');
 expectRepair(str_contains($decisionReporter, 'reasonFa'), 'Nobitex decision reporter must translate rejection reasons for humans.');
-expectRepair(str_contains($decisionReporter, 'NobitexPortfolioEngine.php → runLocked() / entryBudget()'), 'Decision logs must name the exact decision path.');
+expectRepair(str_contains($decisionReporter, 'NobitexInternalSignalEngine.php → Profit-First v5 | سپس NobitexPortfolioEngine.php → entryBudget()'), 'Decision logs must name the exact profit-first decision path.');
+expectRepair(str_contains($decisionReporter, 'multi_strategy_role'), 'Decision trace must identify multi-strategy analysis as shadow diagnostics.');
 
 expectRepair(is_string($cronTick) && str_contains($cronTick, "'cron_cycle'"), 'Every completed Cron cycle must emit a diagnostic log.');
 expectRepair(str_contains($cronTick, "'run_id'=>"), 'Cron diagnostic logs must include their Run ID.');
