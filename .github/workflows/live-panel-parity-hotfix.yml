@@ -1,0 +1,216 @@
+name: One-time Live Panel Parity Hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/live-panel-parity-hotfix.yml'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'Install live panel parity hotfix runner'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply live panel parity hotfix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, got {count}')
+              return text.replace(old, new, 1)
+
+          # Android API: /api/status is the same live source used by the admin panel.
+          # Cache that response and overlay its authoritative account/performance fields
+          # on the richer Command Center payload consumed by the app.
+          api_path = Path('android/app/src/main/java/ir/trade/app/data/TradeApi.kt')
+          api = api_path.read_text()
+          api = replace_once(
+              api,
+              '    @Volatile private var backendCapabilities: Set<String> = emptySet()\n',
+              '    @Volatile private var backendCapabilities: Set<String> = emptySet()\n    @Volatile private var latestStatusDataJson: String? = null\n',
+              'TradeApi status cache field',
+          )
+          api = replace_once(
+              api,
+              '''    suspend fun status(): Response {\n        val response = request("GET", "/api/status")\n        if (response.ok) captureContract(response)\n        return response\n    }\n''',
+              '''    suspend fun status(): Response {\n        val response = request("GET", "/api/status")\n        if (response.ok) {\n            captureContract(response)\n            cacheStatusData(response)\n        }\n        return response\n    }\n''',
+              'TradeApi status()',
+          )
+          api = replace_once(
+              api,
+              '''    suspend fun commandCenter(): Response {\n        requireCapability("analytics.command_center_v1")\n        return request("GET", "/api/command-center")\n    }\n''',
+              '''    suspend fun commandCenter(): Response {\n        requireCapability("analytics.command_center_v1")\n        val response = request("GET", "/api/command-center")\n        return if (response.ok) mergeLivePanelStatus(response) else response\n    }\n''',
+              'TradeApi commandCenter()',
+          )
+          api = replace_once(
+              api,
+              '    private fun captureContract(response: Response) {\n',
+              '''    private fun cacheStatusData(response: Response) {\n        latestStatusDataJson = try {\n            val root = JSONObject(response.body)\n            (root.optJSONObject("data") ?: root).toString()\n        } catch (_: Exception) {\n            null\n        }\n    }\n\n    /**\n     * Keep Android numerically identical to the live Admin panel. The panel and\n     * /api/status both use BotController::status() as their source of truth.\n     * Command Center adds richer analytics, but must not replace authoritative\n     * wallet/performance/capacity values with independently aggregated numbers.\n     */\n    private fun mergeLivePanelStatus(response: Response): Response {\n        val cached = latestStatusDataJson ?: return response\n        return try {\n            val root = JSONObject(response.body)\n            val data = root.optJSONObject("data") ?: root\n            val status = JSONObject(cached)\n            val nobitex = status.optJSONObject("exchanges")?.optJSONObject("nobitex")\n            val performance = nobitex?.optJSONObject("performance")\n            val capacity = nobitex?.optJSONObject("portfolio_capacity")\n            val global = status.optJSONObject("global_portfolio")\n            val cron = status.optJSONObject("cron_health")\n            val headline = data.optJSONObject("headline") ?: JSONObject().also { data.put("headline", it) }\n            val strip = data.optJSONObject("status_strip") ?: JSONObject().also { data.put("status_strip", it) }\n\n            fun number(obj: JSONObject?, key: String): Double? {\n                if (obj == null || !obj.has(key) || obj.isNull(key)) return null\n                val value = obj.optDouble(key, Double.NaN)\n                return value.takeIf { it.isFinite() }\n            }\n\n            number(global, "wallet_total_toman")\n                ?: number(global, "portfolio_value_irt")\n                ?.let { headline.put("portfolio_value_irt", it) }\n            // The Elvis expression above only invokes let() for portfolio_value_irt;\n            // prefer wallet_total_toman explicitly when it exists.\n            number(global, "wallet_total_toman")?.let { headline.put("portfolio_value_irt", it) }\n            global?.let { data.put("global_portfolio", it) }\n\n            number(performance, "today_realized_pnl")?.let { today ->\n                headline.put("today_net_pnl_irt", today)\n                headline.put("today_realized_bot_pnl_irt", today)\n                val reports = data.optJSONObject("reports") ?: JSONObject().also { data.put("reports", it) }\n                reports.put("daily", JSONObject().put("net_pnl", today).put("unit", "TOMAN").put("scope", "live_panel_realized_bot_pnl"))\n            }\n            number(performance, "total_realized_pnl")?.let { total ->\n                headline.put("total_realized_pnl_irt", total)\n                headline.put("total_realized_bot_pnl_irt", total)\n                val reports = data.optJSONObject("reports") ?: JSONObject().also { data.put("reports", it) }\n                reports.put("total", JSONObject().put("net_pnl", total).put("unit", "TOMAN").put("scope", "live_panel_realized_bot_pnl"))\n            }\n            number(performance, "win_rate_percent")?.let {\n                headline.put("win_rate_percent", it)\n                data.optJSONObject("reports")?.put("win_rate_percent", it)\n            }\n            performance?.let {\n                headline.put("closed_positions", it.optInt("closed_positions", 0))\n                headline.put("winning_positions", it.optInt("winning_positions", 0))\n            }\n\n            capacity?.let {\n                headline.put("active_positions", it.optInt("active_positions", headline.optInt("active_positions", 0)))\n                headline.put("configured_max_positions", it.optInt("max_positions", headline.optInt("configured_max_positions", 0)))\n                headline.put("pending_orders", it.optInt("pending_orders", 0))\n                headline.put("max_pending_orders", it.optInt("max_pending_orders", 0))\n                strip.put("positions", it.optInt("active_positions", 0))\n            }\n            nobitex?.let {\n                strip.put("bot", if (it.optBoolean("bot_enabled", false)) "live" else "off")\n                strip.put("api", if (it.optBoolean("credentials_configured", false)) "ready" else "missing")\n                strip.put("live_execution", if (it.optBoolean("live_execution_enabled", false)) "on" else "off")\n            }\n            cron?.let { strip.put("cron_healthy", it.optBoolean("healthy", false)) }\n\n            val livePanel = JSONObject()\n                .put("source", "api_status_bot_controller")\n                .put("synced", true)\n            performance?.let { livePanel.put("performance", it) }\n            capacity?.let { livePanel.put("portfolio_capacity", it) }\n            nobitex?.optJSONObject("latest_signal")?.let { livePanel.put("latest_signal", it) }\n            nobitex?.optJSONObject("latest_order")?.let { livePanel.put("latest_order", it) }\n            status.optJSONObject("time_iran")?.let { livePanel.put("time_iran", it) }\n            data.put("live_panel", livePanel)\n            data.put("live_source", "api_status_panel_truth")\n\n            Response(response.code, root.toString())\n        } catch (_: Exception) {\n            response\n        }\n    }\n\n    private fun captureContract(response: Response) {\n''',
+              'TradeApi live panel merge methods',
+          )
+          api_path.write_text(api)
+
+          # Android UI: never present a cached snapshot as live, refresh frequently,
+          # and show the exact metrics the live Admin dashboard uses.
+          app_path = Path('android/app/src/main/java/ir/trade/app/ui/TradeAppV4.kt')
+          app = app_path.read_text()
+          app = replace_once(
+              app,
+              '    var offline by remember { mutableStateOf(false) }\n',
+              '    var offline by remember { mutableStateOf(!snapshotJson.isNullOrBlank()) }\n',
+              'V4 cached state marker',
+          )
+          app = replace_once(app, '            delay(30_000)\n', '            delay(10_000)\n', 'V4 live refresh interval')
+          app = replace_once(
+              app,
+              '            Text("Command Center • v${BuildConfig.RELEASE_VERSION}${if (offline) " • Offline Snapshot" else ""}", color = if (offline) V4Amber else V4Muted, style = MaterialTheme.typography.labelMedium)\n',
+              '            Text("${if (offline) "Offline Snapshot" else "Live Panel"} • v${BuildConfig.RELEASE_VERSION}", color = if (offline) V4Amber else V4Green, style = MaterialTheme.typography.labelMedium)\n',
+              'V4 top live label',
+          )
+          app = replace_once(
+              app,
+              '                V4Metric("PnL امروز", signedMoney(headline.optDouble("today_net_pnl_irt")), "تومان", Modifier.weight(1f))\n',
+              '                V4Metric("PnL امروز ربات", signedMoney(headline.optDouble("today_net_pnl_irt")), "تومان • پنل زنده", Modifier.weight(1f))\n',
+              'V4 today pnl label',
+          )
+          app = replace_once(
+              app,
+              '''        item {\n            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {\n                V4Metric("PnL ماه", signedMoney(headline.optDouble("month_net_pnl_irt")), "تومان", Modifier.weight(1f))\n                V4Metric("Drawdown", "${fmt(headline.optDouble("current_drawdown_percent"), 2)}%", "جاری", Modifier.weight(1f))\n            }\n        }\n        if (offline) item { V4Banner("اطلاعات آفلاین است و برای تصمیم اجرایی نباید به‌عنوان وضعیت لحظه‌ای صرافی استفاده شود.", V4AmberSoft, V4Amber) }\n''',
+              '''        item {\n            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {\n                V4Metric("PnL کل ربات", signedMoney(headline.optDouble("total_realized_pnl_irt")), "تومان • پنل زنده", Modifier.weight(1f))\n                V4Metric("Drawdown", "${fmt(headline.optDouble("current_drawdown_percent"), 2)}%", "افت واقعی حساب", Modifier.weight(1f))\n            }\n        }\n        item {\n            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {\n                V4Metric("Win Rate", "${fmt(headline.optDouble("win_rate_percent"), 1)}%", "${headline.optInt("closed_positions")} معامله بسته", Modifier.weight(1f))\n                V4Metric("Pending", "${headline.optInt("pending_orders")}/${headline.optInt("max_pending_orders")}", "سفارش در انتظار", Modifier.weight(1f))\n            }\n        }\n        if (!offline) item { V4Banner("همگام با داده زنده پنل • بروزرسانی خودکار هر ۱۰ ثانیه", V4GreenSoft, V4Green) }\n        if (offline) item { V4Banner("اطلاعات آفلاین است و برای تصمیم اجرایی نباید به‌عنوان وضعیت لحظه‌ای صرافی استفاده شود.", V4AmberSoft, V4Amber) }\n''',
+              'V4 live headline metrics',
+          )
+          app = replace_once(
+              app,
+              '        item { V4SectionTitle("Equity Curve", "PnL تجمعی تحقق‌یافته") }\n',
+              '        item { V4SectionTitle("Equity Curve", "ارزش واقعی کیف پول در طول زمان") }\n',
+              'V4 equity label',
+          )
+          app = replace_once(
+              app,
+              '''        val values = curve.map { it.optDouble("cumulative_net_pnl") }\n        val min = values.minOrNull() ?: 0.0\n        val max = values.maxOrNull() ?: 0.0\n        val span = (max - min).takeIf { abs(it) > 0.000001 } ?: 1.0\n        Row(Modifier.fillMaxWidth().height(150.dp), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.Bottom) {\n            curve.takeLast(30).forEach { point ->\n                val normalized = ((point.optDouble("cumulative_net_pnl") - min) / span).coerceIn(0.0, 1.0)\n                Box(Modifier.weight(1f).height((20 + normalized * 120).dp).background(if (point.optDouble("cumulative_net_pnl") >= 0) V4Green else V4Red, RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)))\n            }\n        }\n''',
+              '''        val metricKey = if (curve.any { it.has("portfolio_value_toman") }) "portfolio_value_toman" else "cumulative_net_pnl"\n        val values = curve.map { it.optDouble(metricKey) }\n        val min = values.minOrNull() ?: 0.0\n        val max = values.maxOrNull() ?: 0.0\n        val span = (max - min).takeIf { abs(it) > 0.000001 } ?: 1.0\n        Row(Modifier.fillMaxWidth().height(150.dp), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.Bottom) {\n            curve.takeLast(30).forEach { point ->\n                val value = point.optDouble(metricKey)\n                val normalized = ((value - min) / span).coerceIn(0.0, 1.0)\n                Box(Modifier.weight(1f).height((20 + normalized * 120).dp).background(if (metricKey == "portfolio_value_toman" || value >= 0) V4Green else V4Red, RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)))\n            }\n        }\n''',
+              'V4 equity data source',
+          )
+          app_path.write_text(app)
+
+          # Backend Command Center: use the same BotController performance/capacity
+          # values as the web Admin panel instead of a second aggregation path.
+          cc_path = Path('backend/src/Trading/TradeCommandCenter.php')
+          cc = cc_path.read_text()
+          cc = replace_once(
+              cc,
+              "        $summaryIrt = is_array($analytics['summary_by_quote']['IRT'] ?? null) ? $analytics['summary_by_quote']['IRT'] : [];\n",
+              "        $summaryIrt = is_array($analytics['summary_by_quote']['IRT'] ?? null) ? $analytics['summary_by_quote']['IRT'] : [];\n        $livePerformance = is_array($nobitex['performance'] ?? null) ? $nobitex['performance'] : [];\n",
+              'CommandCenter live performance source',
+          )
+          cc = replace_once(cc, "            'model'=>'trade_command_center_v2_account_truth',\n", "            'model'=>'trade_command_center_v3_live_panel_truth',\n", 'CommandCenter model')
+          cc = replace_once(
+              cc,
+              '''                // Compatibility keys; these are realized BOT PnL, not total account change.\n                'today_net_pnl_irt'=>(float)($summaryIrt['today_net_pnl'] ?? 0),\n                'month_net_pnl_irt'=>(float)($summaryIrt['month_net_pnl'] ?? 0),\n                'today_realized_bot_pnl_irt'=>(float)($summaryIrt['today_net_pnl'] ?? 0),\n                'month_realized_bot_pnl_irt'=>(float)($summaryIrt['month_net_pnl'] ?? 0),\n''',
+              '''                // Exact live panel performance (BotController::performance, Tehran day).\n                'today_net_pnl_irt'=>(float)($livePerformance['today_realized_pnl'] ?? ($summaryIrt['today_net_pnl'] ?? 0)),\n                'total_realized_pnl_irt'=>(float)($livePerformance['total_realized_pnl'] ?? 0),\n                'win_rate_percent'=>(float)($livePerformance['win_rate_percent'] ?? 0),\n                'closed_positions'=>(int)($livePerformance['closed_positions'] ?? 0),\n                'winning_positions'=>(int)($livePerformance['winning_positions'] ?? 0),\n                'month_net_pnl_irt'=>(float)($summaryIrt['month_net_pnl'] ?? 0),\n                'today_realized_bot_pnl_irt'=>(float)($livePerformance['today_realized_pnl'] ?? ($summaryIrt['today_net_pnl'] ?? 0)),\n                'total_realized_bot_pnl_irt'=>(float)($livePerformance['total_realized_pnl'] ?? 0),\n                'month_realized_bot_pnl_irt'=>(float)($summaryIrt['month_net_pnl'] ?? 0),\n                'pending_orders'=>(int)($capacity['pending_orders'] ?? 0),\n                'max_pending_orders'=>(int)($capacity['max_pending_orders'] ?? 0),\n                'live_source'=>'bot_controller_panel_status',\n''',
+              'CommandCenter headline live metrics',
+          )
+          cc = replace_once(
+              cc,
+              "                'internal_strategy_drawdown'=>$intelligence['drawdown'] ?? null,\n",
+              "                'internal_strategy_drawdown'=>$intelligence['drawdown'] ?? null,\n                'panel_live'=>$livePerformance,\n",
+              'CommandCenter panel live performance block',
+          )
+          cc = replace_once(cc, "            'reports'=>$this->reports($analytics),\n", "            'reports'=>$this->reports($analytics,$livePerformance),\n", 'CommandCenter reports call')
+          old_reports = "    private function reports(array $a):array{$i=$a['summary_by_quote']['IRT']??[];return['daily'=>['net_pnl'=>$i['today_net_pnl']??0,'unit'=>'TOMAN','scope'=>'realized_bot_pnl'],'weekly'=>['net_pnl'=>$i['week_net_pnl']??0,'unit'=>'TOMAN','scope'=>'realized_bot_pnl'],'monthly'=>['net_pnl'=>$i['month_net_pnl']??0,'unit'=>'TOMAN','scope'=>'realized_bot_pnl'],'win_rate_percent'=>$i['win_rate_percent']??0,'profit_factor'=>$i['profit_factor']??0,'max_drawdown_absolute'=>$i['max_drawdown_absolute']??0,'best_asset'=>$a['best_asset']??null,'worst_asset'=>$a['worst_asset']??null];}\n"
+          new_reports = "    private function reports(array $a,array $live=[]):array{$i=$a['summary_by_quote']['IRT']??[];$today=$live['today_realized_pnl']??($i['today_net_pnl']??0);$total=$live['total_realized_pnl']??0;$win=$live['win_rate_percent']??($i['win_rate_percent']??0);return['daily'=>['net_pnl'=>$today,'unit'=>'TOMAN','scope'=>'live_panel_realized_bot_pnl'],'weekly'=>['net_pnl'=>$i['week_net_pnl']??0,'unit'=>'TOMAN','scope'=>'realized_bot_pnl'],'monthly'=>['net_pnl'=>$i['month_net_pnl']??0,'unit'=>'TOMAN','scope'=>'realized_bot_pnl'],'total'=>['net_pnl'=>$total,'unit'=>'TOMAN','scope'=>'live_panel_realized_bot_pnl'],'win_rate_percent'=>$win,'profit_factor'=>$i['profit_factor']??0,'max_drawdown_absolute'=>$i['max_drawdown_absolute']??0,'best_asset'=>$a['best_asset']??null,'worst_asset'=>$a['worst_asset']??null];}\n"
+          cc = replace_once(cc, old_reports, new_reports, 'CommandCenter reports implementation')
+
+          # Normalize all IRT position money fields once on the backend so both
+          # Admin Command Center and Android render Toman, while percentages stay unchanged.
+          needle = "$r['total_estimated_fees_quote']=(float)($r['entry_fee_quote']??0)+(float)($r['estimated_exit_fee_quote']??0);"
+          replacement = needle + "$q=strtoupper((string)($r['quote_asset']??''));if($q==='IRT'){$r=NobitexDisplayMoney::moneyFields($r,$q,['entry_price','mark_price','stop_loss','take_profit','unrealized_net_pnl','entry_fee_quote','estimated_exit_fee_quote','total_estimated_fees_quote']);$r['display_unit']='TOMAN';}else{$r['display_unit']=$q;}"
+          cc = replace_once(cc, needle, replacement, 'CommandCenter position display normalization')
+          cc_path.write_text(cc)
+
+          # Static regression catches accidental drift back to stale snapshots or
+          # independent app-only accounting.
+          test_path = Path('backend/tests/android_live_panel_parity_test.php')
+          test_path.write_text(r'''<?php
+          declare(strict_types=1);
+
+          function failLivePanel(string $message): never { fwrite(STDERR, "FAIL: {$message}\n"); exit(1); }
+          function requireLivePanel(bool $ok, string $message): void { if (!$ok) failLivePanel($message); }
+
+          $root = dirname(__DIR__, 2);
+          $api = file_get_contents($root.'/android/app/src/main/java/ir/trade/app/data/TradeApi.kt') ?: '';
+          $app = file_get_contents($root.'/android/app/src/main/java/ir/trade/app/ui/TradeAppV4.kt') ?: '';
+          $cc = file_get_contents(dirname(__DIR__).'/src/Trading/TradeCommandCenter.php') ?: '';
+
+          requireLivePanel(str_contains($api, 'mergeLivePanelStatus'), 'Android API must overlay live Admin-panel status.');
+          requireLivePanel(str_contains($api, 'api_status_panel_truth'), 'Android live source marker is missing.');
+          requireLivePanel(str_contains($app, 'mutableStateOf(!snapshotJson.isNullOrBlank())'), 'Cached snapshot must start in offline state.');
+          requireLivePanel(str_contains($app, 'delay(10_000)'), 'Android must refresh live data every 10 seconds.');
+          requireLivePanel(str_contains($app, 'Live Panel'), 'Android must visibly distinguish live panel data.');
+          requireLivePanel(str_contains($app, 'total_realized_pnl_irt'), 'Android must show the panel total realized PnL.');
+          requireLivePanel(str_contains($app, 'portfolio_value_toman'), 'Equity chart must consume real account-equity snapshots.');
+          requireLivePanel(str_contains($cc, 'trade_command_center_v3_live_panel_truth'), 'Command Center live-panel model is missing.');
+          requireLivePanel(str_contains($cc, "'live_source'=>'bot_controller_panel_status'"), 'Backend live source marker is missing.');
+          requireLivePanel(str_contains($cc, 'NobitexDisplayMoney::moneyFields'), 'IRT position values must be Toman-normalized for presentation.');
+
+          fwrite(STDOUT, "Android live panel parity regression tests passed.\n");
+          ''')
+
+          lint_path = Path('.github/workflows/php-lint.yml')
+          lint = lint_path.read_text()
+          lint = replace_once(
+              lint,
+              '''      - name: Trading command center regression tests\n        run: php backend/tests/command_center_test.php\n''',
+              '''      - name: Trading command center regression tests\n        run: php backend/tests/command_center_test.php\n      - name: Android live panel parity regression tests\n        run: php backend/tests/android_live_panel_parity_test.php\n''',
+              'PHP Quality Gate live parity test step',
+          )
+          lint_path.write_text(lint)
+
+          version_path = Path('backend/version.php')
+          version = version_path.read_text()
+          version = replace_once(version, "return '1.4.2';", "return '1.4.3';", 'version bump')
+          version_path.write_text(version)
+          PY
+
+          rm -f .github/workflows/live-panel-parity-hotfix.yml
+
+          php -l backend/src/Trading/TradeCommandCenter.php
+          php -l backend/tests/android_live_panel_parity_test.php
+          php backend/tests/android_live_panel_parity_test.php
+          php backend/tests/command_center_test.php
+
+          git diff --check
+          git status --short
+
+      - name: Commit hotfix directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'Release Trade 1.4.3 live Android panel parity'
+          git push origin HEAD:main
+
+      - name: Dispatch full validation and coordinated release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 3
+          gh workflow run php-lint.yml --ref main
+          gh workflow run publish-latest.yml --ref main
