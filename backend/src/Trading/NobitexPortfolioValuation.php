@@ -8,8 +8,9 @@ use Trade\Exchange\NobitexClient;
 
 /**
  * Keeps Nobitex execution/risk arithmetic in exchange-native RLS while exposing
- * Toman display values. The account headline is derived from the complete spot
- * wallet, not from the bot position table, so it matches Nobitex's wallet total.
+ * Toman display values. The account headline prefers Nobitex's own wallet-level
+ * rialBalance truth and only falls back to local order-book valuation when the
+ * exchange did not provide a Rial equivalent for an asset.
  */
 final class NobitexPortfolioValuation
 {
@@ -23,7 +24,9 @@ final class NobitexPortfolioValuation
         foreach ($rows as $row) {
             if (!is_array($row)) continue;
             $asset = strtoupper(trim((string)($row['currency'] ?? $row['asset'] ?? $row['currencyCode'] ?? '')));
-            if ($asset !== '' && !in_array($asset,['RLS','IRT'],true) && $this->walletRowTotalBalance($row) > 0.0) {
+            $total = $this->walletRowTotalBalance($row);
+            $officialRial = $this->walletRowRialValue($row, 'rialBalance');
+            if ($asset !== '' && !in_array($asset,['RLS','IRT'],true) && $total > 0.0 && !($officialRial !== null && $officialRial > 0.0)) {
                 $needsBooks = true;
                 break;
             }
@@ -34,13 +37,19 @@ final class NobitexPortfolioValuation
             try { $books = $this->bookRows($client->allOrderBooks()); } catch (\Throwable) {}
         }
 
-        $usdtToRls = $this->bookMark($books['USDTIRT'] ?? $books['USDTRLS'] ?? []);
-        if ($needsBooks && $usdtToRls <= 0.0) $usdtToRls = $this->usdtToRls($client);
+        // Prefer the rate implied by Nobitex's own wallet valuation. This keeps
+        // USDT exposure/quote conversions on the same price basis as the wallet
+        // headline instead of mixing two slightly different market marks.
+        $usdtToRls = $this->walletImpliedRlsRate($rows, 'USDT');
+        if ($usdtToRls <= 0.0) $usdtToRls = $this->bookMark($books['USDTIRT'] ?? $books['USDTRLS'] ?? []);
+        if (($needsBooks || $this->hasAsset($rows, 'USDT')) && $usdtToRls <= 0.0) $usdtToRls = $this->usdtToRls($client);
 
         $walletAssets = [];
         $walletTotalRls = 0.0;
+        $walletTotalSellRls = 0.0;
         $cashTotalRls = 0.0;
         $unpricedAssets = [];
+        $officialValueCount = 0;
 
         foreach ($rows as $row) {
             if (!is_array($row)) continue;
@@ -51,6 +60,8 @@ final class NobitexPortfolioValuation
             $availableBalance = $this->walletRowAvailableBalance($row);
             if ($totalBalance <= 0.0 && $availableBalance <= 0.0) continue;
 
+            $officialRial = $this->walletRowRialValue($row, 'rialBalance');
+            $officialRialSell = $this->walletRowRialValue($row, 'rialBalanceSell');
             $valueRls = 0.0;
             $availableValueRls = 0.0;
             $priceRls = null;
@@ -66,6 +77,12 @@ final class NobitexPortfolioValuation
                 $availableValueRls = $availableBalance * self::RLS_PER_TOMAN;
                 $priceRls = self::RLS_PER_TOMAN;
                 $priceSource = 'native_irt';
+            } elseif ($officialRial !== null && $officialRial > 0.0 && $totalBalance > 0.0) {
+                $valueRls = $officialRial;
+                $priceRls = $officialRial / $totalBalance;
+                $availableValueRls = $availableBalance * $priceRls;
+                $priceSource = 'nobitex_wallet_rialBalance';
+                $officialValueCount++;
             } elseif ($asset === 'USDT') {
                 if ($usdtToRls > 0.0) {
                     $valueRls = $totalBalance * $usdtToRls;
@@ -85,6 +102,7 @@ final class NobitexPortfolioValuation
                 $unpricedAssets[] = $asset;
             } else {
                 $walletTotalRls += $valueRls;
+                $walletTotalSellRls += ($officialRialSell !== null && $officialRialSell > 0.0) ? $officialRialSell : $valueRls;
                 if (in_array($asset, self::QUOTE_ASSETS, true)) $cashTotalRls += $valueRls;
             }
 
@@ -97,6 +115,9 @@ final class NobitexPortfolioValuation
                 'value_rls'=>round($valueRls, 8),
                 'value_toman'=>round($this->rlsToToman($valueRls), 8),
                 'available_value_toman'=>round($this->rlsToToman($availableValueRls), 8),
+                'official_rial_balance'=>$officialRial !== null ? round($officialRial, 8) : null,
+                'official_rial_balance_sell'=>$officialRialSell !== null ? round($officialRialSell, 8) : null,
+                'value_sell_toman'=>$officialRialSell !== null ? round($this->rlsToToman($officialRialSell), 8) : null,
                 'price_source'=>$priceSource,
             ];
         }
@@ -121,7 +142,7 @@ final class NobitexPortfolioValuation
         // by never reporting a total lower than known quote cash + bot exposure.
         $fallbackTotalRls = $cashTotalRls + $positionExposureRls;
         $portfolioRls = max($walletTotalRls, $fallbackTotalRls);
-        $conversionReady = $unpricedAssets === [] && ($usdtToRls > 0.0 || !$this->hasAsset($rows, 'USDT'));
+        $conversionReady = $unpricedAssets === [];
 
         usort($walletAssets, static fn(array $a, array $b): int => ((float)$b['value_rls']) <=> ((float)$a['value_rls']));
 
@@ -131,12 +152,15 @@ final class NobitexPortfolioValuation
         $walletTotalToman = $this->rlsToToman($walletTotalRls);
 
         return [
-            'model'=>'nobitex_full_spot_wallet_valuation_v3',
+            'model'=>'nobitex_full_spot_wallet_valuation_v4',
             'numeraire'=>'IRT',
             'display_unit'=>'TOMAN',
             'internal_numeraire'=>'RLS',
             'rls_per_irt'=>self::RLS_PER_TOMAN,
-            'valuation_source'=>$walletTotalRls > 0.0 ? 'full_spot_wallet' : 'quote_cash_plus_bot_positions_fallback',
+            'valuation_source'=>$officialValueCount > 0
+                ? 'nobitex_wallet_rialBalance'
+                : ($walletTotalRls > 0.0 ? 'full_spot_wallet_orderbook_fallback' : 'quote_cash_plus_bot_positions_fallback'),
+            'official_wallet_value_assets'=>$officialValueCount,
             'conversion_ready'=>$conversionReady,
             'unpriced_assets'=>array_values(array_unique($unpricedAssets)),
             'wallet_assets'=>$walletAssets,
@@ -148,17 +172,23 @@ final class NobitexPortfolioValuation
                 'IRT'=>round($this->quoteCashToman($rows),8),
                 'USDT'=>round($this->walletTotalByAsset($rows,'USDT'),8),
             ],
+            'available_cash_by_quote'=>[
+                'IRT'=>round($this->quoteAvailableToman($rows),8),
+                'USDT'=>round($this->walletAvailableByAsset($rows,'USDT'),8),
+            ],
             'active_notional_by_quote'=>[
                 'IRT'=>round($this->rlsToToman($notionalRaw['IRT']),8),
                 'USDT'=>round($notionalRaw['USDT'],8),
             ],
 
             'wallet_total_toman'=>round($walletTotalToman,8),
+            'wallet_total_sell_toman'=>round($this->rlsToToman($walletTotalSellRls),8),
             'portfolio_value_irt'=>round($portfolioToman,8),
             'cash_irt'=>round($cashToman,8),
             'exposure_irt'=>round($exposureToman,8),
 
             'wallet_total_rls'=>round($walletTotalRls,8),
+            'wallet_total_sell_rls'=>round($walletTotalSellRls,8),
             'portfolio_value_rls'=>round($portfolioRls,8),
             'cash_rls'=>round($cashTotalRls,8),
             'exposure_rls'=>round($positionExposureRls,8),
@@ -271,25 +301,70 @@ final class NobitexPortfolioValuation
         return 0.0;
     }
 
-    private function walletTotalByAsset(array $rows, string $wanted): float
+    private function walletRowRialValue(array $row, string $key): ?float
     {
+        if (!array_key_exists($key, $row) || !is_numeric($row[$key])) return null;
+        return max(0.0, $this->number($row[$key]));
+    }
+
+    private function walletImpliedRlsRate(array $rows, string $wanted): float
+    {
+        $wanted = strtoupper($wanted);
         foreach ($rows as $row) {
             if (!is_array($row)) continue;
             $asset = strtoupper((string)($row['currency'] ?? $row['asset'] ?? $row['currencyCode'] ?? ''));
-            if ($asset === strtoupper($wanted)) return $this->walletRowTotalBalance($row);
+            if ($asset !== $wanted) continue;
+            $balance = $this->walletRowTotalBalance($row);
+            $rial = $this->walletRowRialValue($row, 'rialBalance');
+            if ($balance > 0.0 && $rial !== null && $rial > 0.0) return $rial / $balance;
         }
         return 0.0;
     }
 
-    private function quoteCashToman(array $rows): float
+    private function walletTotalByAsset(array $rows, string $wanted): float
     {
+        $sum = 0.0;
         foreach ($rows as $row) {
             if (!is_array($row)) continue;
             $asset = strtoupper((string)($row['currency'] ?? $row['asset'] ?? $row['currencyCode'] ?? ''));
-            if ($asset === 'RLS') return $this->rlsToToman($this->walletRowTotalBalance($row));
-            if ($asset === 'IRT') return $this->walletRowTotalBalance($row);
+            if ($asset === strtoupper($wanted)) $sum += $this->walletRowTotalBalance($row);
         }
-        return 0.0;
+        return $sum;
+    }
+
+    private function walletAvailableByAsset(array $rows, string $wanted): float
+    {
+        $sum = 0.0;
+        foreach ($rows as $row) {
+            if (!is_array($row)) continue;
+            $asset = strtoupper((string)($row['currency'] ?? $row['asset'] ?? $row['currencyCode'] ?? ''));
+            if ($asset === strtoupper($wanted)) $sum += $this->walletRowAvailableBalance($row);
+        }
+        return $sum;
+    }
+
+    private function quoteCashToman(array $rows): float
+    {
+        $sum = 0.0;
+        foreach ($rows as $row) {
+            if (!is_array($row)) continue;
+            $asset = strtoupper((string)($row['currency'] ?? $row['asset'] ?? $row['currencyCode'] ?? ''));
+            if ($asset === 'RLS') $sum += $this->rlsToToman($this->walletRowTotalBalance($row));
+            elseif ($asset === 'IRT') $sum += $this->walletRowTotalBalance($row);
+        }
+        return $sum;
+    }
+
+    private function quoteAvailableToman(array $rows): float
+    {
+        $sum = 0.0;
+        foreach ($rows as $row) {
+            if (!is_array($row)) continue;
+            $asset = strtoupper((string)($row['currency'] ?? $row['asset'] ?? $row['currencyCode'] ?? ''));
+            if ($asset === 'RLS') $sum += $this->rlsToToman($this->walletRowAvailableBalance($row));
+            elseif ($asset === 'IRT') $sum += $this->walletRowAvailableBalance($row);
+        }
+        return $sum;
     }
 
     private function hasAsset(array $rows, string $wanted): bool
