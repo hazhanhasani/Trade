@@ -56,4 +56,19 @@ try { (new OrderService())->cancel('legacy-order-id'); }
 catch (RuntimeException $e) { $cancelThrown = str_contains($e->getMessage(), 'market-data-only'); }
 mdAssert($cancelThrown, 'Bitpin OrderService must hard-block cancellation calls as an execution surface.');
 
+$admin = file_get_contents(dirname(__DIR__) . '/public/admin/exchanges.php');
+mdAssert(is_string($admin), 'Unable to inspect exchange administration page.');
+mdAssert(str_contains($admin, "if(\$exchange!=='nobitex')"), 'Admin POST boundary must reject execution controls for every exchange except Nobitex.');
+mdAssert(!str_contains($admin, 'name="exchange" value="bitpin"'), 'Admin UI must not expose a Bitpin bot/live execution control.');
+mdAssert(str_contains($admin, 'Bitpin execution: قفل دائمی'), 'Admin UI must make the permanent Bitpin execution lock explicit.');
+foreach (['آبان‌تتر','بیت۲۴','تبدیل (Tabdeal)','Market Data only'] as $label) {
+    mdAssert(str_contains($admin, $label), 'Admin Market Data source/role label is missing: ' . $label);
+}
+
+$legacyOrderService = file_get_contents(dirname(__DIR__) . '/src/Trading/OrderService.php');
+$legacyEngine = file_get_contents(dirname(__DIR__) . '/src/Trading/AutoTraderEngine.php');
+mdAssert(is_string($legacyOrderService) && is_string($legacyEngine), 'Unable to inspect legacy Bitpin execution surfaces.');
+mdAssert(str_contains($legacyOrderService, 'liveEnabled(): bool') && str_contains($legacyOrderService, 'return false;'), 'Bitpin live execution guard must remain hard-disabled.');
+mdAssert(str_contains($legacyEngine, "'execution_allowed'=>false"), 'Legacy Bitpin engine must remain non-executable.');
+
 echo "Multi-exchange market-data and execution-boundary regression tests passed.\n";
