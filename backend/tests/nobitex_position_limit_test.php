@@ -69,4 +69,14 @@ expect(($plan['rotate'] ?? false) === true, 'Scan failures must not make an actu
 expect((int)($plan['excess_positions'] ?? -1) === 14, 'Active-count override must preserve the real excess count.');
 expect((int)($plan['victim']['id'] ?? 0) === 21, 'Reduction should use the weakest scannable victim when some snapshots fail.');
 
+// Capacity enforcement runs before PortfolioEngine. If it returns
+// waiting_reconcile merely because a pending_open/pending_close row exists,
+// AutoTrader stops before PortfolioEngine can reconcile that row. That creates
+// a permanent capacity deadlock and blocks future BUYs. Pending state must yield
+// with no_reduction so the normal portfolio reconciliation path runs this tick.
+$capacitySource = file_get_contents(dirname(__DIR__) . '/src/Trading/NobitexCapacityManager.php');
+expect(is_string($capacitySource) && $capacitySource !== '', 'Capacity manager source must be readable.');
+expect(str_contains($capacitySource, "result('no_reduction','pending_order_present'"), 'Pending capacity state must yield to PortfolioEngine reconciliation.');
+expect(!str_contains($capacitySource, "result('waiting_reconcile','pending_order_present'"), 'Pending capacity state must not stop the orchestrator before reconciliation.');
+
 fwrite(STDOUT, "Nobitex active position limit regression tests passed.\n");
