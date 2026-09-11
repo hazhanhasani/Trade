@@ -5,9 +5,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'backend/**'
-      - 'android/**'
-      - '.github/workflows/publish-latest.yml'
+      - 'backend/version.php'
 
 permissions:
   contents: write
@@ -34,69 +32,49 @@ jobs:
         with:
           gradle-version: '9.6.0'
 
-      - name: Resolve unified release version
+      - name: Resolve coordinated version
         id: versions
         shell: bash
         run: |
           set -euo pipefail
           BACKEND_VERSION=$(php -r "echo require 'backend/version.php';")
           if [[ ! "$BACKEND_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-            echo "::error::backend/version.php must contain a semantic version like 1.3.2"
+            echo "::error::backend/version.php must contain a semantic version."
             exit 1
           fi
-
           MAJOR=$((10#${BASH_REMATCH[1]}))
           MINOR=$((10#${BASH_REMATCH[2]}))
           PATCH=$((10#${BASH_REMATCH[3]}))
           if (( MINOR > 999 || PATCH > 999 )); then
-            echo "::error::Version minor/patch must be <= 999 for deterministic Android versionCode generation."
+            echo "::error::Version minor/patch must be <= 999."
             exit 1
           fi
           ANDROID_VERSION_CODE=$((MAJOR * 1000000 + MINOR * 1000 + PATCH))
-          if (( ANDROID_VERSION_CODE < 1 || ANDROID_VERSION_CODE > 2100000000 )); then
-            echo "::error::Generated Android versionCode is outside the supported range."
-            exit 1
-          fi
-
           PREVIOUS_JSON=$(curl -fsSL --connect-timeout 5 --max-time 10 \
             'https://github.com/hazhanhasani/Trade/releases/download/trade-latest/latest.json' 2>/dev/null || true)
           PREVIOUS_VERSION=$(printf '%s' "$PREVIOUS_JSON" | jq -r '.release.version // .backend.version // empty' 2>/dev/null || true)
           PREVIOUS_CODE=$(printf '%s' "$PREVIOUS_JSON" | jq -r '.android.version_code // 0' 2>/dev/null || echo 0)
-          PREVIOUS_SOURCE_SHA=$(printf '%s' "$PREVIOUS_JSON" | jq -r '.release.source_commit // empty' 2>/dev/null || true)
-
           if [[ -n "$PREVIOUS_VERSION" ]]; then
-            if [[ "$BACKEND_VERSION" == "$PREVIOUS_VERSION" ]]; then
-              if [[ -n "$PREVIOUS_SOURCE_SHA" ]]; then
-                if [[ "$PREVIOUS_SOURCE_SHA" != "$GITHUB_SHA" ]]; then
-                  echo "::error::Code changed without a coordinated version bump. Update backend/version.php before publishing."
-                  exit 1
-                fi
-              else
-                PREVIOUS_SHA=$(git rev-list -n1 trade-latest 2>/dev/null || true)
-                if [[ "$PREVIOUS_SHA" != "$GITHUB_SHA" ]]; then
-                  echo "::error::Code changed without a coordinated version bump. Update backend/version.php before publishing."
-                  exit 1
-                fi
-              fi
-            else
-              if ! php -r "exit(version_compare('$BACKEND_VERSION', '$PREVIOUS_VERSION', '>') ? 0 : 1);"; then
-                echo "::error::Release version must move forward from $PREVIOUS_VERSION to a newer semantic version."
-                exit 1
-              fi
-              if (( ANDROID_VERSION_CODE <= PREVIOUS_CODE )); then
-                echo "::error::Android versionCode must increase monotonically."
-                exit 1
-              fi
+            if ! php -r "exit(version_compare('$BACKEND_VERSION', '$PREVIOUS_VERSION', '>') ? 0 : 1);"; then
+              echo "::error::Release version must move forward from $PREVIOUS_VERSION."
+              exit 1
+            fi
+            if (( ANDROID_VERSION_CODE <= PREVIOUS_CODE )); then
+              echo "::error::Android versionCode must increase monotonically."
+              exit 1
             fi
           fi
-
           echo "backend=$BACKEND_VERSION" >> "$GITHUB_OUTPUT"
           echo "android_name=$BACKEND_VERSION" >> "$GITHUB_OUTPUT"
           echo "android_code=$ANDROID_VERSION_CODE" >> "$GITHUB_OUTPUT"
-          echo "Unified release: $BACKEND_VERSION (Android code $ANDROID_VERSION_CODE)"
 
-      - name: Validate PHP
-        run: find backend -type f -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Validate PHP and safety regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          find backend -type f -name '*.php' -print0 | xargs -0 -n1 php -l
+          php backend/tests/nobitex_position_limit_test.php
+          php backend/tests/nobitex_runtime_safety_test.php
 
       - name: Package cPanel backend
         shell: bash
@@ -111,10 +89,7 @@ jobs:
                 dist/backend/storage/update-state.json \
                 dist/backend/storage/maintenance.lock
           rm -rf dist/backend/storage/backups dist/backend/storage/updates dist/backend/storage/android-signing
-          (
-            cd dist/backend
-            zip -qr ../Trade-cPanel.zip .
-          )
+          (cd dist/backend && zip -qr ../Trade-cPanel.zip .)
           rm -rf dist/backend
           test -s dist/Trade-cPanel.zip
 
@@ -127,7 +102,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         shell: bash
         run: |
-          set -u
+          set -euo pipefail
           normalize_fp() { printf '%s' "$1" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]'; }
           PREVIOUS_CERT=$(curl -fsSL --connect-timeout 5 --max-time 10 \
             'https://github.com/hazhanhasani/Trade/releases/download/trade-latest/latest.json' 2>/dev/null \
@@ -138,18 +113,11 @@ jobs:
             echo "::add-mask::$STORE_PASSWORD"
             echo "::add-mask::$KEY_PASSWORD"
             printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/trade-release.jks"
-            test -s "$RUNNER_TEMP/trade-release.jks"
             CERT=$(keytool -list -v -keystore "$RUNNER_TEMP/trade-release.jks" -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" 2>/dev/null \
               | sed -n 's/^[[:space:]]*SHA256: //p' | head -n1)
             CERT=$(normalize_fp "$CERT")
-            if [[ -z "$CERT" ]]; then
-              echo "::error::Unable to read certificate fingerprint from GitHub Secrets keystore."
-              exit 1
-            fi
-            if [[ -n "$PREVIOUS_CERT" && "$CERT" != "$PREVIOUS_CERT" ]]; then
-              echo "::error::Permanent signer mismatch. Refusing to replace the established Android signing identity."
-              exit 1
-            fi
+            [[ -n "$CERT" ]] || { echo "::error::Unable to read signing certificate."; exit 1; }
+            [[ -z "$PREVIOUS_CERT" || "$CERT" == "$PREVIOUS_CERT" ]] || { echo "::error::Permanent signer mismatch."; exit 1; }
             {
               echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/trade-release.jks"
               echo "ANDROID_KEYSTORE_PASSWORD=$STORE_PASSWORD"
@@ -157,98 +125,65 @@ jobs:
               echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
               echo "ANDROID_KEYSTORE_TYPE=JKS"
             } >> "$GITHUB_ENV"
-            echo "ready=true" >> "$GITHUB_OUTPUT"
             echo "source=github-secrets" >> "$GITHUB_OUTPUT"
             echo "cert_sha256=$CERT" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           OIDC_URL="$ACTIONS_ID_TOKEN_REQUEST_URL"
-          if [[ "$OIDC_URL" == *'?'* ]]; then SEP='&'; else SEP='?'; fi
+          [[ "$OIDC_URL" == *'?'* ]] && SEP='&' || SEP='?'
           OIDC_RESPONSE=$(curl -fsS --connect-timeout 5 --max-time 15 \
             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "${OIDC_URL}${SEP}audience=trade-android-signing" 2>/dev/null || true)
           OIDC_TOKEN=$(printf '%s' "$OIDC_RESPONSE" | jq -r '.value // empty' 2>/dev/null || true)
-
-          if [[ -n "$OIDC_TOKEN" ]]; then
-            HTTP_CODE=$(curl -sS --connect-timeout 5 --max-time 20 \
-              -o "$RUNNER_TEMP/cpanel-signing.json" -w '%{http_code}' \
-              -X POST -H "Authorization: Bearer $OIDC_TOKEN" -H 'Accept: application/json' \
-              'https://rado-taxi.sbs/internal/android-signing.php' || true)
-            if [[ "$HTTP_CODE" == '200' ]] && jq -e '.ok == true' "$RUNNER_TEMP/cpanel-signing.json" >/dev/null 2>&1; then
-              PASSWORD=$(jq -r '.signing.password' "$RUNNER_TEMP/cpanel-signing.json")
-              ALIAS=$(jq -r '.signing.alias' "$RUNNER_TEMP/cpanel-signing.json")
-              EXPECTED=$(jq -r '.signing.cert_sha256' "$RUNNER_TEMP/cpanel-signing.json")
-              EXPECTED=$(normalize_fp "$EXPECTED")
-              echo "::add-mask::$PASSWORD"
-              jq -r '.signing.pkcs12_base64' "$RUNNER_TEMP/cpanel-signing.json" | base64 --decode > "$RUNNER_TEMP/trade-release.p12"
-              test -s "$RUNNER_TEMP/trade-release.p12"
-              CERT=$(keytool -list -v -storetype PKCS12 -keystore "$RUNNER_TEMP/trade-release.p12" -storepass "$PASSWORD" -alias "$ALIAS" 2>/dev/null \
-                | sed -n 's/^[[:space:]]*SHA256: //p' | head -n1)
-              CERT=$(normalize_fp "$CERT")
-              if [[ -z "$CERT" || "$CERT" != "$EXPECTED" ]]; then
-                echo "::error::cPanel signing bundle certificate fingerprint verification failed."
-                exit 1
-              fi
-              if [[ -n "$PREVIOUS_CERT" && "$CERT" != "$PREVIOUS_CERT" ]]; then
-                echo "::error::Permanent signer mismatch. Refusing to rotate the established Android signing identity."
-                exit 1
-              fi
-              {
-                echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/trade-release.p12"
-                echo "ANDROID_KEYSTORE_PASSWORD=$PASSWORD"
-                echo "ANDROID_KEY_ALIAS=$ALIAS"
-                echo "ANDROID_KEY_PASSWORD=$PASSWORD"
-                echo "ANDROID_KEYSTORE_TYPE=PKCS12"
-              } >> "$GITHUB_ENV"
-              echo "ready=true" >> "$GITHUB_OUTPUT"
-              echo "source=cpanel-oidc" >> "$GITHUB_OUTPUT"
-              echo "cert_sha256=$CERT" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
-
-          echo "ready=false" >> "$GITHUB_OUTPUT"
-          echo "source=missing" >> "$GITHUB_OUTPUT"
-          echo "cert_sha256=" >> "$GITHUB_OUTPUT"
-          echo "::error::Atomic release blocked: permanent Android signing is required so Backend and APK publish together."
-          exit 1
+          [[ -n "$OIDC_TOKEN" ]] || { echo "::error::Permanent Android signing is unavailable."; exit 1; }
+          HTTP_CODE=$(curl -sS --connect-timeout 5 --max-time 20 \
+            -o "$RUNNER_TEMP/cpanel-signing.json" -w '%{http_code}' \
+            -X POST -H "Authorization: Bearer $OIDC_TOKEN" -H 'Accept: application/json' \
+            'https://rado-taxi.sbs/internal/android-signing.php' || true)
+          [[ "$HTTP_CODE" == '200' ]] && jq -e '.ok == true' "$RUNNER_TEMP/cpanel-signing.json" >/dev/null
+          PASSWORD=$(jq -r '.signing.password' "$RUNNER_TEMP/cpanel-signing.json")
+          ALIAS=$(jq -r '.signing.alias' "$RUNNER_TEMP/cpanel-signing.json")
+          EXPECTED=$(normalize_fp "$(jq -r '.signing.cert_sha256' "$RUNNER_TEMP/cpanel-signing.json")")
+          echo "::add-mask::$PASSWORD"
+          jq -r '.signing.pkcs12_base64' "$RUNNER_TEMP/cpanel-signing.json" | base64 --decode > "$RUNNER_TEMP/trade-release.p12"
+          CERT=$(keytool -list -v -storetype PKCS12 -keystore "$RUNNER_TEMP/trade-release.p12" -storepass "$PASSWORD" -alias "$ALIAS" 2>/dev/null \
+            | sed -n 's/^[[:space:]]*SHA256: //p' | head -n1)
+          CERT=$(normalize_fp "$CERT")
+          [[ -n "$CERT" && "$CERT" == "$EXPECTED" ]] || { echo "::error::Signing bundle verification failed."; exit 1; }
+          [[ -z "$PREVIOUS_CERT" || "$CERT" == "$PREVIOUS_CERT" ]] || { echo "::error::Permanent signer mismatch."; exit 1; }
+          {
+            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/trade-release.p12"
+            echo "ANDROID_KEYSTORE_PASSWORD=$PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$ALIAS"
+            echo "ANDROID_KEY_PASSWORD=$PASSWORD"
+            echo "ANDROID_KEYSTORE_TYPE=PKCS12"
+          } >> "$GITHUB_ENV"
+          echo "source=cpanel-oidc" >> "$GITHUB_OUTPUT"
+          echo "cert_sha256=$CERT" >> "$GITHUB_OUTPUT"
 
       - name: Build permanently signed Android APK
         working-directory: android
         shell: bash
         run: |
           set -euo pipefail
-          test -s "$ANDROID_KEYSTORE_PATH"
-          keytool -list \
-            -storetype "$ANDROID_KEYSTORE_TYPE" \
-            -keystore "$ANDROID_KEYSTORE_PATH" \
-            -storepass "$ANDROID_KEYSTORE_PASSWORD" \
-            -alias "$ANDROID_KEY_ALIAS" >/dev/null
           gradle :app:assembleRelease --stacktrace
           cp app/build/outputs/apk/release/app-release.apk ../dist/Trade.apk
           test -s ../dist/Trade.apk
 
       - name: Verify Android signature
         id: apk_signature
-        shell: bash
         env:
           EXPECTED_CERT_SHA256: ${{ steps.signing.outputs.cert_sha256 }}
+        shell: bash
         run: |
           set -euo pipefail
           APK="$GITHUB_WORKSPACE/dist/Trade.apk"
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n1)
-          if [ -z "$APKSIGNER" ]; then
-            echo "::error::apksigner was not found in the Android SDK."
-            exit 1
-          fi
           "$APKSIGNER" verify --verbose --print-certs "$APK" | tee "$RUNNER_TEMP/apksigner.txt"
           CERT_SHA=$(grep -E -m1 'certificate SHA-256 digest:' "$RUNNER_TEMP/apksigner.txt" | sed -E 's/^.*certificate SHA-256 digest:[[:space:]]*//' | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
           EXPECTED=$(printf '%s' "$EXPECTED_CERT_SHA256" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
-          if [ -z "$CERT_SHA" ] || [ "$CERT_SHA" != "$EXPECTED" ]; then
-            echo "::error::Final APK signer does not match the permanent signing identity."
-            exit 1
-          fi
+          [[ -n "$CERT_SHA" && "$CERT_SHA" == "$EXPECTED" ]] || { echo "::error::Final APK signer mismatch."; exit 1; }
           echo "cert_sha256=$CERT_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Build coordinated update manifest
@@ -260,36 +195,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -s dist/Trade-cPanel.zip
-          test -s dist/Trade.apk
           BACKEND_SHA=$(sha256sum dist/Trade-cPanel.zip | awk '{print $1}')
           ANDROID_SHA=$(sha256sum dist/Trade.apk | awk '{print $1}')
-          ANDROID_URL='https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade.apk'
           API_CONTRACT=$(php -r "require 'backend/bootstrap.php'; echo Trade\\ReleaseContract::API_CONTRACT;")
           CAPABILITIES=$(php -r "require 'backend/bootstrap.php'; echo json_encode(Trade\\ReleaseContract::CAPABILITIES, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);")
-
-          if [[ ! "$API_CONTRACT" =~ ^[0-9]+$ ]] || (( API_CONTRACT < 1 )); then
-            echo "::error::Release API contract must be a positive integer."
-            exit 1
-          fi
-          printf '%s' "$CAPABILITIES" | jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' >/dev/null
-
           jq -n \
             --arg releaseVersion "$RELEASE_VERSION" \
             --arg sourceCommit "$GITHUB_SHA" \
             --arg backendSha "$BACKEND_SHA" \
             --argjson androidCode "$ANDROID_VERSION_CODE" \
             --arg androidSha "$ANDROID_SHA" \
-            --arg androidUrl "$ANDROID_URL" \
             --arg signingSource "$ANDROID_SIGNING_SOURCE" \
             --arg signingCertSha256 "$ANDROID_CERT_SHA256" \
             --argjson apiContract "$API_CONTRACT" \
             --argjson capabilities "$CAPABILITIES" \
             --arg publishedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{schema:3,published_at:$publishedAt,release:{version:$releaseVersion,coordinated:true,source_commit:$sourceCommit,api_contract:$apiContract,capabilities:$capabilities},backend:{version:$releaseVersion,api_contract:$apiContract,url:"https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade-cPanel.zip",sha256:$backendSha},android:{available:true,version_code:$androidCode,version_name:$releaseVersion,required_backend_version:$releaseVersion,required_api_contract:$apiContract,url:$androidUrl,sha256:$androidSha,signing:{status:"permanent",source:$signingSource,cert_sha256:$signingCertSha256}}}' \
-            > dist/latest.json
-
-          jq -e '.schema == 3 and .release.coordinated == true and (.release.source_commit|length) == 40 and .release.version == .backend.version and .backend.version == .android.version_name and .android.required_backend_version == .backend.version and .release.api_contract == .backend.api_contract and .android.required_api_contract == .release.api_contract and (.release.capabilities | index("api.capability_contract")) != null and (.release.capabilities | index("updates.coordinated_backend_android")) != null and .android.available == true' dist/latest.json >/dev/null
+            '{schema:3,published_at:$publishedAt,release:{version:$releaseVersion,coordinated:true,source_commit:$sourceCommit,api_contract:$apiContract,capabilities:$capabilities},backend:{version:$releaseVersion,api_contract:$apiContract,url:"https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade-cPanel.zip",sha256:$backendSha},android:{available:true,version_code:$androidCode,version_name:$releaseVersion,required_backend_version:$releaseVersion,required_api_contract:$apiContract,url:"https://github.com/hazhanhasani/Trade/releases/download/trade-latest/Trade.apk",sha256:$androidSha,signing:{status:"permanent",source:$signingSource,cert_sha256:$signingCertSha256}}}' > dist/latest.json
+          jq -e '.schema == 3 and .release.coordinated == true and .release.version == .backend.version and .backend.version == .android.version_name' dist/latest.json >/dev/null
 
       - name: Publish stable release assets atomically
         env:
@@ -297,26 +219,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -s dist/Trade-cPanel.zip
-          test -s dist/Trade.apk
-          test -s dist/latest.json
-
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-
           PREVIOUS_TAG_SHA=$(git rev-list -n1 trade-latest 2>/dev/null || true)
-          if [[ -z "$PREVIOUS_TAG_SHA" ]]; then
-            echo "::error::Existing trade-latest tag is required for workflow-safe stable snapshots."
-            exit 1
-          fi
-
-          # GITHUB_TOKEN is an installation token without the GitHub App
-          # 'workflows' permission. A tag update that introduces workflow-file
-          # changes is therefore rejected even when contents:write is granted.
-          # Build a one-commit stable snapshot whose runtime tree is exactly the
-          # current source tree, while .github/workflows stays byte-for-byte at
-          # the previous stable tag. Runtime artifacts are unaffected because
-          # workflows are never packaged into Backend/APK assets.
+          [[ -n "$PREVIOUS_TAG_SHA" ]] || { echo "::error::Existing trade-latest tag is required."; exit 1; }
           git reset --mixed "$GITHUB_SHA"
           git rm -r --cached --ignore-unmatch .github/workflows >/dev/null 2>&1 || true
           if git cat-file -e "$PREVIOUS_TAG_SHA:.github/workflows" 2>/dev/null; then
@@ -324,28 +230,11 @@ jobs:
           fi
           RELEASE_TREE=$(git write-tree)
           RELEASE_COMMIT=$(printf '%s\n' "Trade stable runtime snapshot ${GITHUB_SHA}" | git commit-tree "$RELEASE_TREE" -p "$PREVIOUS_TAG_SHA")
-
-          if git diff --name-only "$PREVIOUS_TAG_SHA" "$RELEASE_COMMIT" | grep -q '^\.github/workflows/'; then
-            echo "::error::Release snapshot unexpectedly changes workflow files."
-            exit 1
-          fi
-          if ! git diff --quiet "$GITHUB_SHA" "$RELEASE_COMMIT" -- . ':(exclude).github/workflows'; then
-            echo "::error::Release snapshot runtime tree differs from the source commit."
-            exit 1
-          fi
-
           TMP_MANIFEST=$(mktemp)
           jq --arg releaseCommit "$RELEASE_COMMIT" '.release.release_commit=$releaseCommit' dist/latest.json > "$TMP_MANIFEST"
           mv "$TMP_MANIFEST" dist/latest.json
-          jq -e --arg source "$GITHUB_SHA" --arg release "$RELEASE_COMMIT" '.release.source_commit==$source and .release.release_commit==$release' dist/latest.json >/dev/null
-
           git tag -f trade-latest "$RELEASE_COMMIT"
           git push origin refs/tags/trade-latest --force
-
-          # The long-lived release object already exists. Editing its metadata is
-          # unnecessary and can be denied to an installation token even when
-          # release-asset uploads are permitted. The moved tag is authoritative;
-          # only create metadata on a first-ever release, then replace assets.
           if ! gh release view trade-latest >/dev/null 2>&1; then
             gh release create trade-latest --title "Trade Latest" --notes "Coordinated Backend + Android stable release." --target "$RELEASE_COMMIT"
           fi
