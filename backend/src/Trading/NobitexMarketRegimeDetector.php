@@ -98,8 +98,9 @@ final class NobitexMarketRegimeDetector
             return $this->result(self::BREAKOUT_DOWN, $confidence, $metrics + ['reason'=>'downside_range_expansion']);
         }
 
-        // Extremely noisy markets do not get a long entry strategy. Existing
-        // positions can still be exited by the normal risk/exit engine.
+        // Extreme volatility gets its own guarded strategy instead of becoming
+        // a permanent no-entry dead zone. Directional and economic gates are
+        // still enforced downstream before any BUY can be submitted.
         if ($volatility >= 1.80) {
             $confidence = $this->confidence(65.0 + min(30.0, ($volatility - 1.80) * 12.0));
             return $this->result(self::HIGH_VOLATILITY, $confidence, $metrics + ['reason'=>'short_term_volatility_extreme']);
@@ -136,7 +137,7 @@ final class NobitexMarketRegimeDetector
         return [
             'regime'=>$regime,
             'confidence'=>$confidence,
-            'entry_enabled'=>in_array($regime, [self::TRENDING_UP,self::RANGING,self::BREAKOUT_UP], true),
+            'entry_enabled'=>in_array($regime, [self::TRENDING_UP,self::RANGING,self::BREAKOUT_UP,self::HIGH_VOLATILITY], true),
             'metrics'=>$metrics,
         ];
     }
