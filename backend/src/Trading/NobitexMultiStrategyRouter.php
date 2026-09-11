@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Trade\Trading;
 
 use Trade\Trading\Strategy\BreakoutStrategy;
+use Trade\Trading\Strategy\HighVolatilityMomentumStrategy;
 use Trade\Trading\Strategy\MeanReversionStrategy;
 use Trade\Trading\Strategy\NobitexStrategyInterface;
 use Trade\Trading\Strategy\TrendMomentumStrategy;
@@ -20,6 +21,7 @@ final class NobitexMultiStrategyRouter
             new TrendMomentumStrategy(),
             new BreakoutStrategy(),
             new MeanReversionStrategy(),
+            new HighVolatilityMomentumStrategy(),
         ];
     }
 
@@ -38,6 +40,7 @@ final class NobitexMultiStrategyRouter
             NobitexMarketRegimeDetector::BREAKOUT_UP,
             NobitexMarketRegimeDetector::BREAKOUT_DOWN => 'breakout_v1',
             NobitexMarketRegimeDetector::RANGING => 'mean_reversion_v1',
+            NobitexMarketRegimeDetector::HIGH_VOLATILITY => 'high_volatility_momentum_v1',
             default => null,
         };
 
@@ -50,7 +53,7 @@ final class NobitexMultiStrategyRouter
                 'exit_bias'=>in_array($regimeName, [NobitexMarketRegimeDetector::TRENDING_DOWN,NobitexMarketRegimeDetector::BREAKOUT_DOWN], true),
                 'gross_edge_percent'=>0.0,
                 'confidence'=>0,
-                'reason'=>$regimeName === NobitexMarketRegimeDetector::HIGH_VOLATILITY ? 'high_volatility_no_entry_strategy' : 'uncertain_regime_no_entry_strategy',
+                'reason'=>'uncertain_regime_no_entry_strategy',
                 'holding_horizon_minutes'=>0,
                 'diagnostics'=>[],
             ];
