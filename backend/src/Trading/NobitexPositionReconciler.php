@@ -10,10 +10,9 @@ use Trade\Database;
 /**
  * Reconciles Trade-managed spot positions with the real Nobitex spot wallet.
  *
- * This is intentionally conservative: exchange wallet state may reduce or
- * close a managed position, but it never creates/increases a position and it
- * never fabricates PnL for an external/manual sale whose execution price is
- * not proven by a Trade order.
+ * Exchange wallet state may only reduce or close a managed position. It never
+ * creates/increases one and never fabricates PnL for an external/manual sale
+ * whose exact execution price cannot be proven by a Trade-owned order.
  */
 final class NobitexPositionReconciler
 {
@@ -66,8 +65,12 @@ final class NobitexPositionReconciler
                 $action = (string)$change['action'];
 
                 if ($action === 'close') {
+                    // Preserve the historical managed amount. Status alone removes
+                    // the position from active exposure/capacity calculations.
                     $stmt = $pdo->prepare("UPDATE nobitex_autotrade_positions
-                        SET status='closed', amount=0, exit_price=NULL,
+                        SET status='closed', exit_price=NULL,
+                            exit_identifier='external_wallet_reconcile',
+                            exit_order_local_id=NULL, exit_exchange_order_id=NULL,
                             closed_at=UTC_TIMESTAMP(), updated_at=UTC_TIMESTAMP()
                         WHERE id=:id AND status='open'");
                     $stmt->execute([':id'=>$positionId]);
@@ -118,8 +121,8 @@ final class NobitexPositionReconciler
     /**
      * Pure reconciliation planner used by runtime and regression tests.
      * Wallet inventory is allocated to oldest tracked positions first. The
-     * normal engine currently prevents duplicate managed positions per asset,
-     * but deterministic allocation keeps recovery safe for legacy data too.
+     * normal engine prevents duplicate managed positions per asset, but a
+     * deterministic allocation keeps recovery safe for legacy data too.
      */
     public static function plan(array $positions, float $walletTotal): array
     {
@@ -182,6 +185,9 @@ final class NobitexPositionReconciler
             $asset = strtoupper(trim((string)($row['currency'] ?? $row['asset'] ?? $row['currencyCode'] ?? (is_string($key) ? $key : ''))));
             if ($asset === '') continue;
 
+            // Nobitex balance is total wallet inventory. activeBalance may be
+            // lower while an order blocks funds, so using active alone would
+            // falsely look like a manual sale.
             if (array_key_exists('balance', $row) && is_numeric($row['balance'])) {
                 $total = (float)$row['balance'];
             } elseif (array_key_exists('activeBalance', $row) && array_key_exists('blockedBalance', $row)
