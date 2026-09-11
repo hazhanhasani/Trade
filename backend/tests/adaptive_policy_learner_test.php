@@ -40,9 +40,10 @@ $runtime->setValue(null, [
 $signal = [
     'ready'=>true,'action'=>'hold','reason'=>'edge_below_adaptive_safety_buffer','strategy_key'=>'profit_first_v5',
     'expected_net_edge_percent'=>0.18,'required_edge_buffer_percent'=>0.20,'tradable_net_edge_percent'=>-0.02,
-    'expected_net_profit'=>false,'estimated_roundtrip_cost_percent'=>0.74,
+    'expected_net_profit'=>false,'estimated_roundtrip_cost_percent'=>0.74,'estimated_exit_cost_percent'=>0.30,
+    'expected_gross_move_percent'=>0.50,
     'market_regime'=>['regime'=>'high_volatility'],
-    'selected_strategy'=>['key'=>'profit_first_v5','entry_allowed'=>false,'reason'=>'edge_below_adaptive_safety_buffer'],
+    'selected_strategy'=>['key'=>'profit_first_v5','entry_allowed'=>false,'exit_bias'=>false,'reason'=>'edge_below_adaptive_safety_buffer'],
     'cost_model'=>['adaptive_forecast_buffer_percent'=>0.20],
 ];
 $adapted = NobitexAdaptivePolicyLearner::applyToSignal($signal, ['quote_asset'=>'IRT']);
@@ -56,6 +57,20 @@ $notReady['ready'] = false;
 $notReady['reason'] = 'liquidity_not_executable';
 $notReadyAdapted = NobitexAdaptivePolicyLearner::applyToSignal($notReady, ['quote_asset'=>'IRT']);
 expect(($notReadyAdapted['action'] ?? '') !== 'buy', 'Learning must never promote a structurally non-executable market.');
+
+// A profitable mature profile may hold through a marginal forward SELL signal
+// slightly longer, but it cannot touch hard RiskManager stop-loss/take-profit.
+$positiveSell = $signal;
+$positiveSell['action'] = 'sell';
+$positiveSell['reason'] = 'expected_forward_move_negative_after_exit_cost';
+$positiveSell['expected_net_edge_percent'] = -0.20;
+$positiveSell['required_edge_buffer_percent'] = 0.12;
+$positiveSell['tradable_net_edge_percent'] = -0.32;
+$positiveSell['expected_gross_move_percent'] = -0.31;
+$positiveSell['estimated_exit_cost_percent'] = 0.30;
+$heldSell = NobitexAdaptivePolicyLearner::applyToSignal($positiveSell, ['quote_asset'=>'IRT']);
+expect(($heldSell['action'] ?? '') === 'hold', 'A mature profitable profile may defer a marginal model SELL inside the bounded continuation window.');
+expect(($heldSell['reason'] ?? '') === 'adaptive_policy_holds_forward_sell_bias', 'Deferred SELL must be explicit in diagnostics.');
 
 $runtime->setValue(null, [
     'model'=>NobitexAdaptivePolicyLearner::MODEL,
@@ -73,6 +88,18 @@ $buy['expected_net_profit'] = true;
 $tightened = NobitexAdaptivePolicyLearner::applyToSignal($buy, ['quote_asset'=>'IRT']);
 expect(($tightened['action'] ?? '') === 'hold', 'Defensive learned evidence may demote a marginal BUY after adding uncertainty margin.');
 expect((float)$tightened['expected_net_edge_percent'] > 0.0, 'Demotion must come from learned uncertainty, not fabricated negative economics.');
+
+$defensiveSell = $signal;
+$defensiveSell['action'] = 'hold';
+$defensiveSell['reason'] = 'edge_below_adaptive_safety_buffer';
+$defensiveSell['expected_net_edge_percent'] = -0.20;
+$defensiveSell['required_edge_buffer_percent'] = 0.12;
+$defensiveSell['tradable_net_edge_percent'] = -0.32;
+$defensiveSell['expected_gross_move_percent'] = -0.27;
+$defensiveSell['estimated_exit_cost_percent'] = 0.30;
+$learnedSell = NobitexAdaptivePolicyLearner::applyToSignal($defensiveSell, ['quote_asset'=>'IRT']);
+expect(($learnedSell['action'] ?? '') === 'sell', 'A weak mature profile may accept a forward SELL bias earlier than the neutral profile.');
+expect(($learnedSell['reason'] ?? '') === 'adaptive_policy_forward_sell_bias', 'Learned SELL timing must be explicit in diagnostics.');
 
 NobitexAdaptivePolicyLearner::clearRuntime();
 fwrite(STDOUT, "Adaptive Policy Learner v1 regression tests passed.\n");
