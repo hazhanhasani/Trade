@@ -54,16 +54,20 @@ msAssert(($breakoutRoute['selected']['key']??'')==='breakout_v1','breakout regim
 msAssert(($breakoutRoute['selected']['entry_allowed']??false)===true,'confirmed upside breakout should allow breakout entry before execution costs');
 
 // Chaotic volatility must receive the high-volatility strategy but still stay
-// out of the market when there is no directional structure.
+// out of the market when there is no directional structure. A failed
+// directional gate must not advertise a positive actionable edge.
 $chaosPrices=[];$p=100.0;
 for($i=0;$i<180;$i++){ $p *= 1.0 + (($i%2===0?1:-1)*0.025); $chaosPrices[]=$p; }
 $chaosI=['momentum_5_percent'=>0.0,'ema_gap_percent'=>0.0,'trend_consistency'=>0.50,'volatility_percent'=>2.40,'rsi14'=>50,'macd_histogram_percent'=>0.0];
 $chaosRegime=$detector->detect($market,$chaosPrices,$chaosI,$chaosI,$chaosI);
 msAssert(($chaosRegime['regime']??'')===NobitexMarketRegimeDetector::HIGH_VOLATILITY,'extreme volatility regime was not detected');
 $chaosRoute=$router->route(['market'=>$market,'prices'=>['1m'=>$chaosPrices],'indicators'=>['1m'=>$chaosI,'5m'=>$chaosI,'15m'=>$chaosI]],$chaosRegime);
-msAssert(($chaosRoute['selected']['key']??'')==='high_volatility_momentum_v1','high-volatility regime should route to guarded volatility strategy');
+msAssert(($chaosRoute['selected']['key']??'')==='high_volatility_momentum_v2','high-volatility regime should route to calibrated volatility strategy');
 msAssert(($chaosRoute['entry_enabled']??false)===true,'high-volatility regime should allow strategy-level evaluation');
 msAssert(($chaosRoute['selected']['entry_allowed']??true)===false,'non-directional high volatility must not allow BUY');
+msAssert((float)($chaosRoute['selected']['gross_edge_percent']??1.0)<=0.0,'failed directional gate must not expose a positive actionable edge');
+msAssert(!empty($chaosRoute['selected']['diagnostics']['failed_entry_guards']??[]),'failed directional guards must be recorded');
+msAssert(($chaosRoute['selected']['reason']??'')!=='high_volatility_not_directional_enough','primary high-volatility blocker should be explicit');
 
 // A directional high-volatility context may pass the strategy-level gate. The
 // signal engine still has to prove positive tradable edge after all costs.
@@ -87,8 +91,9 @@ $directionalRoute=$router->route([
     'prices'=>['1m'=>$trendPrices],
     'indicators'=>['1m'=>$directionalI1,'5m'=>$directionalI5,'15m'=>$directionalI15],
 ],$directionalRegime);
-msAssert(($directionalRoute['selected']['key']??'')==='high_volatility_momentum_v1','directional high volatility should use guarded volatility strategy');
+msAssert(($directionalRoute['selected']['key']??'')==='high_volatility_momentum_v2','directional high volatility should use calibrated volatility strategy');
 msAssert(($directionalRoute['selected']['entry_allowed']??false)===true,'directional high volatility should be eligible before execution-cost gate');
 msAssert((float)($directionalRoute['selected']['gross_edge_percent']??0.0)>0.0,'directional high volatility should expose a bounded positive gross edge');
+msAssert(($directionalRoute['selected']['diagnostics']['failed_entry_guards']??['x'])===[],'directional setup should pass every entry guard');
 
 echo "Multi-strategy regime/router regression tests passed.\n";
