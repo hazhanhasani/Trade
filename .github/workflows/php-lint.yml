@@ -63,6 +63,8 @@ jobs:
         run: php backend/tests/nobitex_minimum_order_rounding_test.php
       - name: Nobitex adaptive soft-capacity regression tests
         run: php backend/tests/nobitex_soft_capacity_test.php
+      - name: Trade 1.4.22 full debug regression tests
+        run: php backend/tests/nobitex_full_debug_v1422_test.php
       - name: Nobitex runtime telemetry regression tests
         run: php backend/tests/nobitex_runtime_telemetry_test.php
       - name: Bale trade notification regression tests
