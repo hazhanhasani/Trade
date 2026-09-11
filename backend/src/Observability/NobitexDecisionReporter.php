@@ -48,7 +48,7 @@ final class NobitexDecisionReporter
         if ($reasonSummary !== []) {
             $summary[] = 'خلاصه دلایل رد: ' . implode(' | ', array_slice($reasonSummary, 0, 8));
         }
-        $summary[] = 'نکته: Edge قابل معامله بعد از Buffer/هزینه اجرا ملاک ورود است؛ مثبت بودن Edge خام به‌تنهایی مجوز BUY نیست.';
+        $summary[] = 'نکته: Edge فقط وقتی قابل معامله است که خود Strategy اجازه ورود داده باشد؛ Edge خام یا مدل تشخیصی به‌تنهایی مجوز BUY نیست.';
 
         ErrorReporter::log(
             implode("\n", $summary),
@@ -165,6 +165,17 @@ final class NobitexDecisionReporter
             'minimum_order_rounding' => 'بعد از گردکردن مقدار/قیمت، سفارش به حداقل معتبر صرافی نمی‌رسد.',
             'pending_order_capacity_reached' => 'ظرفیت سفارش‌های Pending پر است و ورود تازه تا تعیین تکلیف آن‌ها متوقف است.',
             'no_quote_balance' => 'هیچ موجودی قابل استفاده IRT/USDT برای ورود وجود ندارد.',
+            'high_volatility_alignment_below_threshold' => 'هم‌جهتی تایم‌فریم‌ها در بازار پرنوسان کمتر از حد لازم است؛ حرکت هنوز تأیید چندتایم‌فریمی ندارد.',
+            'high_volatility_efficiency_below_threshold' => 'Efficiency حرکت پایین است؛ بخش زیادی از نوسان رفت‌وبرگشتی/نویز است و روند جهت‌دار قابل اتکا نیست.',
+            'high_volatility_directional_move_below_threshold' => 'حرکت جهت‌دار ۳۰ دقیقه‌ای برای ورود در وضعیت پرنوسان هنوز به حد لازم نرسیده است.',
+            'high_volatility_momentum_1m_not_positive' => 'مومنتوم کوتاه‌مدت ۱ دقیقه مثبت نیست و تأیید ورود سریع وجود ندارد.',
+            'high_volatility_momentum_5m_not_positive' => 'مومنتوم ۵ دقیقه مثبت نیست و حرکت پایدار کوتاه‌مدت تأیید نشده است.',
+            'high_volatility_momentum_15m_negative' => 'مومنتوم ۱۵ دقیقه منفی است و جهت بزرگ‌تر با BUY هم‌سو نیست.',
+            'high_volatility_orderbook_adverse' => 'عدم‌تعادل Order Book علیه خریدار است و فشار فروش برای ورود زیاد است.',
+            'high_volatility_rsi_1m_exhausted' => 'RSI یک‌دقیقه‌ای بیش‌ازحد داغ شده و احتمال تعقیب قیمت/بازگشت بالا است.',
+            'high_volatility_rsi_5m_exhausted' => 'RSI پنج‌دقیقه‌ای وارد ناحیه فرسودگی شده و ورود جدید پرریسک است.',
+            'high_volatility_not_directional_enough' => 'بازار پرنوسان است اما مجموعه شروط جهت‌داری برای BUY کامل نشده است.',
+            'high_volatility_edge_not_positive' => 'ساختار جهت‌دار تأیید شده ولی Edge اقتصادی نهایی هنوز مثبت نیست.',
             'not_explicitly_recorded' => 'این Candidate در Top List دیده شده ولی دلیل جداگانه‌ای در آرایه Rejections ثبت نشده است.',
             default => 'Guard یا شرط داخلی موتور معامله این Candidate را برای BUY نپذیرفته است.',
         };
