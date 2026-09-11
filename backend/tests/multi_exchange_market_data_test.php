@@ -87,8 +87,13 @@ foreach (['آبان‌تتر','بیت۲۴','تبدیل (Tabdeal)','Market Data o
 
 $legacyOrderService = file_get_contents(dirname(__DIR__) . '/src/Trading/OrderService.php');
 $legacyEngine = file_get_contents(dirname(__DIR__) . '/src/Trading/AutoTraderEngine.php');
-mdAssert(is_string($legacyOrderService) && is_string($legacyEngine), 'Unable to inspect legacy Bitpin execution surfaces.');
+$controller = file_get_contents(dirname(__DIR__) . '/src/Trading/BotController.php');
+mdAssert(is_string($legacyOrderService) && is_string($legacyEngine) && is_string($controller), 'Unable to inspect execution-boundary sources.');
 mdAssert(str_contains($legacyOrderService, 'liveEnabled(): bool') && str_contains($legacyOrderService, 'return false;'), 'Bitpin live execution guard must remain hard-disabled.');
 mdAssert(str_contains($legacyEngine, "'execution_allowed'=>false"), 'Legacy Bitpin engine must remain non-executable.');
+mdAssert(str_contains($controller, "runNow(string \$exchange = 'nobitex')"), 'Manual controller execution must default to Nobitex.');
+mdAssert(str_contains($controller, "if (\$exchange !== 'nobitex')"), 'Controller must reject every non-Nobitex execution request.');
+mdAssert(!str_contains($controller, "setExchangeEnabled('bitpin'"), 'Legacy controller shortcut must not enable Bitpin trading.');
+mdAssert(str_contains($controller, "'execution_mode'=>'nobitex_only'"), 'Controller status must advertise Nobitex-only execution.');
 
 echo "Multi-exchange market-data and execution-boundary regression tests passed.\n";
