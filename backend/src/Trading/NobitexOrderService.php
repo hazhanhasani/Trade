@@ -81,6 +81,14 @@ final class NobitexOrderService
         $symbol=strtoupper(preg_replace('/[^A-Z0-9]/','',(string)($input['symbol']??$input['market_symbol']??''))??'');
         [$base,$quote]=$this->parseSymbol($symbol);
         if($base===''||$quote==='') throw new \InvalidArgumentException('Nobitex symbol must look like TONUSDT or TONIRT.');
+        if(!NobitexSymbolPolicy::isOrderApiCompatibleBase($base)){
+            $assessment=NobitexSymbolPolicy::assessment($symbol,$base);
+            $this->audit('nobitex.order_alias_blocked',$assessment+['source'=>$source]);
+            if(str_starts_with($source,'autotrade_nobitex')){
+                throw new NobitexCandidateRejectedException($symbol,NobitexSymbolPolicy::REJECTION_REASON,$assessment);
+            }
+            throw new \InvalidArgumentException('This Nobitex scaled market alias is visible publicly but is not executable through the authenticated spot order API.');
+        }
 
         $amount=NobitexOrderValueGuard::amountFromInput($input);
         $price=isset($input['price'])&&$input['price']!==''?$this->positive($input['price'],'price'):null;
@@ -100,10 +108,6 @@ final class NobitexOrderService
         $globalRisk=null;
         $client=null;
 
-        // Fresh automated BUYs are revalidated at submit time. The adaptive
-        // policy combines current strategy/regime, realized strategy learning,
-        // calibrated edge and real execution history. It may only make entry
-        // harder; reduction-only exits and confirmed-cancel reprices bypass it.
         if($side==='buy'&&str_starts_with($source,'autotrade_nobitex')){
             $client=$this->client();
             if($source!=='autotrade_nobitex_reprice'&&in_array($mode,['market','limit'],true)){
@@ -289,11 +293,6 @@ final class NobitexOrderService
     {
         $order=$this->firstOrder($response);
         if($order===[]||NobitexOrderFill::isDone($order)) return$order;
-
-        // Preserve the requested quantity separately, but never expose it as a
-        // matched fill for Active/Canceled/Rejected orders. Older portfolio code
-        // scans `amount` after `matchedAmount`; zeroing it here prevents a
-        // zero-fill cancellation from being adopted as a real position.
         $requested=NobitexOrderFill::requestedAmount($order,0.0);
         if($requested>0.0) $order['requestedAmount']=$requested;
         $order['amount']=0;
