@@ -102,10 +102,13 @@ final class NobitexPositionReconciler
                 }
 
                 if ($action === 'resize' && $after >= 0.0 && $after + self::ABSOLUTE_EPSILON < $before) {
+                    // Native PDO does not allow reusing one named placeholder
+                    // twice in the same statement. Keep distinct names for SET
+                    // and WHERE even though both intentionally carry $after.
                     $stmt = $pdo->prepare("UPDATE nobitex_autotrade_positions
-                        SET amount=:amount, updated_at=UTC_TIMESTAMP()
-                        WHERE id=:id AND status='open' AND amount>:amount");
-                    $stmt->execute([':amount'=>$after,':id'=>$positionId]);
+                        SET amount=:new_amount, updated_at=UTC_TIMESTAMP()
+                        WHERE id=:id AND status='open' AND amount>:amount_floor");
+                    $stmt->execute([':new_amount'=>$after,':amount_floor'=>$after,':id'=>$positionId]);
                     if ($stmt->rowCount() !== 1) continue;
                     $result['resized']++;
                     $event = [
