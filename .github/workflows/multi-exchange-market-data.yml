@@ -12,6 +12,7 @@ on:
       - 'backend/src/Trading/BotController.php'
       - 'backend/src/Trading/NobitexAdaptiveExecutionPolicy.php'
       - 'backend/src/Trading/NobitexExternalMarketOracle.php'
+      - 'backend/cron/tick.php'
       - 'backend/public/admin/exchanges.php'
       - 'backend/tests/multi_exchange_market_data_test.php'
       - '.github/workflows/multi-exchange-market-data.yml'
