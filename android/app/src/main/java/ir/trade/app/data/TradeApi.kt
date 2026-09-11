@@ -24,6 +24,64 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
         return response
     }
 
+    suspend fun commandCenter(): Response {
+        requireCapability("analytics.command_center_v1")
+        return request("GET", "/api/command-center")
+    }
+
+    suspend fun settingsHistory(limit: Int = 30): Response {
+        requireCapability("trading.settings_presets_history_v1")
+        return request("GET", "/api/settings/history?limit=${limit.coerceIn(1, 80)}")
+    }
+
+    suspend fun previewSettings(json: String): Response {
+        requireCapability("trading.settings_risk_preview_v1")
+        return request("POST", "/api/settings/preview", json)
+    }
+
+    suspend fun applyPreset(name: String): Response {
+        requireCapability("trading.settings_presets_history_v1")
+        return request("POST", "/api/settings/preset", JSONObject().put("name", name).toString())
+    }
+
+    suspend fun rollbackSettings(historyId: Long): Response {
+        requireCapability("trading.settings_presets_history_v1")
+        return request("POST", "/api/settings/rollback", JSONObject().put("history_id", historyId).toString())
+    }
+
+    suspend fun setEmergency(mode: String): Response {
+        requireCapability("trading.emergency_modes_v1")
+        require(mode in setOf("normal", "pause_buys", "graceful_close", "full_stop")) { "Unsupported emergency mode" }
+        return request("POST", "/api/emergency", JSONObject().put("mode", mode).toString())
+    }
+
+    suspend fun notificationRules(): Response {
+        requireCapability("notifications.rules_v1")
+        return request("GET", "/api/notification-rules")
+    }
+
+    suspend fun updateNotificationRules(json: String): Response {
+        requireCapability("notifications.rules_v1")
+        return request("POST", "/api/notification-rules", json)
+    }
+
+    suspend fun setShadowMode(enabled: Boolean): Response {
+        requireCapability("trading.shadow_evaluation_v1")
+        return request("POST", "/api/shadow-mode", JSONObject().put("enabled", enabled).toString())
+    }
+
+    suspend fun strategyLab(json: String): Response {
+        requireCapability("trading.strategy_lab_v1")
+        return request("POST", "/api/strategy-lab", json)
+    }
+
+    suspend fun tradeReplay(positionId: Long): Response {
+        requireCapability("trading.trade_replay_v1")
+        return request("GET", "/api/trade-replay/$positionId")
+    }
+
+    suspend fun timeline(limit: Int = 80): Response = request("GET", "/api/timeline?limit=${limit.coerceIn(10, 250)}")
+
     suspend fun exchanges(): Response = request("GET", "/api/exchanges")
     suspend fun botStatus(): Response = request("GET", "/api/bot")
 
