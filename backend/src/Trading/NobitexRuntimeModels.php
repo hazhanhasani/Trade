@@ -19,6 +19,7 @@ final class NobitexRuntimeModels
     public const STRATEGY_MODE = 'profit_first_v5_shadow_multi_strategy_v1';
     public const DECISION = 'profit_first_net_edge_v5_uncertainty_buffer_v2';
     public const SELECTION = 'positive_tradable_net_edge_after_explicit_costs_uncertainty_buffer_v2';
+    public const PRICE_REFERENCE = NobitexCrossMarketPriceOracle::MODEL;
     public const EXECUTION = 'execution_quality_v2';
     public const EXECUTION_LEARNING = NobitexExecutionLearning::MODEL;
     public const ADAPTIVE_EXECUTION = NobitexAdaptiveExecutionPolicy::MODEL;
