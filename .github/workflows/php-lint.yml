@@ -59,6 +59,8 @@ jobs:
         run: php backend/tests/adaptive_execution_policy_test.php
       - name: Nobitex order value guard regression tests
         run: php backend/tests/nobitex_order_value_guard_test.php
+      - name: Nobitex minimum-order rounding regression tests
+        run: php backend/tests/nobitex_minimum_order_rounding_test.php
       - name: Nobitex runtime telemetry regression tests
         run: php backend/tests/nobitex_runtime_telemetry_test.php
       - name: Bale trade notification regression tests
