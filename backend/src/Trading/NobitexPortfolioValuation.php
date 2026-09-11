@@ -19,11 +19,23 @@ final class NobitexPortfolioValuation
     public function snapshot(NobitexClient $client, array $wallets, array $positions): array
     {
         $rows = $this->walletRows($wallets);
+        $needsBooks = false;
+        foreach ($rows as $row) {
+            if (!is_array($row)) continue;
+            $asset = strtoupper(trim((string)($row['currency'] ?? $row['asset'] ?? $row['currencyCode'] ?? '')));
+            if ($asset !== '' && !in_array($asset,['RLS','IRT'],true) && $this->walletRowTotalBalance($row) > 0.0) {
+                $needsBooks = true;
+                break;
+            }
+        }
+
         $books = [];
-        try { $books = $this->bookRows($client->allOrderBooks()); } catch (\Throwable) {}
+        if ($needsBooks) {
+            try { $books = $this->bookRows($client->allOrderBooks()); } catch (\Throwable) {}
+        }
 
         $usdtToRls = $this->bookMark($books['USDTIRT'] ?? $books['USDTRLS'] ?? []);
-        if ($usdtToRls <= 0.0) $usdtToRls = $this->usdtToRls($client);
+        if ($needsBooks && $usdtToRls <= 0.0) $usdtToRls = $this->usdtToRls($client);
 
         $walletAssets = [];
         $walletTotalRls = 0.0;
