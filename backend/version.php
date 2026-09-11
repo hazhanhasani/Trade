@@ -2,5 +2,5 @@
 
 declare(strict_types=1);
 
-// Coordinated release: high-volatility v2 strategy exposes actionable edge only after directional guards and reports explicit blocker reasons.
-return '1.4.15';
+// Coordinated release: approved positive-edge Nobitex BUYs can use bounded market execution when post-cost edge safely covers worst-case slippage.
+return '1.4.16';
