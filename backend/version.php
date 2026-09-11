@@ -2,5 +2,5 @@
 
 declare(strict_types=1);
 
-// Coordinated release: corrected full Bale forensic diagnostics with exact source locations.
-return '1.4.11';
+// Coordinated release: forensic Nobitex decision tracing and disabled-exchange probe suppression.
+return '1.4.12';

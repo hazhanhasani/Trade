@@ -36,12 +36,20 @@ if (($_GET['ajax']??'')==='health') {
     header('Content-Type: application/json; charset=utf-8');
     $status=(new BotController())->status();$cron=is_array($status['cron_health']??null)?$status['cron_health']:[];$checks=[];
     foreach(['nobitex','bitpin'] as $exchange){
-        $info=$status['exchanges'][$exchange];$ok=false;$text=$info['credentials_configured']?'در حال تست':'کلید تنظیم نشده';
-        if($info['credentials_configured']){
+        $info=$status['exchanges'][$exchange];$ok=false;$text='کلید تنظیم نشده';
+        $configured=(bool)($info['credentials_configured']??false);$enabled=(bool)($info['bot_enabled']??false);
+        if(!$configured){
+            $text='کلید تنظیم نشده';
+        }elseif(!$enabled){
+            // A disabled exchange must not create authenticated traffic just because
+            // the System page refreshes. Manual/authentication tests remain in Repair.
+            $ok=true;$text='ربات غیرفعال است — تست خودکار API انجام نشد؛ برای تست واقعی از «مرکز تعمیر» استفاده کن.';
+        }else{
+            $text='در حال تست';
             try{if($exchange==='nobitex')(new NobitexOrderService())->client()->test();else(new OrderService())->client()->wallets();$ok=true;$text='اتصال API سالم است';}
-            catch(Throwable $e){$text=mb_substr($e->getMessage(),0,180);ErrorReporter::captureThrowable($e,'warning','exchange_health_check',['exchange'=>$exchange]);}
+            catch(Throwable $e){$text=mb_substr($e->getMessage(),0,180);ErrorReporter::captureThrowable($e,'warning','exchange_health_check',['exchange'=>$exchange,'health_probe'=>'automatic_enabled_exchange']);}
         }
-        $checks[$exchange]=['ok'=>$ok,'text'=>$text];
+        $checks[$exchange]=['ok'=>$ok,'text'=>$text,'tested'=>$configured&&$enabled,'bot_enabled'=>$enabled];
     }
     $obs=(new SystemObservability())->snapshot();
     echo json_encode(['ok'=>true,'checks'=>[
@@ -97,7 +105,7 @@ require __DIR__.'/_nav.php';
 
 <section class="panel soft"><div class="panel-head"><div><h2>تبدیل خودکار دارایی‌های خرد به تومان</h2><p>فقط دارایی‌هایی بررسی می‌شوند که هیچ پوزیشن باز یا سفارش در انتظار ندارند. حداکثر ۳ دارایی در هر نوبت؛ قیمت فروش Market با محدودکننده قیمت محافظت می‌شود.</p></div><span class="badge <?=$dust['enabled']?'good':'warn'?>"><?=$dust['enabled']?'فعال':'خاموش'?></span></div><form method="post"><input type="hidden" name="csrf" value="<?=$csrf?>"><input type="hidden" name="action" value="dust_settings"><div class="field-grid"><div class="field"><label>وضعیت</label><select name="enabled"><option value="0" <?=$dust['enabled']?'':'selected'?>>خاموش</option><option value="1" <?=$dust['enabled']?'selected':''?>>فعال</option></select><span class="field-help">به‌صورت پیش‌فرض خاموش است تا حد مالی را خودت انتخاب کنی.</span></div><div class="field"><label>حداقل ارزش دارایی خرد (تومان)</label><input type="number" min="100" step="100" name="min_toman" value="<?=h($dust['min_toman'])?>"></div><div class="field"><label>حداکثر ارزش دارایی خرد (تومان)</label><input type="number" min="1000" step="1000" name="max_toman" value="<?=h($dust['max_toman'])?>"></div><div class="field"><label>فاصله اجرای خودکار (ساعت)</label><input type="number" min="1" max="168" name="cooldown_hours" value="<?=h($dust['cooldown_hours'])?>"></div></div><div class="actions" style="margin-top:12px"><button class="btn safe">ذخیره تنظیمات</button></div></form><?php if($dust['enabled']):?><form method="post" style="margin-top:8px" onsubmit="return confirm('همین حالا دارایی‌های خرد واجد شرایط بررسی و در صورت امکان فروخته شوند؟');"><input type="hidden" name="csrf" value="<?=$csrf?>"><input type="hidden" name="action" value="dust_run"><button class="btn warning">اجرای دستی تبدیل خرد</button></form><?php endif?></section>
 
-<section class="panel"><div class="panel-head"><div><h2>بررسی سلامت اتصال‌ها</h2><p>تست واقعی Backend، دیتابیس، API صرافی‌ها، HTTPS، PHP، Sodium و Storage.</p></div><button class="btn secondary" type="button" onclick="loadHealth()">بررسی دوباره</button></div><div class="health-grid" id="health"><div class="health-item">در حال بررسی…</div></div></section>
+<section class="panel"><div class="panel-head"><div><h2>بررسی سلامت اتصال‌ها</h2><p>تست واقعی Backend، دیتابیس و API صرافی‌های فعال. صرافی غیرفعال خودکار به API وصل نمی‌شود؛ تست دستی از مرکز تعمیر انجام می‌شود.</p></div><button class="btn secondary" type="button" onclick="loadHealth()">بررسی دوباره</button></div><div class="health-grid" id="health"><div class="health-item">در حال بررسی…</div></div></section>
 
 <section class="panel"><div class="panel-head"><div><h2>ابزارهای فنی</h2><p>عیب‌یابی، لاگ حساس، دستگاه‌ها، بروزرسانی و امضای اندروید.</p></div><span class="badge info">پیشرفته</span></div><div class="metric-grid"><div class="metric"><span>لاگ و خطا</span><b>پایش زنده و هشدار بله</b><div class="actions" style="margin-top:8px"><a class="btn soft" href="/admin/logs.php">باز کردن</a></div></div><div class="metric"><span>دستگاه‌ها</span><b>توکن‌ها و اتصال Android</b><div class="actions" style="margin-top:8px"><a class="btn soft" href="/admin/devices.php">باز کردن</a></div></div><div class="metric"><span>بروزرسانی</span><b>نسخه Backend و Release</b><div class="actions" style="margin-top:8px"><a class="btn soft" href="/admin/update/">باز کردن</a></div></div><div class="metric"><span>عیب‌یابی</span><b>تست و تعمیر سیستم</b><div class="actions" style="margin-top:8px"><a class="btn soft" href="/admin/repair.php">باز کردن</a></div></div><div class="metric"><span>امضای اندروید</span><b>هویت نسخه Release</b><div class="actions" style="margin-top:8px"><a class="btn soft" href="/admin/signing.php">باز کردن</a></div></div></div></section>
 
