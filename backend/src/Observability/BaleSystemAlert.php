@@ -47,9 +47,17 @@ final class BaleSystemAlert
         $severity = $this->severity($severity);
 
         $hash = substr(hash('sha256', $fingerprint), 0, 40);
-        // The channel is intentionally verbose. Keep only a tiny 5-second guard
-        // against accidental recursive storms; otherwise every occurrence is kept.
-        if ($this->recentlyQueued($pdo, $hash, 5)) return;
+        // Identical technical fingerprints are still persisted by ErrorReporter,
+        // but Bale is a human-facing channel. Routine info logs (for example a
+        // healthy cron repeatedly returning portfolio_full) are summarized at most
+        // once per ten minutes; warnings/errors retain much shorter repeat windows.
+        $dedupeSeconds = match ($severity) {
+            'info' => 600,
+            'warning' => 120,
+            'error', 'critical' => 30,
+            default => 60,
+        };
+        if ($this->recentlyQueued($pdo, $hash, $dedupeSeconds)) return;
 
         $eventKey = 'system:' . $hash . ':' . time() . ':' . substr(bin2hex(random_bytes(3)), 0, 6);
         $stmt = $pdo->prepare("INSERT INTO bale_system_alert_deliveries
