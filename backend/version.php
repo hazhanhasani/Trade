@@ -2,5 +2,5 @@
 
 declare(strict_types=1);
 
-// Coordinated release: Adaptive Policy Learner v1 learns bounded Profit-First entry and forward-sell timing from fee-aware realized trades plus shadow outcomes, while explicit exchange costs and hard risk controls remain authoritative. Nobitex base-deducted BUY fees are reconciled without false external-sale circuits, and routine forensic Cron/no-trade telemetry stays local instead of flooding Bale.
-return '1.4.26';
+// Coordinated release: dashboard truth is rendered in Persian on first paint; Nobitex wallet totals prefer official rialBalance/rialBalanceSell values and available cash uses active balance, removing transient Latin digits and local order-book valuation drift while keeping trading/risk arithmetic unchanged.
+return '1.4.27';
