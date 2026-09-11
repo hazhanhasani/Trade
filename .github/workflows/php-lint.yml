@@ -89,6 +89,8 @@ jobs:
         run: php backend/tests/repair_diagnostics_test.php
       - name: Android live panel parity regression tests
         run: php backend/tests/android_live_panel_parity_test.php
+      - name: Nobitex funded quote priority regression tests
+        run: php backend/tests/nobitex_quote_priority_test.php
       - name: Validate Backend ↔ Android API contract parity
         shell: bash
         run: |
