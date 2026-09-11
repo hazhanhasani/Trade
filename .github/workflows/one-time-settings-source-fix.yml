@@ -1,0 +1,161 @@
+name: One-time Trading Settings Source Fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-settings-source-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'Install one-time trading settings source fix'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Consolidate trading settings source of truth
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, got {count}')
+              return text.replace(old, new, 1)
+
+          # 1) /admin/bot/ becomes observability-only for trading settings.
+          #    It must never overwrite values saved from the canonical settings page.
+          trading_path = Path('backend/public/admin/bot/index.php')
+          trading = trading_path.read_text()
+          trading = replace_once(
+              trading,
+              "        if($a==='save_settings'){$c->updateSettings($_POST);$message='تنظیمات معاملات و کنترل ریسک ذخیره شد.';}\n        elseif($a==='run_now'){$runResult=$c->runNow($exchange);$message='یک چرخه '.$exchange.' اجرا شد.';}\n",
+              "        if($a==='save_settings'){header('Location: /admin/bot/settings.php?legacy_form=1',true,303);exit;}\n        elseif($a==='run_now'){$runResult=$c->runNow($exchange);$message='یک چرخه '.$exchange.' اجرا شد.';}\n",
+              'legacy trading save handler',
+          )
+          trading = replace_once(
+              trading,
+              '<div class="page-head"><div><div class="page-eyebrow">مدیریت معاملات خودکار</div><h1>معاملات</h1><p>همه چیز این صفحه با زبان ساده نمایش داده می‌شود: وضعیت ربات، معاملات باز، تصمیم‌های اخیر و تنظیمات کنترل ریسک.</p></div>',
+              '<div class="page-head"><div><div class="page-eyebrow">مدیریت معاملات خودکار</div><h1>معاملات</h1><p>وضعیت زنده ربات، معاملات باز، تصمیم‌های اخیر و خلاصه تنظیمات فعال. ویرایش تنظیمات فقط از صفحه «تنظیمات معاملات» انجام می‌شود.</p></div>',
+              'trading page description',
+          )
+          start_marker = '<section class="panel soft"><div class="panel-head"><div><h2>تنظیمات ساده معاملات و ریسک</h2>'
+          end_marker = '\n<div class="panel-grid">\n<?php foreach([\'nobitex\'=>\'Nobitex\',\'bitpin\'=>\'Bitpin\'] as $key=>$name):$positions='
+          start = trading.find(start_marker)
+          end = trading.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit('duplicate settings section markers not found')
+          canonical_summary = '''<section class="panel soft"><div class="panel-head"><div><h2>تنظیمات فعال ربات</h2><p>این بخش فقط وضعیت فعلی را از همان منبعی نشان می‌دهد که موتور معامله می‌خواند. برای جلوگیری از دو منبع تنظیمات، ویرایش فقط در «تنظیمات معاملات» انجام می‌شود.</p></div><span class="badge good">همگام با موتور</span></div>
+<div class="metric-grid">
+<div class="metric"><span>سرمایه هدف هر خرید</span><b><?=fmt($settings['position_percent']??0,1)?>%</b></div>
+<div class="metric"><span>سقف کل سرمایه درگیر</span><b><?=fmt($settings['nobitex_portfolio_exposure_percent']??0,0)?>%</b></div>
+<div class="metric"><span>معاملات باز مجاز</span><b><?=h($settings['nobitex_max_positions']??0)?></b></div>
+<div class="metric"><span>حد ضرر / هدف سود</span><b><?=fmt($settings['stop_loss_percent']??0,1)?>% / <?=fmt($settings['take_profit_percent']??0,1)?>%</b></div>
+<div class="metric"><span>زیان روزانه مجاز</span><b><?=fmt($settings['daily_loss_limit_percent']??0,1)?>%</b></div>
+<div class="metric"><span>استراحت همان ارز</span><b><?=h($settings['cooldown_minutes']??0)?> دقیقه</b></div>
+</div>
+<div class="notice info" style="margin-top:12px"><b>منبع واحد:</b> مقادیر بالا و ربات هر دو از تنظیمات ذخیره‌شده مرکزی خوانده می‌شوند. فرم ویرایش تکراری این صفحه حذف شده است.</div>
+<div class="actions"><a class="btn" href="/admin/bot/settings.php">ویرایش تنظیمات معاملات</a></div>
+</section>
+'''
+          trading = trading[:start] + canonical_summary + trading[end:]
+          trading_path.write_text(trading)
+
+          # 2) Explain legacy redirects on the canonical page.
+          settings_path = Path('backend/public/admin/bot/settings.php')
+          settings = settings_path.read_text()
+          settings = replace_once(
+              settings,
+              "if(isset($_GET['csrf_refresh']))$error='فرم امنیتی قدیمی بود؛ هیچ تغییری انجام نشد.';\n",
+              "if(isset($_GET['csrf_refresh']))$error='فرم امنیتی قدیمی بود؛ هیچ تغییری انجام نشد.';\nif(isset($_GET['legacy_form']))$error='برای جلوگیری از ناهماهنگی، تنظیمات فقط از همین صفحه ذخیره می‌شوند؛ فرم قدیمی بخش معاملات هیچ تغییری اعمال نکرد.';\n",
+              'canonical settings legacy notice',
+          )
+          settings_path.write_text(settings)
+
+          # 3) Remove the hidden legacy cooldown source. Runtime must read the same
+          #    autotrade_settings row that BotController/settings.php update.
+          engine_path = Path('backend/src/Trading/NobitexAutoTraderEngine.php')
+          engine = engine_path.read_text()
+          engine = replace_once(
+              engine,
+              '''        $stmt = $pdo->prepare("SELECT value_text FROM settings WHERE key_name='cooldown_minutes' LIMIT 1");
+        $stmt->execute();
+        $raw=$stmt->fetchColumn();
+        $cooldownMinutes=is_numeric($raw)?(int)$raw:15;
+''',
+              '''        $sharedSettings=Schema::settings($pdo);
+        $cooldownMinutes=(int)($sharedSettings['cooldown_minutes']??15);
+''',
+              'legacy cooldown source',
+          )
+          engine_path.write_text(engine)
+
+          # 4) Regression: exactly one editable admin settings surface and no shadow cooldown.
+          test_path = Path('backend/tests/trading_admin_settings_regression_test.php')
+          test = test_path.read_text()
+          old_block = '''$trading=source('public/admin/bot/index.php');
+foreach([
+    'quote_asset','risk_profile','position_percent','max_position_percent',
+    'nobitex_portfolio_exposure_percent','nobitex_max_positions','nobitex_max_pending_orders',
+    'nobitex_pending_timeout_seconds','cooldown_minutes','stop_loss_percent',
+    'take_profit_percent','daily_loss_limit_percent',
+] as $field){expect(str_contains($trading,'name="'.$field.'"'),'Core trading setting disappeared from admin: '.$field);}
+expect(str_contains($trading,'function positionAnalytics(?array $position,?array $signal)'), 'Trading panel positionAnalytics must remain null-safe.');
+expect(str_contains($trading,"array_filter(\\$e['active_positions'],'is_array')"), 'Trading panel must filter invalid/null position rows before rendering.');
+'''
+          new_block = '''$trading=source('public/admin/bot/index.php');
+foreach([
+    'quote_asset','risk_profile','position_percent','max_position_percent',
+    'nobitex_portfolio_exposure_percent','nobitex_max_positions','nobitex_max_pending_orders',
+    'nobitex_pending_timeout_seconds','cooldown_minutes','stop_loss_percent',
+    'take_profit_percent','daily_loss_limit_percent',
+] as $field){expect(!str_contains($trading,'name="'.$field.'"'),'Trading dashboard must not expose a second editable settings field: '.$field);}
+expect(!str_contains($trading,"$c->updateSettings($_POST)"),'Trading dashboard must never persist settings.');
+expect(str_contains($trading,"/admin/bot/settings.php?legacy_form=1"),'Legacy settings POST must be redirected without applying stale values.');
+expect(str_contains($trading,'href="/admin/bot/settings.php"'),'Trading dashboard must link to the canonical settings editor.');
+expect(str_contains($trading,'منبع واحد'),'Trading dashboard must explain the single source of truth.');
+expect(str_contains($trading,'function positionAnalytics(?array $position,?array $signal)'), 'Trading panel positionAnalytics must remain null-safe.');
+expect(str_contains($trading,"array_filter(\\$e['active_positions'],'is_array')"), 'Trading panel must filter invalid/null position rows before rendering.');
+'''
+          test = replace_once(test, old_block, new_block, 'trading dashboard regression block')
+          anchor = "expect(str_contains($simple,'/admin/bot/advanced.php'),'Simple settings must link to advanced controls.');\n"
+          addition = anchor + "expect(str_contains($simple,\"$c->updateSettings($_POST)\"),'Canonical settings page must remain the admin write surface.');\nexpect(str_contains($simple,\"legacy_form\"),'Canonical settings page must explain rejected legacy-form submissions.');\n\n$legacyEngine=source('src/Trading/NobitexAutoTraderEngine.php');\nexpect(str_contains($legacyEngine,'$sharedSettings=Schema::settings($pdo);'),'Nobitex cooldown must read canonical autotrade settings.');\nexpect(!str_contains($legacyEngine,\"key_name='cooldown_minutes'\"),'Nobitex runtime must not read cooldown from the legacy generic settings table.');\n"
+          test = replace_once(test, anchor, addition, 'single-source runtime regression assertions')
+          test_path.write_text(test)
+
+          # 5) Coordinated release.
+          version_path = Path('backend/version.php')
+          version = version_path.read_text()
+          version = replace_once(version, "return '1.4.3';", "return '1.4.4';", 'version bump')
+          version_path.write_text(version)
+          PY
+
+          php -l backend/public/admin/bot/index.php
+          php -l backend/public/admin/bot/settings.php
+          php -l backend/src/Trading/NobitexAutoTraderEngine.php
+          php -l backend/tests/trading_admin_settings_regression_test.php
+          php backend/tests/trading_admin_settings_regression_test.php
+          php backend/tests/nobitex_runtime_safety_test.php
+          git diff --check
+
+      - name: Commit fix directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add backend/public/admin/bot/index.php \
+                  backend/public/admin/bot/settings.php \
+                  backend/src/Trading/NobitexAutoTraderEngine.php \
+                  backend/tests/trading_admin_settings_regression_test.php \
+                  backend/version.php
+          git commit -m 'Release Trade 1.4.4 unify trading settings source'
+          git push origin HEAD:main
