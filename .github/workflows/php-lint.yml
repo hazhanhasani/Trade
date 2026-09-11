@@ -35,6 +35,10 @@ jobs:
         run: php backend/tests/nobitex_fill_integration_test.php
       - name: Nobitex manual position reconciliation regression tests
         run: php backend/tests/nobitex_position_reconciliation_test.php
+      - name: Nobitex active position limit regression tests
+        run: php backend/tests/nobitex_position_limit_test.php
+      - name: Nobitex runtime safety regression tests
+        run: php backend/tests/nobitex_runtime_safety_test.php
       - name: External Nobitex trade reconciliation v2 regression tests
         run: php backend/tests/nobitex_external_trade_reconciliation_test.php
       - name: Execution Learning v1 regression tests
