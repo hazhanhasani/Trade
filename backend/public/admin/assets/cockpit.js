@@ -55,12 +55,18 @@
     const path=location.pathname.replace(/\/+$/,'/');
     if((path==='/admin/'||path==='/admin/index.php')&&document.querySelector('.admin-shell'))poll(async()=>{const j=await json('/admin/live-dashboard.php');liveDashboard(j.data);},4000);
   }
+  function fixReplayLinks(scope=document){
+    scope.querySelectorAll?.('a[href^="/api/trade-replay/"]').forEach(link=>{
+      const match=(link.getAttribute('href')||'').match(/^\/api\/trade-replay\/(\d+)/);if(!match)return;
+      link.setAttribute('href',`/admin/replay.php?id=${encodeURIComponent(match[1])}`);link.removeAttribute('target');
+    });
+  }
 
   document.addEventListener('click',e=>{const btn=e.target.closest('[data-theme-toggle]');if(btn)toggleTheme();});
   document.addEventListener('DOMContentLoaded',()=>{
-    updateThemeButton();updateClocks();localizeVisibleDates(document.body);startPageSpecificLive();
-    const observer=new MutationObserver(mutations=>{for(const m of mutations)for(const n of m.addedNodes)if(n.nodeType===Node.ELEMENT_NODE)localizeVisibleDates(n);else if(n.nodeType===Node.TEXT_NODE&&n.parentElement)localizeVisibleDates(n.parentElement);});observer.observe(document.body,{childList:true,subtree:true});
+    updateThemeButton();updateClocks();localizeVisibleDates(document.body);fixReplayLinks(document);startPageSpecificLive();
+    const observer=new MutationObserver(mutations=>{for(const m of mutations)for(const n of m.addedNodes)if(n.nodeType===Node.ELEMENT_NODE){localizeVisibleDates(n);fixReplayLinks(n);}else if(n.nodeType===Node.TEXT_NODE&&n.parentElement)localizeVisibleDates(n.parentElement);});observer.observe(document.body,{childList:true,subtree:true});
   });
   updateThemeButton();updateClocks();setInterval(updateClocks,1000);
-  window.TradeUI={json,poll,escapeHtml,setText,formatNumber,formatBytes,iranFromPayload,iranDateTimeFromUtc,localizeVisibleDates,toggleTheme};
+  window.TradeUI={json,poll,escapeHtml,setText,formatNumber,formatBytes,iranFromPayload,iranDateTimeFromUtc,localizeVisibleDates,toggleTheme,fixReplayLinks};
 })();
