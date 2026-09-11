@@ -36,7 +36,7 @@ $baseMarket = [
 $engine = new NobitexInternalSignalEngine();
 $signal = $engine->analyze($baseMarket, $prices);
 assertTrue(($signal['source'] ?? '') === 'nobitex_profit_first_v5_shadow_multi_strategy_v1', 'restored profit-first source marker missing');
-assertTrue(($signal['decision_model'] ?? '') === 'profit_first_net_edge_v5_restored', 'restored profit-first decision model missing');
+assertTrue(($signal['decision_model'] ?? '') === 'profit_first_net_edge_v5_uncertainty_buffer_v2', 'restored profit-first decision model missing');
 assertTrue(($signal['strategy_key'] ?? '') === 'profit_first_v5', 'profit-first primary strategy marker missing');
 assertTrue(isset($signal['market_regime']['regime']), 'shadow market regime missing');
 assertTrue(isset($signal['selected_strategy']['key']), 'primary strategy diagnostics missing');

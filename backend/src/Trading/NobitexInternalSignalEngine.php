@@ -21,8 +21,8 @@ final class NobitexInternalSignalEngine
     private const MIN_DYNAMIC_SPREAD_PERCENT = 0.35;
     private const MIN_LIQUIDITY_MULTIPLE = 4.0;
     private const TARGET_LIQUIDITY_MULTIPLE = 16.0;
-    private const MIN_EDGE_BUFFER_PERCENT = 0.20;
-    private const MAX_EDGE_BUFFER_PERCENT = 1.10;
+    private const MIN_EDGE_BUFFER_PERCENT = 0.12;
+    private const MAX_EDGE_BUFFER_PERCENT = 0.55;
 
     public function __construct(
         private readonly SignalEngine $base = new SignalEngine(),
@@ -162,14 +162,21 @@ final class NobitexInternalSignalEngine
 
         $netEdge = $gross - $estimatedCost;
 
-        $edgeBuffer = $this->clamp(
-            0.20
-                + min(0.30, $estimatedCost * 0.30)
-                + min(0.35, $volatility * 0.08)
-                + min(0.20, $disagreementPenalty * 0.60),
-            self::MIN_EDGE_BUFFER_PERCENT,
-            self::MAX_EDGE_BUFFER_PERCENT
+        // NetEdge already subtracts fee + spread + volatility slippage +
+        // liquidity slippage + adverse flow. The extra margin below therefore
+        // represents FORECAST uncertainty only; repeating a percentage of the
+        // already-subtracted execution costs here used to saturate the buffer at
+        // 0.85% across most volatile markets and suppressed otherwise positive
+        // post-cost opportunities.
+        $forecastBuffer = self::forecastUncertaintyBuffer(
+            $spreadCost,
+            $liquiditySlippageReserve,
+            $adverseFlowReserve,
+            $volatility,
+            $disagreementPenalty,
+            $exhaustionPenalty
         );
+        $edgeBuffer = (float) $forecastBuffer['total_percent'];
         $tradableNetEdge = $netEdge - $edgeBuffer;
         $expectedNetProfit = $tradableNetEdge > 0.0;
 
@@ -249,7 +256,7 @@ final class NobitexInternalSignalEngine
             'execution_quality_score'=>$qualityScore,
             'action'=>$action,
             'reason'=>$reason,
-            'decision_model'=>'profit_first_net_edge_v5_restored',
+            'decision_model'=>'profit_first_net_edge_v5_uncertainty_buffer_v2',
             'strategy_key'=>'profit_first_v5',
             'expected_net_profit'=>$ready && $expectedNetProfit,
             'expected_gross_move_percent'=>round($gross, 4),
@@ -265,6 +272,7 @@ final class NobitexInternalSignalEngine
             'required_edge_buffer_percent'=>round($edgeBuffer, 4),
             'tradable_net_edge_percent'=>round($tradableNetEdge, 4),
             'minimum_net_edge_percent'=>round($edgeBuffer, 4),
+            'forecast_uncertainty_buffer'=>$forecastBuffer,
             'market_regime'=>$marketRegime,
             'selected_strategy'=>[
                 'key'=>'profit_first_v5',
@@ -309,6 +317,12 @@ final class NobitexInternalSignalEngine
                 'liquidity_slippage_reserve_percent'=>round($liquiditySlippageReserve, 4),
                 'adverse_flow_reserve_percent'=>round($adverseFlowReserve, 4),
                 'adaptive_forecast_buffer_percent'=>round($edgeBuffer, 4),
+                'forecast_buffer_model'=>'uncertainty_only_v2',
+                'forecast_buffer_base_percent'=>$forecastBuffer['base_percent'],
+                'forecast_buffer_friction_uncertainty_percent'=>$forecastBuffer['friction_uncertainty_percent'],
+                'forecast_buffer_volatility_uncertainty_percent'=>$forecastBuffer['volatility_uncertainty_percent'],
+                'forecast_buffer_disagreement_uncertainty_percent'=>$forecastBuffer['disagreement_uncertainty_percent'],
+                'forecast_buffer_exhaustion_uncertainty_percent'=>$forecastBuffer['exhaustion_uncertainty_percent'],
                 'regime_uncertainty_buffer_percent'=>0.0,
                 'strategy_uncertainty_buffer_percent'=>0.0,
                 'volatility_hard_gate'=>false,
@@ -354,6 +368,53 @@ final class NobitexInternalSignalEngine
         ];
     }
 
+    /**
+     * Residual model/forecast uncertainty after explicit execution costs have
+     * already been deducted from gross edge. Kept public for deterministic
+     * regression tests and forensic diagnostics.
+     *
+     * @return array{model:string,base_percent:float,friction_uncertainty_percent:float,volatility_uncertainty_percent:float,disagreement_uncertainty_percent:float,exhaustion_uncertainty_percent:float,total_percent:float}
+     */
+    public static function forecastUncertaintyBuffer(
+        float $spreadCost,
+        float $liquidityReserve,
+        float $adverseFlowReserve,
+        float $volatility,
+        float $disagreementPenalty,
+        float $exhaustionPenalty
+    ): array {
+        $spreadCost = max(0.0, $spreadCost);
+        $liquidityReserve = max(0.0, $liquidityReserve);
+        $adverseFlowReserve = max(0.0, $adverseFlowReserve);
+        $volatility = max(0.0, $volatility);
+        $disagreementPenalty = max(0.0, $disagreementPenalty);
+        $exhaustionPenalty = max(0.0, $exhaustionPenalty);
+
+        $base = 0.12;
+        $friction = min(0.12,
+            ($spreadCost * 0.10)
+            + ($liquidityReserve * 0.10)
+            + ($adverseFlowReserve * 0.10)
+        );
+        $volatilityUncertainty = min(0.18, sqrt($volatility) * 0.07);
+        $disagreement = min(0.12, $disagreementPenalty * 0.50);
+        $exhaustion = min(0.08, $exhaustionPenalty * 0.25);
+        $total = max(
+            self::MIN_EDGE_BUFFER_PERCENT,
+            min(self::MAX_EDGE_BUFFER_PERCENT, $base + $friction + $volatilityUncertainty + $disagreement + $exhaustion)
+        );
+
+        return [
+            'model'=>'uncertainty_only_v2',
+            'base_percent'=>round($base, 4),
+            'friction_uncertainty_percent'=>round($friction, 4),
+            'volatility_uncertainty_percent'=>round($volatilityUncertainty, 4),
+            'disagreement_uncertainty_percent'=>round($disagreement, 4),
+            'exhaustion_uncertainty_percent'=>round($exhaustion, 4),
+            'total_percent'=>round($total, 4),
+        ];
+    }
+
     private function baseRoundtripFeePercent(array $market): float
     {
         $quote = strtoupper(trim((string) ($market['quote_asset'] ?? 'IRT')));
@@ -372,7 +433,7 @@ final class NobitexInternalSignalEngine
             'execution_quality_score'=>0,
             'action'=>'hold',
             'reason'=>$reason,
-            'decision_model'=>'profit_first_net_edge_v5_restored',
+            'decision_model'=>'profit_first_net_edge_v5_uncertainty_buffer_v2',
             'strategy_key'=>'profit_first_v5',
             'expected_net_profit'=>false,
             'expected_gross_move_percent'=>0.0,
@@ -388,6 +449,11 @@ final class NobitexInternalSignalEngine
             'required_edge_buffer_percent'=>0.0,
             'tradable_net_edge_percent'=>0.0,
             'minimum_net_edge_percent'=>0.0,
+            'forecast_uncertainty_buffer'=>[
+                'model'=>'uncertainty_only_v2','base_percent'=>0.0,'friction_uncertainty_percent'=>0.0,
+                'volatility_uncertainty_percent'=>0.0,'disagreement_uncertainty_percent'=>0.0,
+                'exhaustion_uncertainty_percent'=>0.0,'total_percent'=>0.0,
+            ],
             'market_regime'=>['regime'=>'uncertain','confidence'=>0,'entry_enabled'=>false,'metrics'=>['reason'=>$reason]],
             'selected_strategy'=>[
                 'key'=>'profit_first_v5','eligible'=>false,'entry_allowed'=>false,'exit_bias'=>false,

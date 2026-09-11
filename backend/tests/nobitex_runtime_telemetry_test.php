@@ -16,8 +16,8 @@ function telemetryAssert(bool $condition, string $message): void
 }
 
 telemetryAssert(NobitexRuntimeModels::STRATEGY_MODE === 'profit_first_v5_shadow_multi_strategy_v1', 'Strategy mode must identify restored profit-first primary with shadow multi-strategy diagnostics.');
-telemetryAssert(NobitexRuntimeModels::DECISION === 'profit_first_net_edge_v5_restored', 'Decision model must identify the restored profit-first entry engine.');
-telemetryAssert(NobitexRuntimeModels::SELECTION === 'positive_tradable_net_edge_after_costs_and_buffer_v5', 'Selection model must identify the positive post-cost edge gate.');
+telemetryAssert(NobitexRuntimeModels::DECISION === 'profit_first_net_edge_v5_uncertainty_buffer_v2', 'Decision model must identify the Profit-First v5 uncertainty-buffer v2 entry engine.');
+telemetryAssert(NobitexRuntimeModels::SELECTION === 'positive_tradable_net_edge_after_explicit_costs_uncertainty_buffer_v2', 'Selection model must identify the positive edge gate after explicit costs and residual uncertainty.');
 telemetryAssert(NobitexRuntimeModels::GLOBAL_PORTFOLIO === 'global_quote_normalization_v2_toman_display', 'Global portfolio model must identify the Toman-display v2 normalizer.');
 telemetryAssert(NobitexRuntimeModels::STRATEGY_LEARNING === 'strategy_learning_v2', 'Strategy Learning model mismatch.');
 telemetryAssert(NobitexRuntimeModels::EDGE_CALIBRATION === 'adaptive_edge_calibration_v1', 'Adaptive Edge Calibration model mismatch.');

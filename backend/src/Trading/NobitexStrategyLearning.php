@@ -22,6 +22,7 @@ final class NobitexStrategyLearning
     public const MODEL = 'strategy_learning_v2';
 
     private const STRATEGIES = [
+        'profit_first_v5',
         'trend_momentum_v1',
         'breakout_v1',
         'mean_reversion_v1',
@@ -160,7 +161,7 @@ final class NobitexStrategyLearning
     {
         $strategy = self::strategyKey($signal);
         $regime = self::regimeKey($signal);
-        if (!in_array($strategy, self::STRATEGIES, true)) {
+        if (!self::supportsStrategy($strategy)) {
             return [
                 'allowed'=>true,
                 'reason'=>'strategy_learning_not_applicable',
@@ -232,6 +233,11 @@ final class NobitexStrategyLearning
             'size_multiplier'=>max(0.55, min(1.0, (float)($stats['size_multiplier'] ?? 1.0))),
             'stats'=>$stats,
         ] + $calibration;
+    }
+
+    public static function supportsStrategy(string $strategy): bool
+    {
+        return in_array(trim($strategy), self::STRATEGIES, true);
     }
 
     public static function strategyKey(array $signal): string
