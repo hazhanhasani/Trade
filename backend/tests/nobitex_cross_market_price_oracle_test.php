@@ -14,16 +14,16 @@ function expectCrossMarket(bool $condition, string $message): void
 $response = [
     'data' => [
         'BTCIRT' => [
-            'asks' => [[101.0, 1.0]],
-            'bids' => [[99.0, 1.0]],
+            'asks' => [[100.1, 1.0]],
+            'bids' => [[99.9, 1.0]],
         ],
         'BTCUSDT' => [
-            'asks' => [[2.01, 1.0]],
-            'bids' => [[1.99, 1.0]],
+            'asks' => [[2.001, 1.0]],
+            'bids' => [[1.999, 1.0]],
         ],
         'USDTIRT' => [
-            'asks' => [[48.1, 100.0]],
-            'bids' => [[47.9, 100.0]],
+            'asks' => [[48.02, 100.0]],
+            'bids' => [[47.98, 100.0]],
         ],
     ],
 ];
