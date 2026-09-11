@@ -50,7 +50,12 @@ final class NobitexCapacityManager
 
         foreach ($positions as $position) {
             if ((string)($position['status'] ?? '') !== 'open') {
-                return $this->result('waiting_reconcile','pending_order_present',[
+                // Pending order state must be reconciled by PortfolioEngine before
+                // capacity enforcement submits another SELL. Returning no_reduction
+                // deliberately yields control to PortfolioEngine in this same tick;
+                // returning waiting_reconcile here would make the orchestrator stop
+                // before reconciliation and could deadlock all future BUY activity.
+                return $this->result('no_reduction','pending_order_present',[
                     'active_positions'=>$activeCount,'configured_max'=>$configured,'effective_max'=>$effective,'excess_positions'=>max(0,$activeCount-$effective),
                 ]);
             }
