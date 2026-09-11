@@ -126,18 +126,18 @@ final class NobitexClient
     public function wallets(array $query = []): array
     {
         $payload = $query === [] ? ['type'=>'spot'] : $query;
-        return $this->authenticatedRead(static fn() => $this->request('POST', '/users/wallets/list', $payload, true));
+        return $this->authenticatedRead(fn() => $this->request('POST', '/users/wallets/list', $payload, true));
     }
 
     public function orders(array $query = []): array
     {
-        return $this->authenticatedRead(static fn() => $this->request('GET', '/market/orders/list', $query, true));
+        return $this->authenticatedRead(fn() => $this->request('GET', '/market/orders/list', $query, true));
     }
 
     /** Authenticated spot fills/trades. Nobitex currently documents 180-day history. */
     public function trades(array $query = []): array
     {
-        return $this->authenticatedRead(static fn() => $this->request('GET', '/market/trades/list', $query, true));
+        return $this->authenticatedRead(fn() => $this->request('GET', '/market/trades/list', $query, true));
     }
 
     public function orderStatus(?string $id = null, ?string $clientOrderId = null): array
@@ -146,7 +146,7 @@ final class NobitexClient
         if($id!==null&&$id!==''){if(!ctype_digit($id))throw new \InvalidArgumentException('Invalid Nobitex order id.');$payload['id']=(int)$id;}
         elseif($clientOrderId!==null&&$clientOrderId!==''){$payload['clientOrderId']=$this->safeClientOrderId($clientOrderId);}
         else throw new \InvalidArgumentException('Nobitex order id or clientOrderId is required.');
-        return $this->authenticatedRead(static fn() => $this->request('POST','/market/orders/status',$payload,true));
+        return $this->authenticatedRead(fn() => $this->request('POST','/market/orders/status',$payload,true));
     }
 
     public function createOrder(array $payload): array { return $this->request('POST','/market/orders/add',$payload,true); }
