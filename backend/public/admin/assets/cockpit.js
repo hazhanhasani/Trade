@@ -55,6 +55,16 @@
     const path=location.pathname.replace(/\/+$/,'/');
     if((path==='/admin/'||path==='/admin/index.php')&&document.querySelector('.admin-shell'))poll(async()=>{const j=await json('/admin/live-dashboard.php');liveDashboard(j.data);},4000);
   }
+  function wireMobileMenus(){
+    document.querySelectorAll('.mobile-nav-menu').forEach(details=>{
+      details.addEventListener('toggle',()=>{
+        if(!details.open)return;
+        document.querySelectorAll('.mobile-nav-menu[open]').forEach(other=>{if(other!==details)other.open=false;});
+      });
+      details.querySelectorAll('a').forEach(link=>link.addEventListener('click',()=>{details.open=false;}));
+    });
+  }
+
   function fixReplayLinks(scope=document){
     scope.querySelectorAll?.('a[href^="/api/trade-replay/"]').forEach(link=>{
       const match=(link.getAttribute('href')||'').match(/^\/api\/trade-replay\/(\d+)/);if(!match)return;
@@ -64,7 +74,7 @@
 
   document.addEventListener('click',e=>{const btn=e.target.closest('[data-theme-toggle]');if(btn)toggleTheme();});
   document.addEventListener('DOMContentLoaded',()=>{
-    updateThemeButton();updateClocks();localizeVisibleDates(document.body);fixReplayLinks(document);startPageSpecificLive();
+    updateThemeButton();updateClocks();localizeVisibleDates(document.body);fixReplayLinks(document);wireMobileMenus();startPageSpecificLive();
     const observer=new MutationObserver(mutations=>{for(const m of mutations)for(const n of m.addedNodes)if(n.nodeType===Node.ELEMENT_NODE){localizeVisibleDates(n);fixReplayLinks(n);}else if(n.nodeType===Node.TEXT_NODE&&n.parentElement)localizeVisibleDates(n.parentElement);});observer.observe(document.body,{childList:true,subtree:true});
   });
   updateThemeButton();updateClocks();setInterval(updateClocks,1000);

@@ -56,6 +56,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -69,8 +70,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import ir.trade.app.BuildConfig
 import ir.trade.app.TradeAlertWorker
@@ -182,6 +185,7 @@ fun TradeAppV4() {
             V4Nav("تنظیمات", Icons.Rounded.Settings),
         )
 
+        CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
         Scaffold(
             containerColor = V4Bg,
             bottomBar = {
@@ -240,6 +244,7 @@ fun TradeAppV4() {
                 }
             }
         }
+        }
 
         if (emergencyConfirm != null) {
             val mode = emergencyConfirm!!
@@ -296,7 +301,7 @@ private fun V4TopBar(offline: Boolean, loading: Boolean, onRefresh: () -> Unit) 
         Column(Modifier.weight(1f)) {
             Text("Trade", fontWeight = FontWeight.Black, color = V4Ink, style = MaterialTheme.typography.titleLarge)
             Text(
-                "${if (offline) "Offline Snapshot" else "Live Panel"} • v${BuildConfig.RELEASE_VERSION}",
+                "${if (offline) "نسخه آفلاین" else "داده زنده"} • v${BuildConfig.RELEASE_VERSION}",
                 color = if (offline) V4Amber else V4Green,
                 style = MaterialTheme.typography.labelMedium,
             )
@@ -384,7 +389,7 @@ private fun V4Home(root: JSONObject, offline: Boolean) {
                 Text(alert.optString("body", ""), color = V4Ink)
             }
         }
-        item { V4SectionTitle("Activity Timeline", "تصمیم‌ها و معاملات به زبان ساده") }
+        item { V4SectionTitle("تایم‌لاین فعالیت", "تصمیم‌ها و معاملات به زبان ساده") }
         items(activity.take(12)) { event ->
             V4MiniCard {
                 Text(event.optString("text_fa", "رویداد معاملاتی"), fontWeight = FontWeight.SemiBold)
@@ -403,8 +408,8 @@ private fun V4Market(root: JSONObject) {
         contentPadding = PaddingValues(14.dp, 12.dp, 14.dp, 24.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        item { V4SectionTitle("Market Radar", "Excellent / Good / Watch / Avoid") }
-        val categories = listOf("excellent" to "Excellent", "good" to "Good", "watch" to "Watch", "avoid" to "Avoid")
+        item { V4SectionTitle("رادار بازار", "عالی / خوب / زیرنظر / پرریسک") }
+        val categories = listOf("excellent" to "عالی", "good" to "خوب", "watch" to "زیرنظر", "avoid" to "پرریسک")
         items(categories) { (key, label) ->
             val matches = radar.filter { it.optString("category") == key }.take(6)
             V4Card(container = categoryColor(key)) {
@@ -468,18 +473,18 @@ private fun V4Trades(root: JSONObject, onReplay: (Long) -> Unit) {
                     Text("${if (pnl >= 0) "+" else ""}${fmt(pnl, 2)}%", fontWeight = FontWeight.Black, color = if (pnl >= 0) V4Green else V4Red)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    V4TinyMetric("Entry", fmt(positionMoney(p, "entry_price"), 4), Modifier.weight(1f))
-                    V4TinyMetric("Mark", fmt(positionMoney(p, "mark_price"), 4), Modifier.weight(1f))
-                    V4TinyMetric("Fee", fmt(positionMoney(p, "total_estimated_fees_quote"), 4), Modifier.weight(1f))
+                    V4TinyMetric("ورود", fmt(positionMoney(p, "entry_price"), 4), Modifier.weight(1f))
+                    V4TinyMetric("قیمت فعلی", fmt(positionMoney(p, "mark_price"), 4), Modifier.weight(1f))
+                    V4TinyMetric("کارمزد", fmt(positionMoney(p, "total_estimated_fees_quote"), 4), Modifier.weight(1f))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    V4TinyMetric("SL", fmt(positionMoney(p, "stop_loss"), 4), Modifier.weight(1f))
-                    V4TinyMetric("TP", fmt(positionMoney(p, "take_profit"), 4), Modifier.weight(1f))
-                    V4TinyMetric("Exit", p.optString("probable_exit_reason", "—"), Modifier.weight(1f))
+                    V4TinyMetric("حد ضرر", fmt(positionMoney(p, "stop_loss"), 4), Modifier.weight(1f))
+                    V4TinyMetric("حد سود", fmt(positionMoney(p, "take_profit"), 4), Modifier.weight(1f))
+                    V4TinyMetric("خروج", p.optString("probable_exit_reason", "—"), Modifier.weight(1f))
                 }
             }
         }
-        item { V4SectionTitle("Risk Heatmap", "همبستگی پوزیشن‌های فعال") }
+        item { V4SectionTitle("نقشه حرارتی ریسک", "همبستگی پوزیشن‌های فعال") }
         if (cells.isEmpty()) item { Text("برای Heatmap حداقل دو پوزیشن با داده کافی لازم است.", color = V4Muted) }
         items(cells.take(30)) { cell ->
             val risk = cell.optString("risk", "unknown")
@@ -665,7 +670,7 @@ private fun V4Settings(
                 }
             }
         }
-        item { V4SectionTitle("Presetها", "محافظه‌کار، متعادل یا تهاجمی") }
+        item { V4SectionTitle("پروفایل‌های آماده", "محافظه‌کار، متعادل یا تهاجمی") }
         item {
             V4Card {
                 listOf("safe", "balanced", "aggressive").forEach { key ->
@@ -688,16 +693,14 @@ private fun V4Settings(
                 }
             }
         }
-        item { V4SectionTitle("تنظیمات سفارشی + Preview", "قبل از ذخیره تغییر ریسک را ببین") }
+        item { V4SectionTitle("تنظیمات سفارشی و پیش‌نمایش", "قبل از ذخیره، اثر تغییر ریسک را ببین") }
         item {
             V4Card {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(customPosition, { customPosition = it }, label = { Text("Buy %") }, modifier = Modifier.weight(1f), singleLine = true)
-                    OutlinedTextField(customExposure, { customExposure = it }, label = { Text("Exposure %") }, modifier = Modifier.weight(1f), singleLine = true)
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(customMax, { customMax = it }, label = { Text("Max positions") }, modifier = Modifier.weight(1f), singleLine = true)
-                    OutlinedTextField(customDaily, { customDaily = it }, label = { Text("Daily loss %") }, modifier = Modifier.weight(1f), singleLine = true)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(customPosition, { customPosition = it }, label = { Text("درصد هر خرید") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(customExposure, { customExposure = it }, label = { Text("سقف سرمایه درگیر") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(customMax, { customMax = it }, label = { Text("حداکثر پوزیشن") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(customDaily, { customDaily = it }, label = { Text("حد زیان روزانه") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 }
                 val body = JSONObject()
                     .put("position_percent", customPosition.toDoubleOrNull() ?: current.optDouble("position_percent",2.0))
@@ -705,7 +708,7 @@ private fun V4Settings(
                     .put("nobitex_max_positions", customMax.toIntOrNull() ?: current.optInt("nobitex_max_positions",6))
                     .put("daily_loss_limit_percent", customDaily.toDoubleOrNull() ?: current.optDouble("daily_loss_limit_percent",2.0))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { scope.launch { val r=runCatching{api.previewSettings(body.toString())}.getOrNull();preview=if(r?.ok==true)unwrap(r.body) else null } }, modifier = Modifier.weight(1f)) { Text("Preview") }
+                    OutlinedButton(onClick = { scope.launch { val r=runCatching{api.previewSettings(body.toString())}.getOrNull();preview=if(r?.ok==true)unwrap(r.body) else null } }, modifier = Modifier.weight(1f)) { Text("پیش‌نمایش") }
                     Button(onClick = { scope.launch { busy=true; val r=runCatching{api.updateBotSettings(body.toString())}.getOrNull(); if(r?.ok==true){reloadHistory();onReload()};busy=false } }, enabled=!busy, modifier=Modifier.weight(1f)) { Text("ذخیره") }
                 }
                 preview?.let { p ->
@@ -714,9 +717,9 @@ private fun V4Settings(
                 }
             }
         }
-        item { V4SectionTitle("Shadow / Paper", "ارزیابی بدون افزایش ریسک") }
+        item { V4SectionTitle("ارزیابی آزمایشی", "بررسی سیگنال‌ها بدون افزایش ریسک") }
         item {
-            V4SettingRow("Shadow evaluation", "نتیجه سیگنال‌ها را بعداً مقایسه می‌کند", shadowEnabled) { enabled ->
+            V4SettingRow("ارزیابی Shadow", "نتیجه سیگنال‌ها را بعداً مقایسه می‌کند", shadowEnabled) { enabled ->
                 shadowEnabled = enabled
                 scope.launch { runCatching { api.setShadowMode(enabled) }; onReload() }
             }
@@ -732,34 +735,36 @@ private fun V4Settings(
         item {
             V4Card {
                 Text("حداقل Priority", fontWeight = FontWeight.Bold)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("info", "success", "warning", "critical").forEach { p ->
-                        FilledTonalButton(onClick = {
-                            minPriority = p
-                            scope.launch {
-                                val body = JSONObject().put("min_priority", p).put("enabled", true)
-                                runCatching { api.updateNotificationRules(body.toString()) }
-                                onReload()
-                            }
-                        }, colors = ButtonDefaults.filledTonalButtonColors(containerColor = if (minPriority == p) V4PrimarySoft else Color.White)) { Text(p) }
+                listOf("info", "success", "warning", "critical").chunked(2).forEach { row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        row.forEach { p ->
+                            FilledTonalButton(onClick = {
+                                minPriority = p
+                                scope.launch {
+                                    val body = JSONObject().put("min_priority", p).put("enabled", true)
+                                    runCatching { api.updateNotificationRules(body.toString()) }
+                                    onReload()
+                                }
+                            }, modifier = Modifier.weight(1f), colors = ButtonDefaults.filledTonalButtonColors(containerColor = if (minPriority == p) V4PrimarySoft else Color.White)) { Text(p) }
+                        }
                     }
                 }
             }
         }
-        item { V4SectionTitle("امنیت اپ", "Biometric Lock") }
+        item { V4SectionTitle("امنیت اپ", "قفل بیومتریک") }
         item {
             V4SettingRow("قفل بیومتریک", if (Build.VERSION.SDK_INT >= 28) "برای بازکردن اپ اثرانگشت/بیومتریک بخواه" else "در Android این دستگاه پشتیبانی نمی‌شود", biometric, enabled = Build.VERSION.SDK_INT >= 28) { enabled ->
                 biometric = enabled; prefs.setBiometricEnabled(enabled); if (enabled) onLockNow()
             }
         }
-        item { V4SectionTitle("Offline Snapshot", "آخرین Command Center به‌صورت رمزگذاری‌شده روی دستگاه") }
+        item { V4SectionTitle("نسخه آفلاین", "آخرین وضعیت مرکز فرمان به‌صورت رمزگذاری‌شده روی دستگاه") }
         item {
             V4Card {
                 Text(if (prefs.offlineSnapshotAt() > 0) "Snapshot ذخیره شده است." else "هنوز Snapshot ذخیره نشده است.", fontWeight = FontWeight.Bold)
                 Text("این Snapshot فقط برای مشاهده آفلاین است و مبنای اجرای معامله نیست.", color = V4Muted)
             }
         }
-        item { V4SectionTitle("Settings History + Rollback", "${history.size} Snapshot اخیر") }
+        item { V4SectionTitle("تاریخچه تنظیمات و بازگردانی", "${history.size} نسخه اخیر") }
         items(history.take(15)) { h ->
             V4MiniCard {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -773,7 +778,7 @@ private fun V4Settings(
                             runCatching { api.rollbackSettings(h.optLong("id")) }
                             reloadHistory(); onReload(); busy = false
                         }
-                    }, enabled = !busy) { Text("Rollback") }
+                    }, enabled = !busy) { Text("بازگردانی") }
                 }
             }
         }
@@ -857,7 +862,7 @@ private fun V4Metric(label: String, value: String, hint: String, modifier: Modif
     Card(modifier, shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Color.White), border = androidx.compose.foundation.BorderStroke(1.dp, V4Stroke)) {
         Column(Modifier.padding(14.dp)) {
             Text(label, color = V4Muted, style = MaterialTheme.typography.labelMedium)
-            Text(value, color = V4Ink, fontWeight = FontWeight.Black, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(value, color = V4Ink, fontWeight = FontWeight.Black, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(hint, color = V4Muted, style = MaterialTheme.typography.labelSmall)
         }
     }
@@ -867,7 +872,7 @@ private fun V4Metric(label: String, value: String, hint: String, modifier: Modif
 private fun V4TinyMetric(label: String, value: String, modifier: Modifier = Modifier) {
     Column(modifier.background(V4Bg, RoundedCornerShape(12.dp)).padding(9.dp)) {
         Text(label, color = V4Muted, style = MaterialTheme.typography.labelSmall)
-        Text(value, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(value, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 

@@ -47,3 +47,38 @@ html[data-theme="dark"] .progress{background:#222b3a}
 @keyframes tradeShimmer{100%{transform:translateX(100%)}}
 @media(max-width:900px){.trade-top-tools{width:100%;margin:4px 0 0}.trade-clock{flex:1;justify-content:center}.timeline-meta{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:520px){.timeline-meta{grid-template-columns:1fr}.timeline{padding-right:20px}.timeline-item:before{right:-18px}.trade-clock{font-size:9px}}
+
+
+/* Trade UI/UX Debug v6 */
+.mobile-nav-menu{display:none;width:100%;margin-top:8px}
+.mobile-nav-menu summary{list-style:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:44px;padding:10px 12px;border:1px solid var(--line);border-radius:13px;background:var(--surface);color:var(--ink);font-size:11px;font-weight:900}
+.mobile-nav-menu summary::-webkit-details-marker{display:none}
+.mobile-nav-menu summary:after{content:"⌄";color:var(--primary);font-size:16px;transition:transform .16s ease}
+.mobile-nav-menu[open] summary:after{transform:rotate(180deg)}
+.mobile-nav-menu summary b{color:var(--primary);font-size:11px;overflow-wrap:anywhere}
+.mobile-nav-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:7px;padding:8px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}
+.mobile-nav-grid a{display:flex;align-items:center;justify-content:center;min-height:44px;padding:9px 8px;border:1px solid var(--line);border-radius:11px;background:var(--surface2);color:var(--ink);text-decoration:none;font-size:10.5px;font-weight:800;text-align:center;overflow-wrap:anywhere}
+.mobile-nav-grid a.active{background:var(--purpleSoft);border-color:#d8d1ff;color:var(--primary)}
+.mobile-nav-grid a.logout{background:var(--redSoft);color:var(--red);border-color:#f1caca}
+.admin-nav a,.subnav a,.btn,.theme-toggle{min-height:44px}
+a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:3px solid rgba(98,70,234,.24);outline-offset:2px}
+.btn:disabled,button:disabled{cursor:not-allowed;opacity:.58}
+.panel,.stat-card,.metric,.mobile-nav-menu summary,.mobile-nav-grid a{transition:border-color .16s ease,box-shadow .16s ease,transform .16s ease}
+@media(max-width:720px){
+  .mobile-nav-menu{display:block!important}
+  .admin-brand{align-items:center}
+  .trade-top-tools{display:grid;grid-template-columns:minmax(0,1fr) auto;width:100%;gap:7px}
+  .trade-clock{width:100%;min-width:0;justify-content:center;overflow:hidden;text-overflow:ellipsis;font-size:9px}
+  .theme-toggle{min-width:82px}
+  .global-subnav{margin-top:9px}
+  .global-subnav a{min-height:44px;font-size:10.5px}
+  .page-head p,.panel-head p{font-size:11.5px;line-height:1.85}
+  .table-wrap table,table{font-size:10px!important}
+  th,td{font-size:10px!important;line-height:1.55!important;padding:8px 5px!important}
+  pre,code,.code,.mono{word-break:break-word!important;overflow-wrap:anywhere!important}
+}
+@media(max-width:380px){.mobile-nav-grid{grid-template-columns:1fr}}
+@media(prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto!important}
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+}

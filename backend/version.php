@@ -2,5 +2,5 @@
 
 declare(strict_types=1);
 
-// Coordinated release: full Profit-First debug; explicit execution costs are deducted once and residual forecast uncertainty uses a bounded decomposed buffer; live profit_first_v5 participates in learning/calibration; configured position count remains the hard capacity cap.
-return '1.4.22';
+// Coordinated release: UI/UX debug for the PHP admin and Android app; compact mobile navigation, preserved local sub-navigation, accessibility/touch-target improvements, Persian-first RTL Android layouts, narrow-screen-safe settings controls and readable unclipped metrics. Trading/risk logic remains the Profit-First 1.4.22 path unchanged.
+return '1.4.23';
