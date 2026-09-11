@@ -53,13 +53,42 @@ $breakoutRoute=$router->route(['market'=>$market,'prices'=>['1m'=>$breakoutPrice
 msAssert(($breakoutRoute['selected']['key']??'')==='breakout_v1','breakout regime should route to breakout strategy');
 msAssert(($breakoutRoute['selected']['entry_allowed']??false)===true,'confirmed upside breakout should allow breakout entry before execution costs');
 
+// Chaotic volatility must receive the high-volatility strategy but still stay
+// out of the market when there is no directional structure.
 $chaosPrices=[];$p=100.0;
 for($i=0;$i<180;$i++){ $p *= 1.0 + (($i%2===0?1:-1)*0.025); $chaosPrices[]=$p; }
 $chaosI=['momentum_5_percent'=>0.0,'ema_gap_percent'=>0.0,'trend_consistency'=>0.50,'volatility_percent'=>2.40,'rsi14'=>50,'macd_histogram_percent'=>0.0];
 $chaosRegime=$detector->detect($market,$chaosPrices,$chaosI,$chaosI,$chaosI);
 msAssert(($chaosRegime['regime']??'')===NobitexMarketRegimeDetector::HIGH_VOLATILITY,'extreme volatility regime was not detected');
 $chaosRoute=$router->route(['market'=>$market,'prices'=>['1m'=>$chaosPrices],'indicators'=>['1m'=>$chaosI,'5m'=>$chaosI,'15m'=>$chaosI]],$chaosRegime);
-msAssert(($chaosRoute['selected']['key']??'')==='none','high-volatility regime should not receive an entry strategy');
-msAssert(($chaosRoute['entry_enabled']??true)===false,'high-volatility regime must disable entries');
+msAssert(($chaosRoute['selected']['key']??'')==='high_volatility_momentum_v1','high-volatility regime should route to guarded volatility strategy');
+msAssert(($chaosRoute['entry_enabled']??false)===true,'high-volatility regime should allow strategy-level evaluation');
+msAssert(($chaosRoute['selected']['entry_allowed']??true)===false,'non-directional high volatility must not allow BUY');
+
+// A directional high-volatility context may pass the strategy-level gate. The
+// signal engine still has to prove positive tradable edge after all costs.
+$directionalI1=['momentum_5_percent'=>1.25,'ema_gap_percent'=>0.72,'trend_consistency'=>0.82,'volatility_percent'=>2.30,'rsi14'=>69,'macd_histogram_percent'=>0.24];
+$directionalI5=['momentum_5_percent'=>2.10,'ema_gap_percent'=>1.10,'trend_consistency'=>0.84,'volatility_percent'=>2.10,'rsi14'=>70,'macd_histogram_percent'=>0.34];
+$directionalI15=['momentum_5_percent'=>2.60,'ema_gap_percent'=>1.35,'trend_consistency'=>0.80,'volatility_percent'=>1.90,'rsi14'=>66,'macd_histogram_percent'=>0.30];
+$directionalRegime=[
+    'regime'=>NobitexMarketRegimeDetector::HIGH_VOLATILITY,
+    'confidence'=>82,
+    'entry_enabled'=>true,
+    'metrics'=>[
+        'up_alignment'=>0.8333,
+        'down_alignment'=>0.0,
+        'efficiency_ratio'=>0.52,
+        'directional_move_percent'=>1.60,
+        'volatility_percent'=>2.20,
+    ],
+];
+$directionalRoute=$router->route([
+    'market'=>['orderbook_imbalance'=>0.28,'spread_percent'=>0.10,'quote_asset'=>'IRT'],
+    'prices'=>['1m'=>$trendPrices],
+    'indicators'=>['1m'=>$directionalI1,'5m'=>$directionalI5,'15m'=>$directionalI15],
+],$directionalRegime);
+msAssert(($directionalRoute['selected']['key']??'')==='high_volatility_momentum_v1','directional high volatility should use guarded volatility strategy');
+msAssert(($directionalRoute['selected']['entry_allowed']??false)===true,'directional high volatility should be eligible before execution-cost gate');
+msAssert((float)($directionalRoute['selected']['gross_edge_percent']??0.0)>0.0,'directional high volatility should expose a bounded positive gross edge');
 
 echo "Multi-strategy regime/router regression tests passed.\n";
