@@ -61,6 +61,8 @@ jobs:
         run: php backend/tests/nobitex_runtime_telemetry_test.php
       - name: Bale trade notification regression tests
         run: php backend/tests/bale_trade_notifier_test.php
+      - name: Failed cron notification regression tests
+        run: php backend/tests/failed_run_notification_test.php
       - name: Portfolio Intelligence v2 regression tests
         run: php backend/tests/portfolio_intelligence_test.php
       - name: Execution Quality v2 regression tests
