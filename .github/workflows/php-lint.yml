@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'backend/**'
+      - 'docs/**'
       - 'android/app/src/main/java/ir/trade/app/data/ReleaseContract.kt'
       - 'android/app/src/main/java/ir/trade/app/data/TradeApi.kt'
       - 'android/app/src/main/java/ir/trade/app/ui/TradeAppV4.kt'
@@ -11,6 +12,7 @@ on:
   pull_request:
     paths:
       - 'backend/**'
+      - 'docs/**'
       - 'android/app/src/main/java/ir/trade/app/data/ReleaseContract.kt'
       - 'android/app/src/main/java/ir/trade/app/data/TradeApi.kt'
       - 'android/app/src/main/java/ir/trade/app/ui/TradeAppV4.kt'
@@ -81,6 +83,8 @@ jobs:
         run: php backend/tests/trading_admin_settings_regression_test.php
       - name: Trading command center regression tests
         run: php backend/tests/command_center_test.php
+      - name: Project operating system regression tests
+        run: php backend/tests/project_operating_system_test.php
       - name: Android live panel parity regression tests
         run: php backend/tests/android_live_panel_parity_test.php
       - name: Validate Backend ↔ Android API contract parity
