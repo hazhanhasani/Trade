@@ -35,7 +35,6 @@ final class NobitexAdaptivePolicyLearner
         $pdo ??= Database::connection();
         $limit = max(60, min(700, $limit));
         $groups = [];
-
         foreach ($this->realizedSamples($pdo, $limit) as $sample) {
             $key = self::profileKey((string)$sample['regime'], (string)$sample['quote_asset']);
             $groups[$key] ??= self::emptyGroup((string)$sample['regime'], (string)$sample['quote_asset']);
@@ -56,37 +55,25 @@ final class NobitexAdaptivePolicyLearner
                 $shadow['count'], $shadow['average'], $shadow['positive_rate']
             );
             $profiles[] = [
-                'regime'=>$group['regime'],
-                'quote_asset'=>$group['quote_asset'],
-                'realized_samples'=>$realized['count'],
-                'realized_average_return_percent'=>round($realized['average'], 4),
-                'realized_win_rate'=>round($realized['positive_rate'], 4),
-                'realized_profit_factor'=>round(min(99.0, $realized['profit_factor']), 4),
-                'shadow_samples'=>$shadow['count'],
-                'shadow_average_net_return_percent'=>round($shadow['average'], 4),
+                'regime'=>$group['regime'],'quote_asset'=>$group['quote_asset'],
+                'realized_samples'=>$realized['count'],'realized_average_return_percent'=>round($realized['average'], 4),
+                'realized_win_rate'=>round($realized['positive_rate'], 4),'realized_profit_factor'=>round(min(99.0, $realized['profit_factor']), 4),
+                'shadow_samples'=>$shadow['count'],'shadow_average_net_return_percent'=>round($shadow['average'], 4),
                 'shadow_positive_rate'=>round($shadow['positive_rate'], 4),
             ] + $policy;
         }
-
         usort($profiles, static function(array $a, array $b): int {
             $byEvidence = (float)($b['evidence_weight'] ?? 0) <=> (float)($a['evidence_weight'] ?? 0);
-            if ($byEvidence !== 0) return $byEvidence;
-            return strcmp((string)$a['regime'], (string)$b['regime']);
+            return $byEvidence !== 0 ? $byEvidence : strcmp((string)$a['regime'], (string)$b['regime']);
         });
-
         return [
-            'model'=>self::MODEL,
-            'policy_scope'=>'regime_quote',
+            'model'=>self::MODEL,'policy_scope'=>'regime_quote',
             'training_sources'=>['realized_fee_aware_returns','shadow_forward_returns_after_estimated_costs'],
             'safety_contract'=>[
-                'explicit_costs_never_relaxed'=>true,
-                'configured_max_position_is_hard_cap'=>true,
-                'portfolio_exposure_is_hard_cap'=>true,
-                'daily_loss_gate_preserved'=>true,
-                'kill_switch_preserved'=>true,
+                'explicit_costs_never_relaxed'=>true,'configured_max_position_is_hard_cap'=>true,
+                'portfolio_exposure_is_hard_cap'=>true,'daily_loss_gate_preserved'=>true,'kill_switch_preserved'=>true,
             ],
-            'profiles'=>$profiles,
-            'generated_at'=>gmdate(DATE_ATOM),
+            'profiles'=>$profiles,'generated_at'=>gmdate(DATE_ATOM),
         ];
     }
 
@@ -96,10 +83,7 @@ final class NobitexAdaptivePolicyLearner
         return self::$runtimeSnapshot;
     }
 
-    public static function clearRuntime(): void
-    {
-        self::$runtimeSnapshot = null;
-    }
+    public static function clearRuntime(): void { self::$runtimeSnapshot = null; }
 
     /** @return array<string,mixed> */
     public static function policyFor(string $regime, string $quoteAsset): array
@@ -108,7 +92,18 @@ final class NobitexAdaptivePolicyLearner
         $quoteAsset = strtoupper(trim($quoteAsset));
         if ($quoteAsset === '') $quoteAsset = 'IRT';
         $snapshot = self::$runtimeSnapshot;
-        if (!is_array($snapshot)) return self::neutralPolicy($regime, $quoteAsset, 'runtime_not_activated');
+        if (!is_array($snapshot)) {
+            // First market in each PHP/Cron process trains one snapshot; all other
+            // markets in that tick reuse it. If DB history is temporarily
+            // unavailable, trading falls back to a neutral policy rather than
+            // failing the signal engine.
+            try {
+                $snapshot = (new self())->snapshot();
+                self::$runtimeSnapshot = $snapshot;
+            } catch (\Throwable) {
+                return self::neutralPolicy($regime, $quoteAsset, 'runtime_training_unavailable');
+            }
+        }
         foreach ((array)($snapshot['profiles'] ?? []) as $profile) {
             if (!is_array($profile)) continue;
             if ((string)($profile['regime'] ?? '') !== $regime) continue;
@@ -118,24 +113,15 @@ final class NobitexAdaptivePolicyLearner
         return self::neutralPolicy($regime, $quoteAsset, 'profile_not_learned');
     }
 
-    /**
-     * Apply only the learned RESIDUAL uncertainty change to Profit-First. The
-     * signal's already-deducted fee/spread/slippage cost is never changed. This
-     * lets mature evidence promote a near-miss HOLD to BUY, or demote a weak BUY,
-     * without overriding liquidity/spread executability gates.
-     *
-     * @return array<string,mixed>
-     */
+    /** @return array<string,mixed> */
     public static function applyToSignal(array $signal, array $market): array
     {
         $regime = NobitexStrategyLearning::regimeKey($signal);
         $quote = strtoupper(trim((string)($market['quote_asset'] ?? 'IRT'))) ?: 'IRT';
         $policy = self::policyFor($regime, $quote);
         $signal['adaptive_policy'] = $policy + ['model'=>self::MODEL];
-
         if (NobitexStrategyLearning::strategyKey($signal) !== 'profit_first_v5') return $signal;
-        if (!is_numeric($signal['required_edge_buffer_percent'] ?? null)
-            || !is_numeric($signal['expected_net_edge_percent'] ?? null)) return $signal;
+        if (!is_numeric($signal['required_edge_buffer_percent'] ?? null) || !is_numeric($signal['expected_net_edge_percent'] ?? null)) return $signal;
 
         $baseBuffer = max(0.0, (float)$signal['required_edge_buffer_percent']);
         $delta = self::clamp((float)($policy['entry_buffer_delta_percent'] ?? 0.0), -self::MAX_BUFFER_RELAX_PERCENT, self::MAX_BUFFER_TIGHTEN_PERCENT);
@@ -154,8 +140,6 @@ final class NobitexAdaptivePolicyLearner
         $signal['adaptive_policy']['base_buffer_percent'] = round($baseBuffer, 4);
         $signal['adaptive_policy']['effective_buffer_percent'] = round($effectiveBuffer, 4);
 
-        // Never turn a structural/non-executable rejection into BUY. Promotion is
-        // limited to the Profit-First edge-margin HOLD state.
         if ($ready && $tradable > 0.0 && $action === 'hold' && $reason === 'edge_below_adaptive_safety_buffer') {
             $signal['action'] = 'buy';
             $signal['reason'] = 'positive_tradable_net_edge_after_learned_uncertainty';
@@ -164,7 +148,6 @@ final class NobitexAdaptivePolicyLearner
             $signal['reason'] = 'adaptive_policy_tightened_edge_below_margin';
             $signal['expected_net_profit'] = false;
         }
-
         if (is_array($signal['selected_strategy'] ?? null)) {
             $signal['selected_strategy']['entry_allowed'] = (string)($signal['action'] ?? '') === 'buy';
             $signal['selected_strategy']['reason'] = $signal['reason'] ?? null;
@@ -178,49 +161,31 @@ final class NobitexAdaptivePolicyLearner
         return $signal;
     }
 
-    /**
-     * Pure deterministic policy builder used by runtime and regression tests.
-     * Shadow samples count as 25% of a realized trade so hypothetical evidence
-     * helps training but cannot dominate real-money outcomes.
-     *
-     * @return array<string,mixed>
-     */
+    /** @return array<string,mixed> */
     public static function policyFromStats(
-        int $realizedCount,
-        float $realizedAverage,
-        float $realizedWinRate,
-        float $realizedProfitFactor,
-        int $shadowCount,
-        float $shadowAverage,
-        float $shadowPositiveRate
+        int $realizedCount, float $realizedAverage, float $realizedWinRate, float $realizedProfitFactor,
+        int $shadowCount, float $shadowAverage, float $shadowPositiveRate
     ): array {
-        $realizedCount = max(0, $realizedCount);
-        $shadowCount = max(0, $shadowCount);
+        $realizedCount = max(0, $realizedCount); $shadowCount = max(0, $shadowCount);
         $realizedWinRate = self::clamp($realizedWinRate, 0.0, 1.0);
         $shadowPositiveRate = self::clamp($shadowPositiveRate, 0.0, 1.0);
         $realizedProfitFactor = max(0.0, min(99.0, $realizedProfitFactor));
         $evidence = $realizedCount + ($shadowCount * 0.25);
         $mature = $evidence >= self::MIN_MATURE_EVIDENCE && ($realizedCount >= 3 || $shadowCount >= 24);
         $strongEvidence = $evidence >= self::MIN_STRONG_EVIDENCE && ($realizedCount >= 5 || $shadowCount >= 40);
-
-        if (!$mature) {
-            return [
-                'learning_ready'=>false,'strong_evidence'=>false,'evidence_weight'=>round($evidence, 4),'quality_score'=>0.0,
-                'entry_buffer_delta_percent'=>0.0,'position_size_multiplier'=>1.0,'stop_loss_multiplier'=>1.0,
-                'take_profit_multiplier'=>1.0,'reason'=>'adaptive_policy_warmup',
-            ];
-        }
+        if (!$mature) return [
+            'learning_ready'=>false,'strong_evidence'=>false,'evidence_weight'=>round($evidence, 4),'quality_score'=>0.0,
+            'entry_buffer_delta_percent'=>0.0,'position_size_multiplier'=>1.0,'stop_loss_multiplier'=>1.0,
+            'take_profit_multiplier'=>1.0,'reason'=>'adaptive_policy_warmup',
+        ];
 
         $realizedComponent = tanh(self::clamp($realizedAverage, -3.0, 3.0) / 0.55);
         $shadowComponent = tanh(self::clamp($shadowAverage, -3.0, 3.0) / 0.65);
         $winComponent = ($realizedWinRate - 0.50) * 2.0;
         $shadowWinComponent = ($shadowPositiveRate - 0.50) * 2.0;
         $profitFactorComponent = tanh(($realizedProfitFactor - 1.0) / 0.80);
-        $quality = self::clamp(
-            ($realizedComponent * 0.38) + ($winComponent * 0.20) + ($profitFactorComponent * 0.17)
-            + ($shadowComponent * 0.15) + ($shadowWinComponent * 0.10),
-            -1.0, 1.0
-        );
+        $quality = self::clamp(($realizedComponent * 0.38) + ($winComponent * 0.20) + ($profitFactorComponent * 0.17)
+            + ($shadowComponent * 0.15) + ($shadowWinComponent * 0.10), -1.0, 1.0);
 
         $bufferDelta = 0.0; $sizeMultiplier = 1.0; $stopMultiplier = 1.0; $takeMultiplier = 1.0;
         $reason = 'adaptive_policy_neutral';
@@ -242,15 +207,13 @@ final class NobitexAdaptivePolicyLearner
             $takeMultiplier = min(1.05, 1.0 + (($quality - 0.12) * 0.08));
             $reason = 'adaptive_policy_positive_observation';
         }
-
         return [
             'learning_ready'=>true,'strong_evidence'=>$strongEvidence,'evidence_weight'=>round($evidence, 4),
             'quality_score'=>round($quality, 4),
             'entry_buffer_delta_percent'=>round(self::clamp($bufferDelta, -self::MAX_BUFFER_RELAX_PERCENT, self::MAX_BUFFER_TIGHTEN_PERCENT), 4),
             'position_size_multiplier'=>round(self::clamp($sizeMultiplier, self::MIN_SIZE_MULTIPLIER, self::MAX_SIZE_MULTIPLIER), 4),
             'stop_loss_multiplier'=>round(self::clamp($stopMultiplier, 0.88, 1.05), 4),
-            'take_profit_multiplier'=>round(self::clamp($takeMultiplier, 0.88, 1.15), 4),
-            'reason'=>$reason,
+            'take_profit_multiplier'=>round(self::clamp($takeMultiplier, 0.88, 1.15), 4),'reason'=>$reason,
         ];
     }
 
@@ -258,19 +221,13 @@ final class NobitexAdaptivePolicyLearner
     private function realizedSamples(PDO $pdo, int $limit): array
     {
         $rows = $pdo->query(
-            "SELECT p.id,p.quote_asset,
-                    SUM(COALESCE(r.net_pnl,r.pnl)) AS net_pnl,
+            "SELECT p.id,p.quote_asset,SUM(COALESCE(r.net_pnl,r.pnl)) AS net_pnl,
                     SUM((r.entry_price*r.amount)+COALESCE(r.entry_fee_quote,0)) AS cost_basis,
-                    MAX(COALESCE(r.accounted_at,r.created_at)) AS realized_at,
-                    MAX(s.details_json) AS details_json
-             FROM nobitex_autotrade_positions p
-             JOIN nobitex_autotrade_pnl r ON r.position_id=p.id
+                    MAX(COALESCE(r.accounted_at,r.created_at)) AS realized_at,MAX(s.details_json) AS details_json
+             FROM nobitex_autotrade_positions p JOIN nobitex_autotrade_pnl r ON r.position_id=p.id
              LEFT JOIN nobitex_autotrade_signals s ON s.order_local_id=p.entry_order_local_id
-             WHERE r.accounted_at IS NOT NULL
-             GROUP BY p.id,p.quote_asset
-             HAVING cost_basis>0
-             ORDER BY realized_at DESC
-             LIMIT {$limit}"
+             WHERE r.accounted_at IS NOT NULL GROUP BY p.id,p.quote_asset HAVING cost_basis>0
+             ORDER BY realized_at DESC LIMIT {$limit}"
         )->fetchAll();
         $out = [];
         foreach (array_reverse($rows) as $row) {
@@ -290,8 +247,7 @@ final class NobitexAdaptivePolicyLearner
         try {
             $rows = $pdo->query(
                 "SELECT s.quote_asset,s.details_json,o.return_15m,o.return_60m,o.return_240m
-                 FROM nobitex_shadow_signal_outcomes o
-                 JOIN nobitex_autotrade_signals s ON s.id=o.signal_id
+                 FROM nobitex_shadow_signal_outcomes o JOIN nobitex_autotrade_signals s ON s.id=o.signal_id
                  WHERE s.action='buy' AND (o.return_15m IS NOT NULL OR o.return_60m IS NOT NULL OR o.return_240m IS NOT NULL)
                  ORDER BY o.updated_at DESC LIMIT {$limit}"
             )->fetchAll();
@@ -301,32 +257,24 @@ final class NobitexAdaptivePolicyLearner
             $signal = json_decode((string)($row['details_json'] ?? ''), true); if (!is_array($signal)) $signal = [];
             if (NobitexStrategyLearning::strategyKey($signal) !== 'profit_first_v5') continue;
             $forward = null;
-            foreach (['return_60m','return_240m','return_15m'] as $field) {
-                if (is_numeric($row[$field] ?? null)) { $forward = (float)$row[$field]; break; }
-            }
+            foreach (['return_60m','return_240m','return_15m'] as $field) if (is_numeric($row[$field] ?? null)) { $forward = (float)$row[$field]; break; }
             if ($forward === null || !is_finite($forward)) continue;
-            $explicitCost = is_numeric($signal['estimated_roundtrip_cost_percent'] ?? null)
-                ? max(0.0, (float)$signal['estimated_roundtrip_cost_percent']) : 0.0;
+            $explicitCost = is_numeric($signal['estimated_roundtrip_cost_percent'] ?? null) ? max(0.0, (float)$signal['estimated_roundtrip_cost_percent']) : 0.0;
             $out[] = ['quote_asset'=>strtoupper((string)($row['quote_asset'] ?? 'IRT')),
                 'regime'=>NobitexStrategyLearning::regimeKey($signal),'net_return_percent'=>$forward - $explicitCost];
         }
         return $out;
     }
 
-    /** @return array{regime:string,quote_asset:string,realized_returns:list<float>,shadow_returns:list<float>} */
     private static function emptyGroup(string $regime, string $quote): array
     {
         return ['regime'=>self::cleanKey($regime, 'unknown'),'quote_asset'=>strtoupper(trim($quote)) ?: 'IRT','realized_returns'=>[],'shadow_returns'=>[]];
     }
 
-    /** @return array{count:int,average:float,positive_rate:float,profit_factor:float} */
     private static function returnStats(array $returns): array
     {
         $clean = [];
-        foreach ($returns as $value) {
-            if (!is_numeric($value) || !is_finite((float)$value)) continue;
-            $clean[] = self::clamp((float)$value, -25.0, 25.0);
-        }
+        foreach ($returns as $value) if (is_numeric($value) && is_finite((float)$value)) $clean[] = self::clamp((float)$value, -25.0, 25.0);
         $count = count($clean);
         if ($count === 0) return ['count'=>0,'average'=>0.0,'positive_rate'=>0.5,'profit_factor'=>1.0];
         $positive = array_values(array_filter($clean, static fn(float $v): bool => $v > 0.0));
@@ -336,7 +284,6 @@ final class NobitexAdaptivePolicyLearner
         return ['count'=>$count,'average'=>array_sum($clean) / $count,'positive_rate'=>count($positive) / $count,'profit_factor'=>$pf];
     }
 
-    /** @return array<string,mixed> */
     private static function neutralPolicy(string $regime, string $quoteAsset, string $reason): array
     {
         return ['regime'=>$regime,'quote_asset'=>$quoteAsset,'realized_samples'=>0,'shadow_samples'=>0,'learning_ready'=>false,
