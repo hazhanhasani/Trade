@@ -17,15 +17,30 @@ foreach([
 expect(str_contains($trading,'function positionAnalytics(?array $position,?array $signal)'), 'Trading panel positionAnalytics must remain null-safe.');
 expect(str_contains($trading,"array_filter(\$e['active_positions'],'is_array')"), 'Trading panel must filter invalid/null position rows before rendering.');
 
-$advanced=source('public/admin/bot/settings.php');
+$simple=source('public/admin/bot/settings.php');
+foreach([
+    'quote_asset','risk_profile','position_percent','max_position_percent',
+    'nobitex_portfolio_exposure_percent','nobitex_max_positions','nobitex_max_pending_orders',
+    'nobitex_pending_timeout_seconds','cooldown_minutes','stop_loss_percent',
+    'take_profit_percent','daily_loss_limit_percent',
+] as $field){expect(str_contains($simple,'name="'.$field.'"'),'Simple trading settings page missing: '.$field);}
+foreach(['سه عدد مهم','سرمایه هدف هر خرید','سقف کل سرمایه درگیر','حفاظت از سرمایه و خروج','سفارش‌های در انتظار','واژه‌ها یعنی چه؟'] as $label){expect(str_contains($simple,$label),'Simple settings explanation missing: '.$label);}
+expect(str_contains($simple,'/admin/bot/advanced.php'),'Simple settings must link to advanced controls.');
+
+$advanced=source('public/admin/bot/advanced.php');
 expect(str_contains($advanced,'nobitex_max_buy_orders_per_hour'),'Advanced trading page must expose the real hourly BUY safety limit.');
 foreach(['dust_enabled','dust_min_toman','dust_max_toman','dust_cooldown_hours'] as $field){expect(str_contains($advanced,'name="'.$field.'"'),'Dust conversion control missing: '.$field);}
-expect(str_contains($advanced,'FULL UNIVERSE'),'Advanced settings must explain that full-universe analysis is not capped by legacy scan_limit.');
+expect(str_contains($advanced,'همه بازارهای Spot'),'Advanced settings must explain full-universe analysis.');
+
+$nav=source('public/admin/_nav.php');
+expect(str_contains($nav,"['/admin/bot/settings.php','تنظیمات معاملات']"),'Trading navigation must name the everyday settings clearly.');
+expect(str_contains($nav,"['/admin/bot/advanced.php','پیشرفته']"),'Trading navigation must separate advanced controls.');
 
 $reconciler=source('src/Trading/NobitexPositionReconciler.php');
 expect(str_contains($reconciler,'SET amount=:new_amount'),'Position reconciliation must use a distinct SET placeholder.');
 expect(str_contains($reconciler,'amount>:amount_floor'),'Position reconciliation must use a distinct WHERE placeholder.');
 expect(!preg_match('/SET\s+amount=:amount[^;]+amount>:amount/s',$reconciler),'Native PDO repeated named placeholder regression detected.');
+expect(str_contains($reconciler,'buy_fee_base_deduction_alignment'),'BUY fee wallet alignment must be distinguished from an external sale.');
 
 $client=source('src/Exchange/NobitexClient.php');
 expect(str_contains($client,'authenticatedRead(fn() => $this->request'), 'Safe authenticated Nobitex reads must use transient-network retry protection.');
@@ -35,4 +50,4 @@ $scanner=source('src/Trading/NobitexUniverseScanner.php');
 expect(str_contains($scanner,'unset($legacyLimit, $legacyThreshold);'),'Legacy scan limit must remain non-gating.');
 expect(str_contains($scanner,"['full_universe_analysis'] = true"),'Scanner must preserve full-universe analysis marker.');
 
-fwrite(STDOUT,"Trading admin settings and live hotfix regression tests passed.\n");
+fwrite(STDOUT,"Trading admin settings, fee alignment and live hotfix regression tests passed.\n");
