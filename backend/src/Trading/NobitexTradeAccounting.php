@@ -245,8 +245,14 @@ final class NobitexTradeAccounting
     {
         $fee = $this->feeForOrder($order, $side, $quote, $price, $fallbackAmount);
         if ($fee['source'] === 'actual') {
-            $matched = $this->matchedAmount($order);
-            if ($matched > 0) $fee['quote_fee'] *= min(1.0, $rowAmount / $matched);
+            // For a BUY, the managed/sellable position amount is the net base
+            // credited after the fee, not gross matchedAmount. Allocate the
+            // complete entry fee across that net received quantity so a full
+            // close does not under-count the real entry fee by another fee ratio.
+            $basis = strtolower($side) === 'buy'
+                ? NobitexOrderFill::netReceivedBase($order, 0.0)
+                : $this->matchedAmount($order);
+            if ($basis > 0) $fee['quote_fee'] *= min(1.0, $rowAmount / $basis);
             return $fee;
         }
         $fee['quote_fee'] = $price * $rowAmount * $this->takerRate($pdo, $quote);

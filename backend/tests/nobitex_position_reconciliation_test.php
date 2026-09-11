@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 require dirname(__DIR__) . '/bootstrap.php';
 
+use Trade\Trading\NobitexOrderFill;
 use Trade\Trading\NobitexPositionReconciler;
 
 function expect(bool $condition, string $message): void
@@ -41,6 +42,33 @@ expect(NobitexPositionReconciler::canonicalAsset('GRAM') === 'TON', 'GRAM must c
 expect(NobitexPositionReconciler::canonicalAsset('TONCOIN') === 'TON', 'TONCOIN must canonicalize to TON for Nobitex wallet reconciliation.');
 expect(near((float)($aliases['TON'] ?? 0), 15.0), 'TON/GRAM/TONCOIN wallet aliases must accumulate into one canonical inventory total.');
 
+// Real examples reported by the live bot: both gaps are exactly 0.25%, the
+// Nobitex IRT BUY fee deducted from the received base asset.
+$snxGross = 1.49;
+$snxNet = 1.486275;
+$snxEntryPrice = 10_000.0;
+$snxFeeQuote = ($snxGross - $snxNet) * $snxEntryPrice;
+expect(NobitexPositionReconciler::isBuyFeeAlignment([
+    'amount'=>$snxGross,'entry_price'=>$snxEntryPrice,'entry_fee_quote'=>$snxFeeQuote,
+], $snxNet), 'SNX 1.49 -> 1.486275 must be classified as BUY fee alignment, not an external sale.');
+
+$bananaGross = 0.0784;
+$bananaNet = 0.078204;
+$bananaEntryPrice = 20_000_000.0;
+$bananaFeeQuote = ($bananaGross - $bananaNet) * $bananaEntryPrice;
+expect(NobitexPositionReconciler::isBuyFeeAlignment([
+    'amount'=>$bananaGross,'entry_price'=>$bananaEntryPrice,'entry_fee_quote'=>$bananaFeeQuote,
+], $bananaNet), 'BANANA 0.0784 -> 0.078204 must be classified as BUY fee alignment, not an external sale.');
+
+expect(!NobitexPositionReconciler::isBuyFeeAlignment([
+    'amount'=>$snxGross,'entry_price'=>$snxEntryPrice,'entry_fee_quote'=>$snxFeeQuote,
+], 1.40), 'A material wallet reduction must not be hidden as a fee alignment.');
+
+$buyOrder=['type'=>'buy','status'=>'Done','amount'=>'1.49','matchedAmount'=>'1.49','fee'=>'0.003725'];
+expect(near(NobitexOrderFill::netReceivedBase($buyOrder), $snxNet, 1e-12), 'Canonical BUY fill must expose wallet-net base quantity after actual Nobitex fee.');
+$noFeeOrder=['type'=>'buy','status'=>'Done','amount'=>'2','matchedAmount'=>'2','fee'=>'0'];
+expect(near(NobitexOrderFill::netReceivedBase($noFeeOrder), 2.0), 'BUY fill without an actual fee must keep matchedAmount unchanged.');
+
 $position = [['id'=>1,'symbol'=>'XIRT','amount'=>100.0]];
 $none = NobitexPositionReconciler::plan($position, 100.0);
 expect(($none['action'] ?? '') === 'none', 'Equal wallet inventory must not alter a position.');
@@ -74,4 +102,4 @@ expect(count($legacyPlan['positions'] ?? []) === 1, 'Oldest position should reta
 expect((int)($legacyPlan['positions'][0]['id'] ?? 0) === 2, 'Remaining wallet inventory must be allocated oldest position first.');
 expect(near((float)($legacyPlan['positions'][0]['after_amount'] ?? -1), 15.0), 'Second legacy position should be reduced to remaining inventory.');
 
-fwrite(STDOUT, "Nobitex manual position reconciliation regression tests passed.\n");
+fwrite(STDOUT, "Nobitex manual position and BUY-fee reconciliation regression tests passed.\n");

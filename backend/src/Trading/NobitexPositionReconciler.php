@@ -13,12 +13,18 @@ use Trade\Database;
  * Exchange wallet state may only reduce or close a managed position. It never
  * creates/increases one and never fabricates PnL for an external/manual sale
  * whose exact execution price cannot be proven by a Trade-owned order.
+ *
+ * Important: Nobitex deducts BUY fees from the received base asset. Legacy
+ * Trade positions stored gross matchedAmount, so a wallet balance that is lower
+ * by exactly the recorded BUY fee is an accounting alignment, not an external
+ * sale. Those corrections are logged as info and must not create Bale warnings.
  */
 final class NobitexPositionReconciler
 {
     private const RELATIVE_TOLERANCE = 0.0005; // 0.05%
     private const DUST_CLOSE_RATIO = 0.005;    // <=0.5% of tracked amount
     private const ABSOLUTE_EPSILON = 0.000000000001;
+    private const FEE_ALIGNMENT_TOLERANCE = 0.00015; // 0.015% of gross amount
 
     public function __construct(private readonly NobitexOrderService $orders = new NobitexOrderService()) {}
 
@@ -32,13 +38,13 @@ final class NobitexPositionReconciler
         // Trade-owned SELL can legitimately reduce wallet inventory and must
         // still be accounted with its real fill/PnL rather than misclassified
         // as an external manual sale.
-        $positions = $pdo->query("SELECT id,symbol,asset,quote_asset,amount,entry_price,status,opened_at,updated_at
+        $positions = $pdo->query("SELECT id,symbol,asset,quote_asset,amount,entry_price,entry_fee_quote,entry_fee_source,status,opened_at,updated_at
             FROM nobitex_autotrade_positions
             WHERE status='open'
             ORDER BY id ASC LIMIT 50")->fetchAll();
 
         if ($positions === []) {
-            return ['status'=>'ok','checked'=>0,'closed'=>0,'resized'=>0,'unchanged'=>0,'events'=>[]];
+            return ['status'=>'ok','checked'=>0,'closed'=>0,'resized'=>0,'fee_aligned'=>0,'unchanged'=>0,'events'=>[]];
         }
 
         $wallets = $this->orders->client()->wallets();
@@ -52,7 +58,7 @@ final class NobitexPositionReconciler
             $byAsset[$asset][] = $position;
         }
 
-        $result = ['status'=>'ok','checked'=>count($positions),'closed'=>0,'resized'=>0,'unchanged'=>0,'events'=>[]];
+        $result = ['status'=>'ok','checked'=>count($positions),'closed'=>0,'resized'=>0,'fee_aligned'=>0,'unchanged'=>0,'events'=>[]];
 
         foreach ($byAsset as $asset => $assetPositions) {
             $tracked = 0.0;
@@ -110,19 +116,34 @@ final class NobitexPositionReconciler
                         WHERE id=:id AND status='open' AND amount>:amount_floor");
                     $stmt->execute([':new_amount'=>$after,':amount_floor'=>$after,':id'=>$positionId]);
                     if ($stmt->rowCount() !== 1) continue;
-                    $result['resized']++;
+
                     $event = [
                         'position_id'=>$positionId,
                         'asset'=>$rawAsset,
                         'canonical_asset'=>$asset,
                         'symbol'=>$change['symbol'],
-                        'reason'=>'external_balance_reduced',
                         'tracked_amount_before'=>$before,
                         'wallet_total'=>$walletTotal,
                         'remaining_amount'=>$after,
                         'reduced_amount'=>max(0.0, $before - $after),
                         'pnl_recorded'=>false,
                     ];
+
+                    if (self::isBuyFeeAlignment($change, $after)) {
+                        $result['fee_aligned']++;
+                        $event += [
+                            'reason'=>'buy_fee_base_deduction_alignment',
+                            'entry_fee_quote'=>(float)($change['entry_fee_quote'] ?? 0.0),
+                            'entry_fee_source'=>(string)($change['entry_fee_source'] ?? ''),
+                            'classification'=>'expected_exchange_fee',
+                        ];
+                        $this->event($pdo, 'info', 'nobitex.position.buy_fee_aligned', $event);
+                        $result['events'][] = ['type'=>'fee_aligned'] + $event;
+                        continue;
+                    }
+
+                    $result['resized']++;
+                    $event['reason'] = 'external_balance_reduced';
                     $this->event($pdo, 'warning', 'nobitex.position.external_resize_detected', $event);
                     $result['events'][] = ['type'=>'resized'] + $event;
                 }
@@ -130,6 +151,24 @@ final class NobitexPositionReconciler
         }
 
         return $result;
+    }
+
+    /**
+     * Returns true only when the observed wallet reduction agrees with the
+     * entry BUY fee already recorded in quote terms. This avoids hiding a real
+     * small manual sale behind a broad percentage tolerance.
+     */
+    public static function isBuyFeeAlignment(array $position, float $walletAmount): bool
+    {
+        $before = max(0.0, (float)($position['before_amount'] ?? $position['amount'] ?? 0.0));
+        $entryPrice = max(0.0, (float)($position['entry_price'] ?? 0.0));
+        $entryFeeQuote = max(0.0, (float)($position['entry_fee_quote'] ?? 0.0));
+        if ($before <= self::ABSOLUTE_EPSILON || $entryPrice <= 0.0 || $entryFeeQuote <= 0.0) return false;
+        $baseFee = $entryFeeQuote / $entryPrice;
+        if ($baseFee <= self::ABSOLUTE_EPSILON || $baseFee >= $before) return false;
+        $expectedNet = $before - $baseFee;
+        $tolerance = max(self::ABSOLUTE_EPSILON, $before * self::FEE_ALIGNMENT_TOLERANCE, $baseFee * 0.02);
+        return abs(max(0.0, $walletAmount) - $expectedNet) <= $tolerance;
     }
 
     /**
@@ -159,6 +198,9 @@ final class NobitexPositionReconciler
                     'id'=>(int)($position['id'] ?? 0),
                     'symbol'=>(string)($position['symbol'] ?? ''),
                     'raw_asset'=>(string)($position['_raw_asset'] ?? $position['asset'] ?? ''),
+                    'entry_price'=>(float)($position['entry_price'] ?? 0),
+                    'entry_fee_quote'=>(float)($position['entry_fee_quote'] ?? 0),
+                    'entry_fee_source'=>(string)($position['entry_fee_source'] ?? ''),
                     'before_amount'=>$before,
                     'after_amount'=>0.0,
                     'action'=>'close',
@@ -179,6 +221,9 @@ final class NobitexPositionReconciler
                 'id'=>(int)($position['id'] ?? 0),
                 'symbol'=>(string)($position['symbol'] ?? ''),
                 'raw_asset'=>(string)($position['_raw_asset'] ?? $position['asset'] ?? ''),
+                'entry_price'=>(float)($position['entry_price'] ?? 0),
+                'entry_fee_quote'=>(float)($position['entry_fee_quote'] ?? 0),
+                'entry_fee_source'=>(string)($position['entry_fee_source'] ?? ''),
                 'before_amount'=>$before,
                 'after_amount'=>$after,
                 'action'=>$after <= max(self::ABSOLUTE_EPSILON, $before * self::DUST_CLOSE_RATIO) ? 'close' : 'resize',

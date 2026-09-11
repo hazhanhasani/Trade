@@ -65,7 +65,13 @@ try{
             // transfers/dust/older activity that has no available trade record.
             $positionReconciliation=(new NobitexPositionReconciler())->reconcile($pdo);
             foreach(($positionReconciliation['events']??[]) as $event){
-                if(!is_array($event))continue;$type=(string)($event['type']??'changed');$symbol=(string)($event['symbol']??'');$asset=(string)($event['asset']??'');$before=(float)($event['tracked_amount_before']??0);$remaining=(float)($event['remaining_amount']??0);
+                if(!is_array($event))continue;$type=(string)($event['type']??'changed');
+                // A BUY fee is deducted by Nobitex from the received base asset.
+                // Fee-alignment events are expected accounting corrections, not
+                // external sales, so they stay in technical logs and never become
+                // orange Bale warnings.
+                if($type==='fee_aligned')continue;
+                $symbol=(string)($event['symbol']??'');$asset=(string)($event['asset']??'');$before=(float)($event['tracked_amount_before']??0);$remaining=(float)($event['remaining_amount']??0);
                 $title=$type==='closed'?'کاهش موجودی خارجی / خروج پوزیشن شناسایی شد':'کاهش خارجی موجودی پوزیشن شناسایی شد';
                 $body='موجودی واقعی نوبیتکس با پوزیشن داخلی همگام شد. دارایی: '.($asset!==''?$asset:$symbol).' | مقدار قبلی: '.rtrim(rtrim(number_format($before,8,'.',''),'0'),'.').' | مقدار باقی‌مانده: '.rtrim(rtrim(number_format($remaining,8,'.',''),'0'),'.').' | چون Fill دقیق معامله در این مسیر اثبات نشد، سود/زیان ساختگی ثبت نشد.';
                 (new BaleSystemAlert())->queue('nobitex-external-position-'.$type.'-'.(int)($event['position_id']??0),'warning',$title,$body,['component'=>'position_reconciliation','exchange'=>'nobitex','symbol'=>$symbol,'status'=>$type],true,$pdo);

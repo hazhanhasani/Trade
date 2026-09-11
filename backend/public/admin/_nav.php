@@ -43,8 +43,8 @@ function tradeAdminNav(string $active, string $version): void
     </div></div>
     <?php if($active==='trading'):
         $mods=[
-            ['/admin/bot/','معاملات'],['/admin/bot/settings.php','تنظیمات پیشرفته'],['/admin/bot/reconcile.php','همگام‌سازی پوزیشن‌ها'],['/admin/bot/intelligence.php','ریسک هوشمند'],['/admin/bot/learning.php','یادگیری استراتژی'],
-            ['/admin/bot/execution.php','یادگیری اجرا'],['/admin/bot/calibration.php','کالیبراسیون Edge'],['/admin/bot/rotation.php','تعویض فرصت‌ها'],['/admin/tradingview.php','TradingView'],
+            ['/admin/bot/','معاملات'],['/admin/bot/settings.php','تنظیمات معاملات'],['/admin/bot/reconcile.php','همگام‌سازی پوزیشن‌ها'],['/admin/bot/intelligence.php','ریسک هوشمند'],['/admin/bot/learning.php','یادگیری استراتژی'],
+            ['/admin/bot/execution.php','یادگیری اجرا'],['/admin/bot/calibration.php','کالیبراسیون Edge'],['/admin/bot/rotation.php','تعویض فرصت‌ها'],['/admin/bot/advanced.php','پیشرفته'],['/admin/tradingview.php','TradingView'],
         ]; ?>
         <nav class="subnav global-subnav" aria-label="ماژول‌های معاملات"><?php foreach($mods as [$href,$label]):?><a class="<?=$path===$href?'active':''?>" href="<?=$href?>"><?=$label?></a><?php endforeach?></nav>
     <?php elseif($active==='system'):
