@@ -47,6 +47,9 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # php-lint.yml is intentionally not staged here because the runtime
+          # GITHUB_TOKEN cannot update workflow files. The connector updates
+          # that quality-gate file separately after this code commit succeeds.
           git add backend/src/Trading/NobitexInternalSignalEngine.php \
                   backend/src/Trading/NobitexStrategyLearning.php \
                   backend/src/Trading/NobitexGlobalRiskRuntime.php \
@@ -54,7 +57,6 @@ jobs:
                   backend/src/Observability/NobitexDecisionReporter.php \
                   backend/src/Trading/NobitexRuntimeModels.php \
                   backend/tests/nobitex_full_debug_v1422_test.php \
-                  backend/tests/trading_strategy_test.php \
-                  .github/workflows/php-lint.yml
+                  backend/tests/trading_strategy_test.php
           git commit -m 'Fix Profit-First buffer saturation and debug pipeline'
           git push origin HEAD:main
