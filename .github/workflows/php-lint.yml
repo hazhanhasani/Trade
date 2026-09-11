@@ -61,6 +61,8 @@ jobs:
         run: php backend/tests/admin_mobile_layout_test.php
       - name: Live admin observability regression tests
         run: php backend/tests/admin_live_observability_test.php
+      - name: Trading settings and live hotfix regression tests
+        run: php backend/tests/trading_admin_settings_regression_test.php
       - name: Validate Backend ↔ Android API contract parity
         shell: bash
         run: |
