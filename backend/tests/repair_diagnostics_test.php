@@ -65,7 +65,10 @@ expectRepair(str_contains($baleAlert, "default=>'لاگ'"), 'Info diagnostics mu
 
 expectRepair(is_string($decisionReporter) && str_contains($decisionReporter, 'no_candidate_passed_signal_and_risk_filters'), 'Nobitex decision reporter must explain the final no-buy reason.');
 expectRepair(str_contains($decisionReporter, 'TradableEdge='), 'Nobitex decision reporter must include post-cost tradable edge.');
-expectRepair(str_contains($decisionReporter, 'RequiredBuffer='), 'Nobitex decision reporter must include the required execution buffer.');
+expectRepair(str_contains($decisionReporter, 'Gross='), 'Nobitex decision reporter must include forecast gross movement.');
+expectRepair(str_contains($decisionReporter, 'Cost='), 'Nobitex decision reporter must include explicit round-trip execution cost.');
+expectRepair(str_contains($decisionReporter, 'Buffer='), 'Nobitex decision reporter must include residual forecast uncertainty buffer.');
+expectRepair(str_contains($decisionReporter, 'BufferParts='), 'Nobitex decision reporter must decompose the uncertainty buffer.');
 expectRepair(str_contains($decisionReporter, 'Spread='), 'Nobitex decision reporter must include spread.');
 expectRepair(str_contains($decisionReporter, 'reasonFa'), 'Nobitex decision reporter must translate rejection reasons for humans.');
 expectRepair(str_contains($decisionReporter, 'NobitexInternalSignalEngine.php → Profit-First v5 | سپس NobitexPortfolioEngine.php → entryBudget()'), 'Decision logs must name the exact profit-first decision path.');
