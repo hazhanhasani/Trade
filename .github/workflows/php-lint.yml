@@ -85,6 +85,8 @@ jobs:
         run: php backend/tests/admin_mobile_layout_test.php
       - name: Trade 1.4.23 UI UX regression tests
         run: php backend/tests/uiux_debug_v1423_test.php
+      - name: Trade 1.4.24 dashboard truth and theme regression tests
+        run: php backend/tests/dashboard_truth_v1424_test.php
       - name: Live admin observability regression tests
         run: php backend/tests/admin_live_observability_test.php
       - name: Trading settings and live hotfix regression tests
