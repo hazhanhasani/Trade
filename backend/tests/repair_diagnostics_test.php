@@ -21,6 +21,7 @@ $errorReporter = file_get_contents($root . '/backend/src/Observability/ErrorRepo
 $baleAlert = file_get_contents($root . '/backend/src/Observability/BaleSystemAlert.php');
 $decisionReporter = file_get_contents($root . '/backend/src/Observability/NobitexDecisionReporter.php');
 $cronTick = file_get_contents($root . '/backend/cron/tick.php');
+$updater = file_get_contents($root . '/backend/src/Updater.php');
 
 expectRepair(is_string($repair) && $repair !== '', 'Repair center must exist.');
 expectRepair(str_contains($repair, 'bitpinReportedIp'), 'Repair center must parse the IP reported by Bitpin itself.');
@@ -69,6 +70,13 @@ expectRepair(str_contains($decisionReporter, 'Spread='), 'Nobitex decision repor
 expectRepair(str_contains($decisionReporter, 'reasonFa'), 'Nobitex decision reporter must translate rejection reasons for humans.');
 expectRepair(str_contains($decisionReporter, 'NobitexInternalSignalEngine.php → Profit-First v5 | سپس NobitexPortfolioEngine.php → entryBudget()'), 'Decision logs must name the exact profit-first decision path.');
 expectRepair(str_contains($decisionReporter, 'multi_strategy_role'), 'Decision trace must identify multi-strategy analysis as shadow diagnostics.');
+expectRepair(str_contains($decisionReporter, 'Updater::currentVersion()'), 'Decision reporter must read the exact running backend version.');
+expectRepair(str_contains($decisionReporter, "'backend_version'=>\$backendVersion"), 'Decision trace context must include backend_version.');
+expectRepair(str_contains($decisionReporter, 'Backend: '), 'Human-readable Bale decision messages must print the backend version.');
+
+expectRepair(is_string($updater) && str_contains($updater, 'DEFAULT_CHECK_INTERVAL = 60'), 'Automatic backend updater must check stable releases every minute.');
+expectRepair(str_contains($updater, '$configured === 3600 || $configured === 300'), 'Legacy five-minute/hour defaults must migrate to one-minute checks.');
+expectRepair(str_contains($updater, 'return max(60, min(86400, $configured));'), 'Updater must allow a one-minute minimum interval.');
 
 expectRepair(is_string($cronTick) && str_contains($cronTick, "'cron_cycle'"), 'Every completed Cron cycle must emit a diagnostic log.');
 expectRepair(str_contains($cronTick, "'run_id'=>"), 'Cron diagnostic logs must include their Run ID.');
