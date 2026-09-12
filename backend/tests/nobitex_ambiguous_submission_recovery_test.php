@@ -33,6 +33,11 @@ $recoveryBody=substr($service,$methodStart,$methodEnd-$methodStart);
 ambiguousAssert(!str_contains($recoveryBody,'createOrder('),'Recovery must NEVER repeat the non-idempotent create-order POST.');
 ambiguousAssert(str_contains($recoveryBody,'orderStatus(null,$clientOrderId)'),'Recovery helper must use only the idempotent status lookup.');
 
+$resetPos=strpos($service,'NobitexUniverseScanner::resetProcessCache();');
+$snapshotPos=strpos($service,'snapshotSymbol($client,$symbol)');
+ambiguousAssert($resetPos!==false&&$snapshotPos!==false&&$resetPos<$snapshotPos,'Automated BUY must clear the universe process cache before execution-time symbol revalidation.');
+ambiguousAssert(str_contains($service,"'fresh_execution_revalidation'=>true"),'Fresh execution revalidation must be recorded in order context telemetry.');
+
 // Keep the client-level contract explicit: authenticated reads may retry, while
 // createOrder itself directly calls request() and is never wrapped in authenticatedRead().
 $createStart=strpos($client,'public function createOrder');
@@ -42,4 +47,4 @@ $createBody=substr($client,$createStart,$cancelStart-$createStart);
 ambiguousAssert(str_contains($createBody,"return \$this->request('POST','/market/orders/add'"),'createOrder must submit exactly through the add endpoint.');
 ambiguousAssert(!str_contains($createBody,'authenticatedRead('),'createOrder must not be automatically retried by the HTTP client.');
 
-echo "Nobitex ambiguous submission recovery regression tests passed.\n";
+echo "Nobitex ambiguous submission recovery + fresh BUY revalidation regression tests passed.\n";
