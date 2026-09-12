@@ -11,7 +11,13 @@ use Trade\Security\Crypto;
 final class MarketDataCredentialStore
 {
     private const ALLOWED = ['abantether', 'bit24', 'tabdeal', 'bitpin'];
-    private const SECRET_REQUIRED = ['bit24', 'bitpin'];
+
+    // Read-only Bit24 Market Data GET endpoints authenticate with X-BIT24-APIKEY
+    // and do not require the POST-body signing/private key. Keeping that secret
+    // mandatory silently disabled Bit24 consensus whenever only the API token was
+    // configured. Bitpin keeps its existing paired credential contract for the
+    // optional authenticated Market Data capabilities exposed by this project.
+    private const SECRET_REQUIRED = ['bitpin'];
 
     public function save(string $source, string $apiKey, string $secret = ''): void
     {

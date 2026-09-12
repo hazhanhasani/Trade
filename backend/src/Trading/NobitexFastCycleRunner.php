@@ -43,6 +43,7 @@ final class NobitexFastCycleRunner
             $started = microtime(true);
             $results = [];
             $baleRuns = [];
+            $walletReconcileRuns = [];
             $last = ['status'=>'no_trade','exchange'=>'nobitex','reason'=>'no_cycle_completed'];
 
             for ($cycle = 1; $cycle <= $cycles; $cycle++) {
@@ -81,9 +82,25 @@ final class NobitexFastCycleRunner
                     break;
                 }
 
-                // Trade notifications are synchronized after every micro-cycle.
-                // A fill confirmed during reconciliation therefore does not have
-                // to wait until the next minute-long cron invocation.
+                // RuntimeSafety already reconciles wallet/position state before
+                // every engine cycle. Re-query the real wallet after a cycle only
+                // when that cycle actually submitted a BUY, because that is the
+                // moment Nobitex may deduct the fee from received base quantity.
+                // This keeps Bale/next-cycle position amount exact without adding
+                // redundant wallet API traffic to ordinary HOLD/SELL cycles.
+                try {
+                    if ($this->containsBuySubmission($last)) {
+                        $walletReconcileRuns[]=['cycle'=>$cycle]+(new NobitexPositionReconciler())->reconcile($pdo);
+                    }
+                } catch (\Throwable $e) {
+                    ErrorReporter::captureThrowable($e, 'warning', 'nobitex_fast_cycle_position_reconcile', [
+                        'exchange'=>'nobitex','run_id'=>$runId,'cycle'=>$cycle,
+                    ]);
+                    $walletReconcileRuns[]=['cycle'=>$cycle,'status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];
+                }
+
+                // Trade notifications are synchronized after every micro-cycle
+                // and after the real-wallet quantity reconciliation above.
                 try {
                     $notifier = new BaleTradeNotifier();
                     $status = $notifier->status($pdo);
@@ -111,12 +128,22 @@ final class NobitexFastCycleRunner
                 'fast_cycle_interval_seconds'=>$interval,
                 'fast_cycle_max_runtime_seconds'=>$maxRuntime,
                 'fast_cycle_results'=>$results,
+                'wallet_fast_cycle_reconciliation'=>$walletReconcileRuns,
                 'bale_fast_cycle'=>$baleRuns,
                 'runtime_seconds'=>round(microtime(true)-$started,3),
             ];
         } finally {
             try { $pdo->query("SELECT RELEASE_LOCK('trade_nobitex_fast_cycle_v1')"); } catch (\Throwable) {}
         }
+    }
+
+    private function containsBuySubmission(array $result): bool
+    {
+        if ((string)($result['status'] ?? '') === 'buy_submitted') return true;
+        foreach ((array)($result['actions'] ?? []) as $action) {
+            if (is_array($action) && (string)($action['status'] ?? '') === 'buy_submitted') return true;
+        }
+        return false;
     }
 
     private function intSetting(PDO $pdo, string $key, int $default, int $min, int $max): int
