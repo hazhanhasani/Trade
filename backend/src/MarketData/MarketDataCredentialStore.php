@@ -24,6 +24,9 @@ final class MarketDataCredentialStore
         $apiKey = trim($apiKey);
         $secret = trim($secret);
         if ($apiKey === '') throw new \InvalidArgumentException('API key is required.');
+        if ($source === 'bit24' && $secret === '') {
+            throw new \InvalidArgumentException('Bit24 secret/private key is required together with the API key.');
+        }
         if (strlen($apiKey) > 4000 || strlen($secret) > 4000) throw new \InvalidArgumentException('Credential length is invalid.');
 
         $encryptionKey = (string) Config::require('app.encryption_key');
@@ -54,9 +57,14 @@ final class MarketDataCredentialStore
     public function configured(string $source): bool
     {
         $source = $this->source($source);
-        $stmt = Database::connection()->prepare('SELECT EXISTS(SELECT 1 FROM exchange_credentials WHERE exchange_name=:source)');
-        $stmt->execute([':source'=>$source]);
-        return (bool) $stmt->fetchColumn();
+        try {
+            $credentials = $this->credentials($source);
+        } catch (\Throwable) {
+            return false;
+        }
+        if (!is_array($credentials) || trim((string)($credentials['api_key'] ?? '')) === '') return false;
+        if ($source === 'bit24' && trim((string)($credentials['secret'] ?? '')) === '') return false;
+        return true;
     }
 
     /** @return array{api_key:string,secret:string}|null */
@@ -86,6 +94,7 @@ final class MarketDataCredentialStore
                 'configured'=>$configured,
                 'execution_allowed'=>false,
                 'role'=>'market_data_only',
+                'requires_secret'=>$source === 'bit24',
             ];
         }
         $out['bitpin'] = ['configured'=>true,'execution_allowed'=>false,'role'=>'public_market_data_only'];
