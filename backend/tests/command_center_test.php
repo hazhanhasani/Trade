@@ -64,8 +64,8 @@ expectCommandCenter(str_contains($apiSource,'markReadMany($ids)'), 'Notification
 $centerSource = file_get_contents(dirname(__DIR__) . '/src/Trading/TradeCommandCenter.php') ?: '';
 expectCommandCenter(str_contains($centerSource,'trade_emergency_kill_switch_owned'), 'Emergency mode must track kill-switch ownership.');
 expectCommandCenter(!str_contains($centerSource,'elseif($mode===\'normal\'){$controller->setKillSwitch(false)'), 'Returning to normal must not blindly disable a manually-enabled kill switch.');
-expectCommandCenter(str_contains($centerSource,"$ownedBefore=$current==='full_stop'"), 'Emergency transition must remember whether full_stop owns the kill switch.');
-expectCommandCenter(str_contains($centerSource,"elseif($current==='full_stop'&&$mode!=='full_stop')"), 'Leaving full_stop for any weaker mode must release only emergency-owned kill state.');
+expectCommandCenter(str_contains($centerSource,'$ownedBefore=$current===\'full_stop\''), 'Emergency transition must remember whether full_stop owns the kill switch.');
+expectCommandCenter(str_contains($centerSource,'elseif($current===\'full_stop\'&&$mode!==\'full_stop\')'), 'Leaving full_stop for any weaker mode must release only emergency-owned kill state.');
 expectCommandCenter(str_contains($centerSource,'if($ownedBefore)$controller->setKillSwitch(false);'), 'Emergency-owned kill switch must be released before pause/graceful/normal modes continue.');
 expectCommandCenter(str_contains($centerSource,'manual_kill_switch_preserved'), 'Emergency response must expose preservation of a pre-existing manual kill switch.');
 expectCommandCenter(str_contains($centerSource,'minute_aligned_signal_correlation_v2'), 'Risk heatmap must use time-aligned correlation samples.');
