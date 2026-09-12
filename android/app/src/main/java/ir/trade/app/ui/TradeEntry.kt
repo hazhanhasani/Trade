@@ -20,6 +20,8 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 private const val TRUSTED_SERVER = "https://rado-taxi.sbs"
+private const val TRUSTED_HOST = "rado-taxi.sbs"
+private const val PAIR_PATH = "/app/pair"
 
 private suspend fun redeemPairingCode(code: String, prefs: TradePreferences) {
     val normalized = code.uppercase().filter { it.isLetterOrDigit() }
@@ -60,15 +62,13 @@ fun TradeEntry(pairingUri: String?, onPairingHandled: () -> Unit) {
     var pairCodeSetup by remember { mutableStateOf(false) }
     var manualSetup by remember { mutableStateOf(false) }
 
-    // Legacy callback support remains for already-created links, but the app no
-    // longer registers the unverified custom-scheme callback in the manifest and
-    // Admin no longer generates such links. New connections use an entered
-    // one-time code, so another installed app cannot intercept the credential flow.
     LaunchedEffect(pairingUri) {
         if (pairingUri.isNullOrBlank()) return@LaunchedEffect
         try {
             val uri = Uri.parse(pairingUri)
-            if (uri.scheme != "trade" || uri.host != "pair") throw IllegalArgumentException("لینک اتصال معتبر نیست.")
+            val verified = uri.scheme.equals("https", ignoreCase = true) &&
+                uri.host.equals(TRUSTED_HOST, ignoreCase = true) && uri.path == PAIR_PATH
+            if (!verified) throw SecurityException("لینک اتصال تأییدشده نیست.")
             val code = uri.getQueryParameter("code")?.trim().orEmpty()
             redeemPairingCode(code, prefs)
             paired = true
@@ -84,7 +84,7 @@ fun TradeEntry(pairingUri: String?, onPairingHandled: () -> Unit) {
 
     when {
         paired || prefs.isConfigured() -> TradeAppV4()
-        pairing -> PairingStatusCard("در حال بررسی اتصال قدیمی…", null)
+        pairing -> PairingStatusCard("در حال بررسی لینک تأییدشده…", null)
         error.isNotBlank() -> PairingStatusCard(
             title = "اتصال انجام نشد",
             error = error,
@@ -120,7 +120,7 @@ private fun SmartSetupScreen(onOpenAdmin: () -> Unit, onPairCodeSetup: () -> Uni
                         Card(colors = CardDefaults.cardColors(containerColor = androidx.compose.ui.graphics.Color(0xFFEEF5FF)), shape = RoundedCornerShape(16.dp)) {
                             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Text("روش پیشنهادی", fontWeight = FontWeight.Bold)
-                                Text("۱) پنل مدیریت را باز کن.\n۲) در «دستگاه‌ها» یک کد اتصال ۱۰ دقیقه‌ای بساز.\n۳) به اپ برگرد و همان کد را وارد کن.\nتوکن نهایی فقط پس از تأیید Backend و قرارداد API، رمزگذاری‌شده روی گوشی ذخیره می‌شود.")
+                                Text("۱) پنل مدیریت را باز کن.\n۲) در «دستگاه‌ها» یک کد اتصال ۱۰ دقیقه‌ای بساز.\n۳) «اتصال مستقیم امن» را بزن؛ یا کد را داخل اپ وارد کن.\nتوکن نهایی فقط پس از تأیید Backend و قرارداد API، رمزگذاری‌شده روی گوشی ذخیره می‌شود.")
                             }
                         }
                         Button(onClick = onPairCodeSetup, modifier = Modifier.fillMaxWidth()) { Text("وارد کردن کد اتصال") }
@@ -264,7 +264,7 @@ private fun PairingStatusCard(title: String, error: String?, action: (() -> Unit
                     Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     if (error == null) {
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        Text("کد یک‌بارمصرف از rado-taxi.sbs بررسی می‌شود و توکن فقط پس از اعتبارسنجی روی گوشی ذخیره خواهد شد.")
+                        Text("لینک HTTPS با دامنه و امضای اپ تطبیق داده می‌شود و توکن فقط پس از اعتبارسنجی روی گوشی ذخیره خواهد شد.")
                     } else {
                         Text(error, color = MaterialTheme.colorScheme.error)
                         if (action != null) OutlinedButton(onClick = action, modifier = Modifier.fillMaxWidth()) { Text("بازگشت به اتصال امن") }
