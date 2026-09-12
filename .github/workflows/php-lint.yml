@@ -71,6 +71,8 @@ jobs:
         run: php backend/tests/nobitex_full_debug_v1422_test.php
       - name: Nobitex runtime telemetry regression tests
         run: php backend/tests/nobitex_runtime_telemetry_test.php
+      - name: Nobitex fast-cycle responsiveness regression tests
+        run: php backend/tests/nobitex_fast_cycle_runner_test.php
       - name: Bale trade notification regression tests
         run: php backend/tests/bale_trade_notifier_test.php
       - name: Bale confirmed trade delivery guarantee regression tests
