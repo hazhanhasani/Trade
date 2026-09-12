@@ -92,14 +92,13 @@ class TradeAlertWorker(appContext: Context, params: WorkerParameters) : Coroutin
             )
         }
 
-        // The endpoint returns unread notifications only. Once this worker has
-        // evaluated the full server batch against the user's notification rules,
-        // acknowledge it atomically on the server so unread_count and future
-        // polling cannot be clogged by the same rows forever.
-        val ack = runCatching { api.markNotificationRead(all = true) }.getOrNull()
+        // Acknowledge exactly the rows returned in this bounded batch. Never use
+        // all=true here: there may be older unread rows beyond the 100-row page.
+        val receivedIds = received.map { it.optLong("id", 0L) }.filter { it > 0L }
+        val ack = runCatching { api.markNotificationsRead(receivedIds) }.getOrNull()
         if (ack?.ok != true) return Result.retry()
 
-        prefs.setLastAlertId(received.maxOf { it.optLong("id", 0L) })
+        prefs.setLastAlertId(receivedIds.maxOrNull() ?: 0L)
         return Result.success()
     }
 
