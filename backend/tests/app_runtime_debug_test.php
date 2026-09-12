@@ -13,6 +13,7 @@ $manifest=(string)file_get_contents($root.'/android/app/src/main/AndroidManifest
 $rotation=(string)file_get_contents($root.'/android/app/src/main/java/ir/trade/app/RotationActivity.kt');
 $learning=(string)file_get_contents($root.'/android/app/src/main/java/ir/trade/app/StrategyLearningActivity.kt');
 $devices=(string)file_get_contents($root.'/backend/public/admin/devices.php');
+$assetLinks=(string)file_get_contents($root.'/backend/public/.well-known/assetlinks.json');
 
 appDebugAssert(str_contains($entry,'ManualSetupScreen('),'Manual app setup must render a real credential form.');
 appDebugAssert(str_contains($entry,'PairCodeSetupScreen('),'Primary app pairing must provide one-time code entry inside the trusted app.');
@@ -30,9 +31,15 @@ appDebugAssert($pairedApiPos!==false&&$pairedStatusPos!==false&&$pairedContractP
 appDebugAssert($pairedApiPos<$pairedStatusPos&&$pairedStatusPos<$pairedContractPos&&$pairedContractPos<$pairedSavePos,'Pair-code redemption must validate before encrypted token persistence.');
 appDebugAssert(str_contains($entry,'if (server != TRUSTED_SERVER)'),'Pair-code redemption must pin the Backend to the trusted server.');
 appDebugAssert(str_contains($entry,'if (token.isBlank())'),'Pair-code redemption must reject a blank token.');
+appDebugAssert(str_contains($entry,'uri.scheme.equals("https"'),'Pairing callback must accept HTTPS only.');
+appDebugAssert(str_contains($entry,'uri.host.equals(TRUSTED_HOST'),'Pairing callback must pin the verified hostname.');
+appDebugAssert(str_contains($entry,'uri.path == PAIR_PATH'),'Pairing callback must pin the pairing path.');
 appDebugAssert(!str_contains($manifest,'android:scheme="trade" android:host="pair"'),'Unverified custom-scheme pairing must not be exported by Android.');
-appDebugAssert(!str_contains($devices,'trade://pair'),'Admin must not generate interceptable custom-scheme pairing links.');
-appDebugAssert(str_contains($devices,'کد اتصال فقط ۱۰ دقیقه اعتبار دارد'),'Admin must explain the secure one-time-code pairing flow.');
+appDebugAssert(str_contains($manifest,'android:autoVerify="true"'),'Pairing must use Android verified app links.');
+appDebugAssert(str_contains($manifest,'android:scheme="https"')&&str_contains($manifest,'android:host="rado-taxi.sbs"')&&str_contains($manifest,'android:path="/app/pair"'),'Verified pairing intent must match the trusted HTTPS callback exactly.');
+appDebugAssert(!str_contains($devices,'trade://pair'),'Admin must never generate interceptable custom-scheme pairing links.');
+appDebugAssert(str_contains($devices,'https://rado-taxi.sbs/app/pair?code='),'Admin direct pairing must use the verified HTTPS app link.');
+appDebugAssert(str_contains($assetLinks,'"package_name": "ir.trade.app"')&&str_contains($assetLinks,'sha256_cert_fingerprints'),'The trusted domain must publish Android Digital Asset Links for the signed app.');
 
 appDebugAssert(str_contains($worker,'if (!canNotify()) return Result.success()'),'Missing Android notification permission must not consume unread alerts.');
 appDebugAssert(str_contains($worker,'api.notifications(100, true)'),'Worker must consume a bounded unread batch instead of one notification.');
