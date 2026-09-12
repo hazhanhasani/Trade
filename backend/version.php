@@ -2,7 +2,9 @@
 
 declare(strict_types=1);
 
-// Full system debug: database transaction/retention/index hardening, app
-// callback and notification delivery safety, stable loading/scroll/state UX,
-// Persian reporting/chart fixes, and explicit Spot-only execution boundaries.
-return '1.4.38';
+// Full /debug hardening: exact notification acknowledgements, emergency/kill-
+// switch ownership safety, verified HTTPS Android pairing, CLI-only destructive
+// legacy cleanup, cross-currency reporting truth, aligned risk correlations,
+// bounded full-window charts, localized numeric input, lower dashboard load,
+// and complete Persian/four-strategy learning + rotation UI coordination.
+return '1.4.39';
