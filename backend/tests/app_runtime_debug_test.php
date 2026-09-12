@@ -14,6 +14,7 @@ $rotation=(string)file_get_contents($root.'/android/app/src/main/java/ir/trade/a
 $learning=(string)file_get_contents($root.'/android/app/src/main/java/ir/trade/app/StrategyLearningActivity.kt');
 $devices=(string)file_get_contents($root.'/backend/public/admin/devices.php');
 $assetLinks=(string)file_get_contents($root.'/backend/public/.well-known/assetlinks.json');
+$pairFallback=(string)file_get_contents($root.'/backend/public/app/pair/index.php');
 
 appDebugAssert(str_contains($entry,'ManualSetupScreen('),'Manual app setup must render a real credential form.');
 appDebugAssert(str_contains($entry,'PairCodeSetupScreen('),'Primary app pairing must provide one-time code entry inside the trusted app.');
@@ -39,7 +40,10 @@ appDebugAssert(str_contains($manifest,'android:autoVerify="true"'),'Pairing must
 appDebugAssert(str_contains($manifest,'android:scheme="https"')&&str_contains($manifest,'android:host="rado-taxi.sbs"')&&str_contains($manifest,'android:path="/app/pair"'),'Verified pairing intent must match the trusted HTTPS callback exactly.');
 appDebugAssert(!str_contains($devices,'trade://pair'),'Admin must never generate interceptable custom-scheme pairing links.');
 appDebugAssert(str_contains($devices,'https://rado-taxi.sbs/app/pair?code='),'Admin direct pairing must use the verified HTTPS app link.');
-appDebugAssert(str_contains($assetLinks,'"package_name": "ir.trade.app"')&&str_contains($assetLinks,'sha256_cert_fingerprints'),'The trusted domain must publish Android Digital Asset Links for the signed app.');
+appDebugAssert(str_contains($assetLinks,'"package_name": "ir.trade.app"'),'The trusted domain must publish the production application id.');
+appDebugAssert(str_contains($assetLinks,'3A:01:AE:96:A0:8E:AD:7C:A6:97:C8:EA:10:FC:F8:9D:DA:90:D9:3F:39:7E:50:16:D9:CA:40:78:3A:B1:59:7D'),'Digital Asset Links must pin the permanent production signing certificate.');
+appDebugAssert(str_contains($pairFallback,"Content-Security-Policy"),'Browser fallback for verified pairing must be CSP protected.');
+appDebugAssert(str_contains($pairFallback,"این صفحه کد را مصرف نمی‌کند"),'Browser fallback must not redeem the one-time code outside the trusted app.');
 
 appDebugAssert(str_contains($worker,'if (!canNotify()) return Result.success()'),'Missing Android notification permission must not consume unread alerts.');
 appDebugAssert(str_contains($worker,'api.notifications(100, true)'),'Worker must consume a bounded unread batch instead of one notification.');
