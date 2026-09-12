@@ -30,7 +30,7 @@ final class NobitexPerformanceAnalytics
         catch (\Throwable) {}
 
         return [
-            'model'=>'fee_aware_performance_analytics_v2_toman_iran_day',
+            'model'=>'fee_aware_performance_analytics_v3_cross_currency_safe',
             'window_days'=>$days,
             'day_timezone'=>'Asia/Tehran',
             'calendar'=>'Solar Hijri',
@@ -39,6 +39,7 @@ final class NobitexPerformanceAnalytics
             'daily_series_by_quote'=>$series,
             'best_asset'=>$assets[0] ?? null,
             'worst_asset'=>$assets !== [] ? $assets[count($assets)-1] : null,
+            'asset_ranking_metric'=>'average_return_percent',
             'asset_performance'=>array_slice($assets,0,20),
             'edge_calibration'=>$edgeCalibration,
             'strategy_performance'=>$strategies,
@@ -123,14 +124,24 @@ final class NobitexPerformanceAnalytics
                     SUM(CASE WHEN COALESCE(r.net_pnl,r.pnl)>0 THEN 1 ELSE 0 END) wins
              FROM nobitex_autotrade_pnl r JOIN nobitex_autotrade_positions p ON p.id=r.position_id
              WHERE r.created_at >= (UTC_TIMESTAMP() - INTERVAL {$interval} DAY)
-             GROUP BY p.asset,p.quote_asset ORDER BY net_pnl DESC"
+             GROUP BY p.asset,p.quote_asset"
         )->fetchAll();
         foreach($rows as &$r){
             $trades=(int)$r['trades'];$quote=strtoupper((string)$r['quote_asset']);$net=(float)$r['net_pnl'];if($quote==='IRT')$net=NobitexDisplayMoney::quoteValue($net,$quote);
             $r['trades']=$trades;$r['net_pnl']=round($net,8);$r['display_unit']=NobitexDisplayMoney::quoteUnit($quote);$r['average_return_percent']=round((float)$r['avg_return_percent'],4);unset($r['avg_return_percent']);$r['win_rate_percent']=$trades>0?round(((int)$r['wins']/$trades)*100,2):0.0;unset($r['wins']);
+            $r['ranking_metric']='average_return_percent';
         }
         unset($r);
-        usort($rows,static fn(array $a,array $b):int=>((float)$b['net_pnl'])<=>((float)$a['net_pnl']));
+        // IRT PnL is displayed in toman while USDT PnL remains USDT. Sorting by
+        // raw/display money across those quotes is dimensionally invalid. Return
+        // percentage is unitless and therefore safe for one cross-market ranking.
+        usort($rows,static function(array $a,array $b):int{
+            $byReturn=((float)$b['average_return_percent'])<=>((float)$a['average_return_percent']);
+            if($byReturn!==0)return$byReturn;
+            $byWin=((float)$b['win_rate_percent'])<=>((float)$a['win_rate_percent']);
+            if($byWin!==0)return$byWin;
+            return((int)$b['trades'])<=>((int)$a['trades']);
+        });
         return $rows;
     }
 
@@ -155,6 +166,6 @@ final class NobitexPerformanceAnalytics
 
     private function maxAbsoluteDrawdown(array $curve): float
     {
-        $peak=0.0;$max=0.0;foreach($curve as $v){$x=(float)$v;$peak=max($peak,$x);$max=max($max,$peak-$x);}return $max;
+        $peak=0.0;$max=0.0;foreach($curve as $v){$x=(float)$v;$peak=max($peak,$x);$max=max($max,$peak-$x);}return$max;
     }
 }
