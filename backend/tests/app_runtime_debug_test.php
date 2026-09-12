@@ -30,8 +30,10 @@ appDebugAssert(str_contains($entry,'if (token.isBlank())'),'Pairing callback mus
 appDebugAssert(str_contains($worker,'if (!canNotify()) return Result.success()'),'Missing Android notification permission must not consume unread alerts.');
 appDebugAssert(str_contains($worker,'api.notifications(100, true)'),'Worker must consume a bounded unread batch instead of one notification.');
 appDebugAssert(str_contains($worker,'MAX_VISIBLE_NOTIFICATIONS'),'Worker must bound visible notification fan-out.');
-appDebugAssert(str_contains($worker,'api.markNotificationRead(all = true)'),'Worker must acknowledge consumed unread rows on the Backend.');
-appDebugAssert(str_contains($api,'suspend fun markNotificationRead'),'Android API client must expose notification acknowledgement.');
+appDebugAssert(str_contains($worker,'api.markNotificationsRead(receivedIds)'),'Worker must acknowledge only the exact unread rows it consumed.');
+appDebugAssert(!str_contains($worker,'api.markNotificationRead(all = true)'),'Worker must never mark unread rows outside its bounded batch as read.');
+appDebugAssert(str_contains($api,'suspend fun markNotificationsRead'),'Android API client must expose exact batch notification acknowledgement.');
+appDebugAssert(str_contains($api,'notifications.batch_read_v1'),'Batch acknowledgement must be capability-gated.');
 appDebugAssert(str_contains($manifest,'android.permission.POST_NOTIFICATIONS'),'Android 13 notification permission must remain declared.');
 appDebugAssert(str_contains($manifest,'android:scheme="trade" android:host="pair"'),'Secure app pairing callback must remain registered.');
 
