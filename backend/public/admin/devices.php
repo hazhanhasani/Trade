@@ -23,7 +23,7 @@ AppAccess::bootstrapLegacy($pdo);
 AppAccess::cleanup($pdo);
 function h(mixed $v): string { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 
-$message=''; $error=''; $pairCode=''; $issuedToken='';
+$message=''; $error=''; $pairCode=''; $pairLink=''; $issuedToken='';
 if ($_SERVER['REQUEST_METHOD']==='POST') {
     $posted=(string)($_POST['csrf']??''); $session=(string)($_SESSION['csrf']??'');
     if ($posted==='' || $session==='' || !hash_equals($session,$posted)) {
@@ -35,7 +35,8 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         if ($action==='create_pairing') {
             $pair=AppAccess::createPairing($pdo,(int)$_SESSION['admin_id'],trim((string)($_POST['label']??'گوشی Android')));
             $pairCode=(string)$pair['code'];
-            $message='کد اتصال ۱۰ دقیقه‌ای ساخته شد. آن را داخل خود اپ وارد کن.';
+            $pairLink='https://rado-taxi.sbs/app/pair?code='.rawurlencode($pairCode);
+            $message='کد اتصال ۱۰ دقیقه‌ای ساخته شد. می‌توانی از لینک HTTPS تأییدشده یا ورود دستی کد استفاده کنی.';
         } elseif ($action==='issue_token') {
             $issued=AppAccess::issueToken($pdo,trim((string)($_POST['label']??'توکن دستی')),(int)$_SESSION['admin_id']);
             $issuedToken=(string)$issued['token'];
@@ -59,7 +60,7 @@ require __DIR__.'/_nav.php';
 <?php if($message!==''):?><div class="notice good"><b><?=h($message)?></b></div><?php endif?><?php if($error!==''):?><div class="notice bad"><b><?=h($error)?></b></div><?php endif?>
 
 <div class="panel-grid">
-<section class="panel soft"><div class="panel-head"><div><h2>اتصال امن Android</h2><p>کد اتصال فقط ۱۰ دقیقه اعتبار دارد. برای جلوگیری از ربوده‌شدن callback توسط اپ دیگر، لینک سفارشی تولید نمی‌شود؛ کد را داخل اپ وارد کن.</p></div><span class="badge info">کد یک‌بارمصرف</span></div><form method="post"><input type="hidden" name="csrf" value="<?=$csrf?>"><input type="hidden" name="action" value="create_pairing"><div class="field"><label>نام دستگاه</label><input name="label" value="گوشی Android" maxlength="120"></div><div class="actions" style="margin-top:12px"><button class="btn">ساخت کد اتصال</button></div></form><?php if($pairCode!==''):?><div style="margin-top:14px"><div class="pair-code"><?=h($pairCode)?></div><div class="notice info" style="margin-top:10px">اپ Trade را باز کن، «وارد کردن کد اتصال» را بزن و این کد را وارد کن.</div></div><?php endif?></section>
+<section class="panel soft"><div class="panel-head"><div><h2>اتصال امن Android</h2><p>کد اتصال فقط ۱۰ دقیقه اعتبار دارد. اتصال مستقیم از HTTPS Verified App Link استفاده می‌کند و دیگر از <span dir="ltr">trade://</span> استفاده نمی‌شود.</p></div><span class="badge info">کد یک‌بارمصرف</span></div><form method="post"><input type="hidden" name="csrf" value="<?=$csrf?>"><input type="hidden" name="action" value="create_pairing"><div class="field"><label>نام دستگاه</label><input name="label" value="گوشی Android" maxlength="120"></div><div class="actions" style="margin-top:12px"><button class="btn">ساخت کد اتصال</button></div></form><?php if($pairCode!==''):?><div style="margin-top:14px"><div class="pair-code"><?=h($pairCode)?></div><div class="actions" style="margin-top:10px"><a class="btn safe" href="<?=h($pairLink)?>">اتصال مستقیم امن</a></div><div class="notice info" style="margin-top:10px">اگر اپ مستقیماً باز نشد، در اپ «وارد کردن کد اتصال» را بزن و همین کد را وارد کن.</div></div><?php endif?></section>
 
 <section class="panel"><div class="panel-head"><div><h2>توکن دستی</h2><p>فقط برای شرایط اضطراری یا اتصال دستی؛ مقدار توکن بعد از ساخت دوباره قابل نمایش نیست.</p></div><span class="badge warn">پیشرفته</span></div><form method="post"><input type="hidden" name="csrf" value="<?=$csrf?>"><input type="hidden" name="action" value="issue_token"><div class="field"><label>برچسب توکن</label><input name="label" value="توکن دستی Android" maxlength="120"></div><div class="actions" style="margin-top:12px"><button class="btn secondary">ساخت توکن</button></div></form><?php if($issuedToken!==''):?><div class="secret"><?=h($issuedToken)?></div><?php endif?></section>
 </div>
