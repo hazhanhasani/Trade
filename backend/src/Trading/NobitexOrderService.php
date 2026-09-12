@@ -112,6 +112,11 @@ final class NobitexOrderService
         if($side==='buy'&&str_starts_with($source,'autotrade_nobitex')){
             $client=$this->client();
             if($source!=='autotrade_nobitex_reprice'&&in_array($mode,['market','limit'],true)){
+                // The candidate was already analyzed during the universe scan, but
+                // a live BUY must not re-use that process cache as its "fresh"
+                // execution check. Clear it and read this market again immediately
+                // before planning/submitting the order.
+                NobitexUniverseScanner::resetProcessCache();
                 $market=(new NobitexUniverseScanner())->snapshotSymbol($client,$symbol);
                 $signal=is_array($market['signal']??null)?$market['signal']:[];
                 if(($signal['ready']??false)!==true||(string)($signal['action']??'hold')!=='buy'){
@@ -146,6 +151,7 @@ final class NobitexOrderService
                     'effective_tradable_net_edge_percent'=>(float)($adaptiveExecution['effective_tradable_net_edge_percent']??0.0),
                     'adaptive_execution_model'=>NobitexAdaptiveExecutionPolicy::MODEL,
                     'learning_forced_limit'=>(bool)($adaptiveExecution['forced_limit']??false),
+                    'fresh_execution_revalidation'=>true,
                 ];
             }
             if($price===null||$price<=0) throw new \RuntimeException('Automated BUY has no safe execution price bound.');
@@ -176,9 +182,6 @@ final class NobitexOrderService
             }
         }
 
-        // Final exchange-contract preflight. The same normalized payload is
-        // persisted and submitted, preventing amount/price step drift between
-        // Trade's ledger and Nobitex validation.
         $client??=$this->client();
         $prepared=$client->prepareOrder($payload);
         $orderRules=is_array($prepared['rules']??null)?$prepared['rules']:[];
@@ -198,15 +201,9 @@ final class NobitexOrderService
         $reductionOnlyExit=$side==='sell'&&str_starts_with($source,'autotrade_nobitex');
         if($reductionOnlyExit&&($orderRules['below_minimum']??false)){
             $assessment=[
-                'source'=>$source,
-                'side'=>$side,
-                'mode'=>$mode,
-                'amount'=>$amount,
-                'price'=>$price,
+                'source'=>$source,'side'=>$side,'mode'=>$mode,'amount'=>$amount,'price'=>$price,
                 'estimated_order_value'=>$orderRules['estimated_order_value']??null,
-                'min_order_quote'=>$orderRules['min_order_quote']??null,
-                'quote_asset'=>$quote,
-                'order_rules'=>$orderRules,
+                'min_order_quote'=>$orderRules['min_order_quote']??null,'quote_asset'=>$quote,'order_rules'=>$orderRules,
             ];
             $this->audit('nobitex.exit_below_exchange_minimum',['symbol'=>$symbol]+$assessment);
             throw new NobitexCandidateRejectedException($symbol,'global_portfolio_exit_below_exchange_minimum',$assessment);
@@ -237,21 +234,13 @@ final class NobitexOrderService
         $localId=bin2hex(random_bytes(12));
         $stmt=$pdo->prepare("INSERT INTO orders (local_id,exchange_name,identifier,market_code,side,order_mode,amount,price,status,source,request_json,created_at,updated_at) VALUES (:local,'nobitex',:identifier,:market,:side,:mode,:amount,:price,'submitting',:source,:request,UTC_TIMESTAMP(),UTC_TIMESTAMP())");
         $stmt->execute([
-            ':local'=>$localId,
-            ':identifier'=>$clientOrderId,
-            ':market'=>$symbol,
-            ':side'=>$side,
-            ':mode'=>$mode,
-            ':amount'=>$this->num($amount),
-            ':price'=>$price===null?null:$this->num($price),
-            ':source'=>$source,
+            ':local'=>$localId,':identifier'=>$clientOrderId,':market'=>$symbol,':side'=>$side,':mode'=>$mode,
+            ':amount'=>$this->num($amount),':price'=>$price===null?null:$this->num($price),':source'=>$source,
             ':request'=>json_encode($requestLog,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES),
         ]);
 
         $ambiguousNetworkError=null;
         try{
-            // Never blindly retry this write. If transport fails after Nobitex
-            // accepted the order, a second POST could create duplicate exposure.
             $response=$client->createOrder($payload);
         }catch(\Throwable $e){
             if(NobitexClient::isTransientNetworkError($e->getMessage())){
@@ -259,13 +248,8 @@ final class NobitexOrderService
                 if($response!==null){
                     $ambiguousNetworkError=$e->getMessage();
                     $this->audit('nobitex.order_ambiguous_recovered',[
-                        'local_id'=>$localId,
-                        'client_order_id'=>$clientOrderId,
-                        'source'=>$source,
-                        'symbol'=>$symbol,
-                        'side'=>$side,
-                        'mode'=>$mode,
-                        'network_error'=>mb_substr($e->getMessage(),0,500),
+                        'local_id'=>$localId,'client_order_id'=>$clientOrderId,'source'=>$source,'symbol'=>$symbol,
+                        'side'=>$side,'mode'=>$mode,'network_error'=>mb_substr($e->getMessage(),0,500),
                     ]);
                 }
             }
@@ -281,48 +265,29 @@ final class NobitexOrderService
         $localStatus=$this->localStatusForOrder($order);
         $stmt=$pdo->prepare("UPDATE orders SET exchange_order_id=:id,status=:status,response_json=:response,error_text=:error,updated_at=UTC_TIMESTAMP() WHERE local_id=:local");
         $stmt->execute([
-            ':id'=>$exchangeId!==''?$exchangeId:null,
-            ':status'=>$localStatus,
+            ':id'=>$exchangeId!==''?$exchangeId:null,':status'=>$localStatus,
             ':response'=>json_encode($response,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES),
             ':error'=>$ambiguousNetworkError===null?null:'Recovered after ambiguous network error: '.mb_substr($ambiguousNetworkError,0,850),
             ':local'=>$localId,
         ]);
         $this->audit('nobitex.order_submitted',[
-            'local_id'=>$localId,
-            'exchange_order_id'=>$exchangeId,
-            'side'=>$side,
-            'mode'=>$mode,
-            'source'=>$source,
-            'order_rules'=>$orderRules,
-            'order_value_guard'=>$orderValueGuard,
-            'execution_plan'=>$executionPlan,
-            'execution_learning'=>$executionLearning,
-            'adaptive_execution'=>$adaptiveExecution,
-            'global_risk'=>$globalRisk,
-            'replace_position_id'=>$replacePositionId?:null,
-            'recovered_after_ambiguous_network_error'=>$ambiguousNetworkError!==null,
+            'local_id'=>$localId,'exchange_order_id'=>$exchangeId,'side'=>$side,'mode'=>$mode,'source'=>$source,
+            'order_rules'=>$orderRules,'order_value_guard'=>$orderValueGuard,'execution_plan'=>$executionPlan,
+            'execution_learning'=>$executionLearning,'adaptive_execution'=>$adaptiveExecution,'global_risk'=>$globalRisk,
+            'replace_position_id'=>$replacePositionId?:null,'recovered_after_ambiguous_network_error'=>$ambiguousNetworkError!==null,
         ]);
         try{
             (new TradeNotificationCenter())->emit(
-                'order:'.$localId,
-                'trade',
-                'success',
-                $side==='buy'?'سفارش خرید ارسال شد':'سفارش فروش ارسال شد',
+                'order:'.$localId,'trade','success',$side==='buy'?'سفارش خرید ارسال شد':'سفارش فروش ارسال شد',
                 $symbol.' • '.strtoupper($mode).($ambiguousNetworkError!==null?' • بازیابی پس از قطع ارتباط':''),
                 ['local_id'=>$localId,'symbol'=>$symbol,'side'=>$side,'mode'=>$mode,'ambiguous_recovered'=>$ambiguousNetworkError!==null]
             );
         }catch(\Throwable){}
 
         return[
-            'local_id'=>$localId,
-            'exchange'=>$response,
-            'order'=>$order,
-            'order_rules'=>$orderRules,
-            'order_value_guard'=>$orderValueGuard,
-            'execution_plan'=>$executionPlan,
-            'execution_learning'=>$executionLearning,
-            'adaptive_execution'=>$adaptiveExecution,
-            'global_risk'=>$globalRisk,
+            'local_id'=>$localId,'exchange'=>$response,'order'=>$order,'order_rules'=>$orderRules,
+            'order_value_guard'=>$orderValueGuard,'execution_plan'=>$executionPlan,'execution_learning'=>$executionLearning,
+            'adaptive_execution'=>$adaptiveExecution,'global_risk'=>$globalRisk,
             'ambiguous_submission_recovered'=>$ambiguousNetworkError!==null,
         ];
     }
@@ -381,13 +346,9 @@ final class NobitexOrderService
                 if(!($assessment['allowed']??false)){
                     $reason=(string)($assessment['reason']??'portfolio_intelligence_blocked');
                     if($reason==='strategy_profile_underperforming'&&$this->usesStrategyLearningV2($pdo,$symbol)){
-                        $this->audit('nobitex.intelligence.legacy_strategy_penalty_superseded',[
-                            'symbol'=>$symbol,'source'=>$source,'assessment'=>$assessment,
-                        ]);
+                        $this->audit('nobitex.intelligence.legacy_strategy_penalty_superseded',['symbol'=>$symbol,'source'=>$source,'assessment'=>$assessment]);
                     }else{
-                        $this->audit('nobitex.intelligence.buy_blocked',[
-                            'symbol'=>$symbol,'source'=>$source,'reason'=>$reason,'assessment'=>$assessment,
-                        ]);
+                        $this->audit('nobitex.intelligence.buy_blocked',['symbol'=>$symbol,'source'=>$source,'reason'=>$reason,'assessment'=>$assessment]);
                         throw new NobitexCandidateRejectedException($symbol,$reason,$assessment);
                     }
                 }
@@ -407,10 +368,6 @@ final class NobitexOrderService
             && str_starts_with((string)($details['decision_model']??''),'multi_strategy_regime_router_');
     }
 
-    /**
-     * Recover a possibly-accepted order by idempotently querying its exact
-     * clientOrderId. The create POST is intentionally never repeated.
-     */
     private function recoverAmbiguousSubmission(NobitexClient $client,string $clientOrderId):?array
     {
         foreach([0,250000,750000] as $delayMicros){
@@ -438,9 +395,7 @@ final class NobitexOrderService
     {
         if(NobitexOrderFill::isDone($order)) return 'filled';
         return match(NobitexOrderFill::status($order)){
-            'canceled','cancelled'=>'cancelled',
-            'failed','rejected'=>'failed',
-            default=>'submitted',
+            'canceled','cancelled'=>'cancelled','failed','rejected'=>'failed',default=>'submitted',
         };
     }
 
@@ -450,14 +405,7 @@ final class NobitexOrderService
         $stmt->execute([':error'=>mb_substr($e->getMessage(),0,1000),':local'=>$localId]);
         $this->audit('nobitex.order_failed',['local_id'=>$localId,'error'=>$e->getMessage(),'source'=>$source,'symbol'=>$symbol,'side'=>$side,'mode'=>$mode,'order_rules'=>$orderRules]);
         try{
-            (new TradeNotificationCenter())->emit(
-                'order-failed:'.$localId,
-                'execution',
-                'critical',
-                'ارسال سفارش ناموفق بود',
-                $symbol.' • '.mb_substr($e->getMessage(),0,180),
-                ['local_id'=>$localId,'symbol'=>$symbol,'side'=>$side]
-            );
+            (new TradeNotificationCenter())->emit('order-failed:'.$localId,'execution','critical','ارسال سفارش ناموفق بود',$symbol.' • '.mb_substr($e->getMessage(),0,180),['local_id'=>$localId,'symbol'=>$symbol,'side'=>$side]);
         }catch(\Throwable){}
     }
 
@@ -499,9 +447,6 @@ final class NobitexOrderService
     private function audit(string $event,array $context=[]):void
     {
         $stmt=Database::connection()->prepare('INSERT INTO audit_logs (event_name,context_json,created_at) VALUES (:event,:context,UTC_TIMESTAMP())');
-        $stmt->execute([
-            ':event'=>$event,
-            ':context'=>$context===[]?null:json_encode($context,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE),
-        ]);
+        $stmt->execute([':event'=>$event,':context'=>$context===[]?null:json_encode($context,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE)]);
     }
 }
