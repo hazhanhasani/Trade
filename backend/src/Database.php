@@ -30,10 +30,12 @@ final class Database
             PDO::ATTR_EMULATE_PREPARES => false,
         ]);
 
-        // One cheap due-check per PHP process keeps derived telemetry bounded on
-        // long-running cPanel installs. The maintenance layer never deletes
-        // financial truth tables and never blocks application boot on failure.
-        try { \Trade\Support\DatabaseMaintenance::runIfDue(self::$pdo); } catch (\Throwable) {}
+        // Retention/index maintenance may execute DELETE/ALTER TABLE and must not
+        // add latency or metadata locks to normal web/API requests. cPanel cron
+        // and other CLI entry points still perform the cheap once-per-day due check.
+        if (PHP_SAPI === 'cli') {
+            try { \Trade\Support\DatabaseMaintenance::runIfDue(self::$pdo); } catch (\Throwable) {}
+        }
 
         return self::$pdo;
     }
