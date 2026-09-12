@@ -28,8 +28,8 @@ marketCredentialAssert(!str_contains($store,"SECRET_REQUIRED = ['bit24', 'bitpin
 marketCredentialAssert(str_contains($store,"'execution_allowed' => false")||str_contains($store,"'execution_allowed'=>false"),'Market-data credential sources must never be execution-enabled.');
 marketCredentialAssert(str_contains($exchangeAdmin,'name="source" value="abantether"')&&str_contains($exchangeAdmin,'name="source" value="bitpin"'),'AbanTether and Bitpin credential forms must be present.');
 marketCredentialAssert(str_contains($exchangeAdmin,'API Key بیت‌پین')&&str_contains($exchangeAdmin,'Secret Key بیت‌پین'),'Bitpin Market Data credential fields are missing.');
-marketCredentialAssert(!str_contains($dashboard,"$exchanges['bitpin']"),'Dashboard still indexes Bitpin as an execution exchange.');
-marketCredentialAssert(str_contains($dashboard,"is_array($exchanges['nobitex'] ?? null)"),'Dashboard must guard missing Nobitex exchange status.');
+marketCredentialAssert(!str_contains($dashboard,"\$exchanges['bitpin']"),'Dashboard still indexes Bitpin as an execution exchange.');
+marketCredentialAssert(str_contains($dashboard,"is_array(\$exchanges['nobitex'] ?? null)"),'Dashboard must guard missing Nobitex exchange status.');
 marketCredentialAssert(!str_contains($hub,'/usr/authenticate/')&&!str_contains($hub,'/odr/orders/')&&!str_contains($hub,'/wlt/wallets/'),'MarketDataHub must stay free of Bitpin private/execution endpoints.');
 
 // The Bit24 read-only order-book plan must use only X-BIT24-APIKEY.
