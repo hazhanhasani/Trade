@@ -21,6 +21,7 @@ on:
       - 'backend/tests/bit24_credentials_test.php'
       - 'backend/tests/market_data_credentials_regression_test.php'
       - 'backend/tests/bitpin_market_data_only_cleanup_test.php'
+      - 'backend/tests/nobitex_ambiguous_submission_recovery_test.php'
       - 'android/app/src/main/java/ir/trade/app/data/TradeApi.kt'
       - '.github/workflows/multi-exchange-market-data.yml'
   pull_request:
@@ -60,5 +61,7 @@ jobs:
         run: php backend/tests/bitpin_market_data_only_cleanup_test.php
       - name: Nobitex order rules regression
         run: php backend/tests/nobitex_order_rules_test.php
+      - name: Nobitex ambiguous submission recovery regression
+        run: php backend/tests/nobitex_ambiguous_submission_recovery_test.php
       - name: Existing adaptive execution regression
         run: php backend/tests/adaptive_execution_policy_test.php
