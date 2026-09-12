@@ -13,6 +13,10 @@ final class NobitexClient
     private string $privateKey;
     private int $timeout;
 
+    /** @var array<string,mixed>|null */
+    private static ?array $optionsCache = null;
+    private static int $optionsCacheAt = 0;
+
     public function __construct(array $config)
     {
         $this->baseUrl = rtrim((string) ($config['base_url'] ?? 'https://apiv2.nobitex.ir'), '/');
@@ -30,7 +34,29 @@ final class NobitexClient
     public function allOrderBooks(): array { return $this->request('GET', '/v3/orderbook/all', [], false); }
     public function orderBook(string $symbol): array { return $this->request('GET', '/v3/orderbook/' . rawurlencode($this->safeSymbol($symbol)), [], false); }
     public function stats(array $query = []): array { return $this->request('GET', '/market/stats', $query, false); }
-    public function options(): array { return $this->request('GET', '/v2/options', [], false); }
+
+    public function options(bool $force = false): array
+    {
+        if (!$force && self::$optionsCache !== null && time() - self::$optionsCacheAt <= 30) {
+            return self::$optionsCache;
+        }
+        $response = $this->request('GET', '/v2/options', [], false);
+        self::$optionsCache = $response;
+        self::$optionsCacheAt = time();
+        return $response;
+    }
+
+    /**
+     * Normalizes a spot order against the live Nobitex amount/price steps.
+     * This method is public so the order service can persist exactly the same
+     * amount/price that will be sent to the exchange.
+     *
+     * @return array{payload:array<string,mixed>,rules:array<string,mixed>,valid:bool,reason:?string}
+     */
+    public function prepareOrder(array $payload): array
+    {
+        return NobitexOrderRules::prepare($payload, $this->options());
+    }
 
     public function ohlc(string $symbol, string $resolution = '15', int $countback = 120): array
     {
@@ -87,7 +113,7 @@ final class NobitexClient
                     CURLOPT_RETURNTRANSFER=>true,
                     CURLOPT_CONNECTTIMEOUT=>min(5, $this->timeout),
                     CURLOPT_TIMEOUT=>$this->timeout,
-                    CURLOPT_HTTPHEADER=>['Accept: application/json','User-Agent: Trade/1.2.3'],
+                    CURLOPT_HTTPHEADER=>['Accept: application/json','User-Agent: TraderBot/Trade'],
                     CURLOPT_FOLLOWLOCATION=>false,
                     CURLOPT_MAXREDIRS=>0,
                     CURLOPT_PROTOCOLS=>CURLPROTO_HTTPS,
@@ -149,7 +175,14 @@ final class NobitexClient
         return $this->authenticatedRead(fn() => $this->request('POST','/market/orders/status',$payload,true));
     }
 
-    public function createOrder(array $payload): array { return $this->request('POST','/market/orders/add',$payload,true); }
+    public function createOrder(array $payload): array
+    {
+        $prepared = $this->prepareOrder($payload);
+        if (!($prepared['valid'] ?? false)) {
+            throw new \InvalidArgumentException('Nobitex order rules rejected payload: ' . (string)($prepared['reason'] ?? 'invalid_order'));
+        }
+        return $this->request('POST','/market/orders/add',(array)$prepared['payload'],true);
+    }
 
     public function cancelOrder(?string $id = null, ?string $clientOrderId = null): array
     {
@@ -186,7 +219,7 @@ final class NobitexClient
     {
         $method=strtoupper($method);$path='/'.ltrim($path,'/');$body='';$fullPath=$path;
         if($method==='GET'&&$data!==[]){$fullPath.='?'.http_build_query($data,'','&',PHP_QUERY_RFC3986);}elseif($method!=='GET'){$body=json_encode($data,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);}
-        $headers=['Accept: application/json','User-Agent: Trade/1.2.3'];if($method!=='GET')$headers[]='Content-Type: application/json';if($authenticated)foreach($this->authHeaders($method,$fullPath,$body)as$header)$headers[]=$header;
+        $headers=['Accept: application/json','User-Agent: TraderBot/Trade'];if($method!=='GET')$headers[]='Content-Type: application/json';if($authenticated)foreach($this->authHeaders($method,$fullPath,$body)as$header)$headers[]=$header;
 
         $bases = $authenticated
             ? [$this->baseUrl]
@@ -239,6 +272,40 @@ final class NobitexHttpException extends \RuntimeException
 {
     public function __construct(public readonly int $statusCode,public readonly array $response)
     {
-        $message='Nobitex HTTP '.$statusCode;foreach(['message','detail','error','code','errmsg']as$key){$value=$response[$key]??null;if(is_scalar($value)&&trim((string)$value)!==''){$message.=' — '.mb_substr(trim((string)$value),0,220);break;}}parent::__construct($message);
+        $code=self::scalar($response['code']??null);
+        $human='';
+        foreach(['message','detail','error','errmsg']as$key){$value=self::scalar($response[$key]??null);if($value!==''){$human=$value;break;}}
+        $message='Nobitex HTTP '.$statusCode;
+        if($code!=='')$message.=' ['.mb_substr($code,0,100).']';
+        if($human!=='')$message.=' — '.mb_substr($human,0,260);
+
+        $details=self::diagnosticDetails($response);
+        if($details!=='')$message.=' | '.mb_substr($details,0,420);
+        parent::__construct($message);
+    }
+
+    public function apiCode(): string
+    {
+        return self::scalar($this->response['code']??null);
+    }
+
+    private static function diagnosticDetails(array $response): string
+    {
+        $parts=[];
+        foreach(['reason','validation','validationErrors','errors','data']as$key){
+            if(!array_key_exists($key,$response))continue;
+            $value=$response[$key];
+            if(is_scalar($value)){$text=trim((string)$value);if($text!=='')$parts[]=$key.'='.$text;continue;}
+            if(is_array($value)){
+                $json=json_encode($value,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_INVALID_UTF8_SUBSTITUTE);
+                if(is_string($json)&&$json!=='[]'&&$json!=='{}')$parts[]=$key.'='.$json;
+            }
+        }
+        return implode(' ',array_slice($parts,0,3));
+    }
+
+    private static function scalar(mixed $value): string
+    {
+        return is_scalar($value)?trim((string)$value):'';
     }
 }
