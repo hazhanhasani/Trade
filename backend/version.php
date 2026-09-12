@@ -2,7 +2,6 @@
 
 declare(strict_types=1);
 
-// Multi-exchange market intelligence release: Nobitex is the sole execution
-// venue; AbanTether, Bit24, Tabdeal and Bitpin are read-only market-data
-// sources behind normalized units, robust consensus and execution hardening.
-return '1.4.30';
+// Bit24 credentials hotfix: require and securely store both the API key and
+// the provider-issued secret/private key while keeping Bit24 market-data-only.
+return '1.4.31';
