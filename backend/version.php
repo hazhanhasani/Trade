@@ -2,5 +2,5 @@
 
 declare(strict_types=1);
 
-// Complete Bitpin legacy-execution purge plus Android compile correction.
-return '1.4.34';
+// Fix AbanTether credential persistence, restore Bitpin Market Data credentials, and harden the admin dashboard.
+return '1.4.35';

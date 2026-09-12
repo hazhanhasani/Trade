@@ -43,7 +43,9 @@ final class Crypto
     {
         $raw = base64_decode($payload, true);
         $key = base64_decode($base64Key, true);
-        if ($raw === false || $key === false || strlen($key) !== 32 || strlen($raw) < 29) {
+        // AES-256-GCM has a valid 28-byte envelope for an empty plaintext:
+        // 12-byte IV + 16-byte authentication tag + 0-byte ciphertext.
+        if ($raw === false || $key === false || strlen($key) !== 32 || strlen($raw) < 28) {
             throw new \RuntimeException('Invalid encrypted payload.');
         }
 
