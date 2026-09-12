@@ -25,7 +25,8 @@ expectLivePanel(str_contains($api, 'wallet_total_toman'), 'Portfolio value must 
 expectLivePanel(str_contains($api, 'Cache-Control'), 'Android live requests must explicitly bypass HTTP caches.');
 
 expectLivePanel(str_contains($app, 'mutableStateOf(!snapshotJson.isNullOrBlank())'), 'A cached snapshot must start in offline state.');
-expectLivePanel(str_contains($app, 'delay(10_000)'), 'Android must auto-refresh live data every 10 seconds.');
+expectLivePanel(str_contains($app, 'private const val LIVE_REFRESH_MS = 30_000L'), 'Heavy command-center polling must use the bounded 30-second refresh interval.');
+expectLivePanel(str_contains($app, 'delay(LIVE_REFRESH_MS)'), 'Android live refresh loop must use the shared bounded interval.');
 expectLivePanel(
     str_contains($app, 'داده زنده') || str_contains($app, 'Live Panel'),
     'Android must visibly identify live panel mode, including the localized Persian label.'
