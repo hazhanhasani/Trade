@@ -73,12 +73,15 @@ appDebugAssert(str_contains($app,'reports.optJSONObject("by_quote")'),'Reports m
 appDebugAssert(str_contains($app,'private val FaLocale = Locale("fa", "IR")'),'Primary Android dashboard numbers must use Persian locale formatting.');
 appDebugAssert(str_contains($app,'Futures/معاملات اهرمی در این مسیر اجرا نمی‌شوند'),'App must make the current Spot-only execution boundary explicit.');
 
-// Specialized deep-link dashboards may observe learning/rotation, but they must
-// bootstrap the same authenticated status/capability contract as the main app.
+// Specialized dashboards may observe learning/rotation, but they must bootstrap
+// the same authenticated status/capability contract as the main app.
 appDebugAssert(str_contains($rotation,'val status = api.status()'),'Rotation page must authenticate through the canonical status endpoint before loading data.');
 appDebugAssert(str_contains($rotation,'api.rotationStatus(20)'),'Rotation page must use the read-only rotation monitor endpoint.');
+appDebugAssert(str_contains($rotation,'چرخش هوشمند سبد')&&!str_contains($rotation,'RotationMetric("Pending"')&&!str_contains($rotation,'RotationMetric("Cooldown"'),'Rotation dashboard user-facing controls must remain Persian-localized.');
 appDebugAssert(str_contains($learning,'val status = api.status()'),'Strategy-learning page must authenticate through the canonical status endpoint before loading data.');
 appDebugAssert(str_contains($learning,'api.strategyLearning(240)')&&str_contains($learning,'api.edgeCalibration()'),'Strategy-learning page must stay on read-only learning/calibration endpoints.');
+appDebugAssert(str_contains($learning,'"high_volatility_momentum_v3" -> "مومنتوم نوسان شدید"'),'Learning UI must stay aligned with the fourth high-volatility strategy.');
+appDebugAssert(str_contains($learning,'روند • شکست محدوده • بازگشت به میانگین • نوسان شدید'),'Learning dashboard must describe all active strategy families in Persian.');
 
 // Futures/leveraged execution is intentionally absent from the current Spot
 // product. Do not silently introduce leverage through app code or deep links.
@@ -86,4 +89,4 @@ foreach([$api,$entry,$app,$rotation,$learning] as $source){
     appDebugAssert(!preg_match('/createFuture|openShort|setLeverage|liquidationOrder|futuresOrder/i',$source),'Android must not expose an undeclared Futures/leveraged execution path.');
 }
 
-echo "App pairing/notification/state/scroll/chart/page-boundary regression tests passed.\n";
+echo "App pairing/notification/state/scroll/chart/localization/page-boundary regression tests passed.\n";
