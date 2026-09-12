@@ -38,41 +38,68 @@ class TradeAlertWorker(appContext: Context, params: WorkerParameters) : Coroutin
         } else JSONObject()
         if (!rules.optBoolean("enabled", true)) return Result.success()
 
-        val response = runCatching { api.notifications(40, true) }.getOrNull() ?: return Result.retry()
+        // Keep unread notifications pending on the server when Android permission
+        // is missing. Advancing the local cursor here used to silently discard
+        // alerts before the user granted POST_NOTIFICATIONS.
+        if (!canNotify()) return Result.success()
+
+        val response = runCatching { api.notifications(100, true) }.getOrNull() ?: return Result.retry()
         if (!response.ok) return Result.retry()
         val data = runCatching { JSONObject(response.body).optJSONObject("data") }.getOrNull() ?: return Result.success()
         val items = data.optJSONArray("items") ?: return Result.success()
-        val lastId = prefs.lastAlertId()
+        if (items.length() == 0) return Result.success()
+
         val minPriority = priorityValue(rules.optString("min_priority", "warning"))
         val categories = mutableSetOf<String>()
         rules.optJSONArray("categories")?.let { array ->
             for (i in 0 until array.length()) array.optString(i).takeIf { it.isNotBlank() }?.let(categories::add)
         }
 
-        var selected: JSONObject? = null
+        val received = mutableListOf<JSONObject>()
         for (i in 0 until items.length()) {
             val item = items.optJSONObject(i) ?: continue
-            val id = item.optLong("id", 0L)
-            if (id <= lastId) continue
-            val priority = item.optString("priority", "info")
-            val category = item.optString("category", "system")
-            if (priorityValue(priority) < minPriority) continue
-            if (categories.isNotEmpty() && category !in categories && priority != "critical") continue
-            if (selected == null || id > selected!!.optLong("id", 0L)) selected = item
+            if (item.optLong("id", 0L) > 0L) received += item
         }
+        if (received.isEmpty()) return Result.success()
 
-        val item = selected ?: return Result.success()
-        val id = item.optLong("id", 0L)
-        if (canNotify()) {
-            ensureChannel()
+        val eligible = received
+            .filter { item ->
+                val priority = item.optString("priority", "info")
+                val category = item.optString("category", "system")
+                priorityValue(priority) >= minPriority &&
+                    (categories.isEmpty() || category in categories || priority == "critical")
+            }
+            .sortedBy { it.optLong("id", 0L) }
+
+        ensureChannel()
+        val visible = eligible.takeLast(MAX_VISIBLE_NOTIFICATIONS)
+        visible.forEach { item ->
+            val id = item.optLong("id", 0L)
             showNotification(
                 title = item.optString("title", "Trade"),
                 body = item.optString("body", "رویداد جدید معاملاتی ثبت شد."),
                 critical = item.optString("priority") == "critical",
-                notificationId = (id % Int.MAX_VALUE).toInt().coerceAtLeast(1),
+                notificationId = notificationIdFor(id),
             )
         }
-        prefs.setLastAlertId(id)
+        if (eligible.size > MAX_VISIBLE_NOTIFICATIONS) {
+            val hidden = eligible.size - MAX_VISIBLE_NOTIFICATIONS
+            showNotification(
+                title = "هشدارهای جدید Trade",
+                body = "$hidden هشدار دیگر ثبت شد؛ آخرین موارد مهم نمایش داده شدند.",
+                critical = eligible.any { it.optString("priority") == "critical" },
+                notificationId = SUMMARY_NOTIFICATION_ID,
+            )
+        }
+
+        // The endpoint returns unread notifications only. Once this worker has
+        // evaluated the full server batch against the user's notification rules,
+        // acknowledge it atomically on the server so unread_count and future
+        // polling cannot be clogged by the same rows forever.
+        val ack = runCatching { api.markNotificationRead(all = true) }.getOrNull()
+        if (ack?.ok != true) return Result.retry()
+
+        prefs.setLastAlertId(received.maxOf { it.optLong("id", 0L) })
         return Result.success()
     }
 
@@ -83,7 +110,7 @@ class TradeAlertWorker(appContext: Context, params: WorkerParameters) : Coroutin
         if (Build.VERSION.SDK_INT >= 26) {
             val manager = applicationContext.getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "Trade Alerts", NotificationManager.IMPORTANCE_HIGH).apply {
+                NotificationChannel(CHANNEL_ID, "هشدارهای Trade", NotificationManager.IMPORTANCE_HIGH).apply {
                     description = "هشدارهای ریسک، اجرا و معاملات Trade"
                 },
             )
@@ -96,7 +123,7 @@ class TradeAlertWorker(appContext: Context, params: WorkerParameters) : Coroutin
         }
         val pending = PendingIntent.getActivity(
             applicationContext,
-            10,
+            notificationId,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -112,6 +139,8 @@ class TradeAlertWorker(appContext: Context, params: WorkerParameters) : Coroutin
         NotificationManagerCompat.from(applicationContext).notify(notificationId, notification)
     }
 
+    private fun notificationIdFor(id: Long): Int = (id % (Int.MAX_VALUE - 10_000)).toInt().coerceAtLeast(1)
+
     private fun priorityValue(value: String): Int = when (value.lowercase()) {
         "critical" -> 3
         "warning" -> 2
@@ -122,6 +151,8 @@ class TradeAlertWorker(appContext: Context, params: WorkerParameters) : Coroutin
     companion object Scheduler {
         private const val CHANNEL_ID = "trade_alerts_v1"
         private const val WORK_NAME = "trade_smart_alerts"
+        private const val MAX_VISIBLE_NOTIFICATIONS = 6
+        private const val SUMMARY_NOTIFICATION_ID = 2_147_470_001
 
         fun schedule(context: Context) {
             val prefs = TradePreferences(context)

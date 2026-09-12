@@ -33,6 +33,19 @@ final class TradeNotificationCenter
         $stmt=$pdo->prepare('UPDATE trade_notifications SET read_at=COALESCE(read_at,UTC_TIMESTAMP()) WHERE id=:id');$stmt->execute([':id'=>$id]);
     }
 
+    /** Mark exactly the notifications an app worker has consumed, in one query. */
+    public function markReadMany(array $ids,?PDO $pdo=null):int
+    {
+        $pdo??=Database::connection();$this->ensure($pdo);
+        $clean=array_values(array_unique(array_filter(array_map(static fn($id):int=>(int)$id,$ids),static fn(int $id):bool=>$id>0)));
+        $clean=array_slice($clean,0,100);
+        if($clean===[])return 0;
+        $placeholders=[];$params=[];
+        foreach($clean as$i=>$id){$key=':id'.$i;$placeholders[]=$key;$params[$key]=$id;}
+        $stmt=$pdo->prepare('UPDATE trade_notifications SET read_at=COALESCE(read_at,UTC_TIMESTAMP()) WHERE id IN ('.implode(',',$placeholders).')');
+        $stmt->execute($params);return$stmt->rowCount();
+    }
+
     public function emit(string $eventKey,string $category,string $priority,string $title,string $body,array $context=[],?PDO $pdo=null):void
     {
         $pdo??=Database::connection();$this->ensure($pdo);
@@ -54,7 +67,7 @@ final class TradeNotificationCenter
 
         $exchange='unknown';$reason='';$status='failed';
         $exchanges=is_array($summary['exchanges']??null)?$summary['exchanges']:[];
-        foreach($exchanges as $name=>$row){
+        foreach($exchanges as$name=>$row){
             if(!is_array($row))continue;
             $rowStatus=strtolower(trim((string)($row['status']??'')));
             if($rowStatus!=='failed')continue;
@@ -64,12 +77,8 @@ final class TradeNotificationCenter
             break;
         }
 
-        if($reason===''){
-            $reason=trim((string)($summary['error']??$summary['message']??''));
-        }
-        if($reason===''){
-            $reason='علت دقیق در خلاصه این Run ثبت نشده است؛ جزئیات Error Log را بررسی کنید.';
-        }
+        if($reason===''){$reason=trim((string)($summary['error']??$summary['message']??''));}
+        if($reason===''){$reason='علت دقیق در خلاصه این Run ثبت نشده است؛ جزئیات Error Log را بررسی کنید.';}
 
         $reason=mb_substr(preg_replace('/\s+/u',' ',$reason)??$reason,0,420);
         $backendVersion=trim((string)($summary['backend_version']??$run['backend_version']??''));
@@ -93,7 +102,7 @@ final class TradeNotificationCenter
     {
         try{
             $events=$pdo->query("SELECT id,level,event_name,context_json,created_at FROM nobitex_autotrade_events ORDER BY id DESC LIMIT 160")->fetchAll();
-            foreach(array_reverse($events) as $e){
+            foreach(array_reverse($events)as$e){
                 $name=(string)$e['event_name'];$ctx=json_decode((string)($e['context_json']??''),true);if(!is_array($ctx))$ctx=[];
                 [$category,$priority,$title,$body]=$this->mapTradingEvent($name,(string)$e['level'],$ctx);
                 if($title==='')continue;
@@ -102,49 +111,29 @@ final class TradeNotificationCenter
         }catch(\Throwable){}
 
         try{
-            // Older versions imported every historical failed run as a fresh app
-            // notification. Mark those old generic rows read so the Android worker
-            // cannot drip-feed stale failures one by one after an update.
             $pdo->exec("UPDATE trade_notifications SET read_at=COALESCE(read_at,UTC_TIMESTAMP())
                 WHERE read_at IS NULL
                   AND event_key LIKE 'bot-run-failed:%'
                   AND body='یکی از چرخه‌های Cron با وضعیت failed پایان یافته است.'
                   AND created_at < (UTC_TIMESTAMP() - INTERVAL 30 MINUTE)");
 
-            // App notifications are near-real-time signals, not an archive. The
-            // full history remains in bot_runs and admin logs. A 30-minute window
-            // covers the 15-minute Android background worker while preventing old
-            // failures from resurfacing hours later.
             $runs=$pdo->query("SELECT id,run_id,status,summary_json,started_at,finished_at
                 FROM bot_runs
                 WHERE status='failed'
                   AND COALESCE(finished_at,started_at) >= (UTC_TIMESTAMP() - INTERVAL 30 MINUTE)
                 ORDER BY id DESC LIMIT 30")->fetchAll();
 
-            foreach($runs as $r){
+            foreach($runs as$r){
                 $diag=self::failedRunDiagnostic($r);
-                $bucket=intdiv((int)$diag['timestamp'],600); // same cause => max one alert / 10 min
+                $bucket=intdiv((int)$diag['timestamp'],600);
                 $eventKey='bot-run-failed:'.$diag['fingerprint'].':'.$bucket;
                 $exchangeLabel=$diag['exchange']==='unknown'?'نامشخص':strtoupper((string)$diag['exchange']);
                 $body='چرخه Cron برای '.$exchangeLabel.' با خطا پایان یافت. علت: '.$diag['reason'];
                 if($diag['backend_version']!=='')$body.=' | Backend '.$diag['backend_version'];
-                $this->emit(
-                    $eventKey,
-                    'system',
-                    'warning',
-                    'خطای اجرای ربات',
-                    $body,
-                    [
-                        'run_id'=>$diag['run_id'],
-                        'exchange'=>$diag['exchange'],
-                        'status'=>'failed',
-                        'reason'=>$diag['reason'],
-                        'backend_version'=>$diag['backend_version'],
-                        'started_at'=>$r['started_at']??null,
-                        'finished_at'=>$r['finished_at']??null,
-                    ],
-                    $pdo
-                );
+                $this->emit($eventKey,'system','warning','خطای اجرای ربات',$body,[
+                    'run_id'=>$diag['run_id'],'exchange'=>$diag['exchange'],'status'=>'failed','reason'=>$diag['reason'],
+                    'backend_version'=>$diag['backend_version'],'started_at'=>$r['started_at']??null,'finished_at'=>$r['finished_at']??null,
+                ],$pdo);
             }
         }catch(\Throwable){}
     }

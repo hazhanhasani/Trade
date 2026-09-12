@@ -41,11 +41,17 @@ final class RiskManager
             $maxPosition = min($maxPosition, 20.0);
             $daily = min($daily, 8.0);
             $score = max(50, $score);
+            // Fast-cycle execution scans fresh order books roughly every 12s.
+            // A legacy 30/45 minute cooldown silently defeats that architecture.
+            // Keep a small anti-churn interval while allowing other risk/edge
+            // gates to remain authoritative.
+            $cooldown = min($cooldown, 3);
         } else {
             $position = min($position, 7.5);
             $maxPosition = min($maxPosition, 12.0);
             $daily = min($daily, 5.0);
             $score = max(58, $score);
+            $cooldown = min($cooldown, 3);
         }
 
         // Both adaptive layers are reduction-only. Portfolio Intelligence learns

@@ -9,6 +9,7 @@ use PDO;
 final class Database
 {
     private static ?PDO $pdo = null;
+    private static int $transactionDepth = 0;
 
     public static function connection(): PDO
     {
@@ -29,20 +30,56 @@ final class Database
             PDO::ATTR_EMULATE_PREPARES => false,
         ]);
 
+        // One cheap due-check per PHP process keeps derived telemetry bounded on
+        // long-running cPanel installs. The maintenance layer never deletes
+        // financial truth tables and never blocks application boot on failure.
+        try { \Trade\Support\DatabaseMaintenance::runIfDue(self::$pdo); } catch (\Throwable) {}
+
         return self::$pdo;
     }
 
+    /**
+     * Transaction wrapper with deterministic nested savepoints.
+     *
+     * Trading/accounting code frequently composes helpers that are transactional
+     * on their own. Native PDO does not support beginTransaction() inside an
+     * active transaction, so nested calls use SAVEPOINT instead of failing or
+     * rolling back an unrelated outer unit of work.
+     */
     public static function transaction(callable $callback): mixed
     {
         $pdo = self::connection();
-        $pdo->beginTransaction();
+        $outermost = self::$transactionDepth === 0;
+        $savepoint = 'trade_sp_' . (self::$transactionDepth + 1);
+
+        if ($outermost) {
+            $pdo->beginTransaction();
+        } else {
+            $pdo->exec('SAVEPOINT ' . $savepoint);
+        }
+
+        self::$transactionDepth++;
         try {
             $result = $callback($pdo);
-            $pdo->commit();
+            self::$transactionDepth--;
+
+            if ($outermost) {
+                if ($pdo->inTransaction()) $pdo->commit();
+            } elseif ($pdo->inTransaction()) {
+                $pdo->exec('RELEASE SAVEPOINT ' . $savepoint);
+            }
+
             return $result;
         } catch (\Throwable $e) {
+            self::$transactionDepth = max(0, self::$transactionDepth - 1);
+
             if ($pdo->inTransaction()) {
-                $pdo->rollBack();
+                if ($outermost) {
+                    $pdo->rollBack();
+                } else {
+                    $pdo->exec('ROLLBACK TO SAVEPOINT ' . $savepoint);
+                    try { $pdo->exec('RELEASE SAVEPOINT ' . $savepoint); } catch (\Throwable) {}
+                }
             }
             throw $e;
         }

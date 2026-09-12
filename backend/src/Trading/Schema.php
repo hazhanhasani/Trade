@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Trade\Trading;
 
 use PDO;
+use Trade\Config;
 use Trade\Database;
 
 /** Canonical shared settings and one-time retirement cleanup for execution. */
@@ -19,10 +20,22 @@ final class Schema
         $pdo->exec("CREATE TABLE IF NOT EXISTS nobitex_autotrade_settings (id TINYINT UNSIGNED NOT NULL PRIMARY KEY,enabled TINYINT(1) NOT NULL DEFAULT 0,quote_asset VARCHAR(20) NOT NULL DEFAULT 'IRT',risk_profile VARCHAR(20) NOT NULL DEFAULT 'balanced',position_percent DECIMAL(8,4) NOT NULL DEFAULT 5.0000,max_position_percent DECIMAL(8,4) NOT NULL DEFAULT 10.0000,stop_loss_percent DECIMAL(8,4) NOT NULL DEFAULT 3.0000,take_profit_percent DECIMAL(8,4) NOT NULL DEFAULT 6.0000,daily_loss_limit_percent DECIMAL(8,4) NOT NULL DEFAULT 5.0000,min_signal_score SMALLINT NOT NULL DEFAULT 60,cooldown_minutes SMALLINT UNSIGNED NOT NULL DEFAULT 15,last_trade_at DATETIME NULL,updated_at DATETIME NOT NULL,INDEX idx_nobitex_autotrade_settings_enabled (enabled)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
         if(self::tableExists($pdo,'autotrade_settings')){$legacy=$pdo->query('SELECT * FROM autotrade_settings WHERE id=1 LIMIT 1')->fetch();if(is_array($legacy)){$stmt=$pdo->prepare("INSERT INTO nobitex_autotrade_settings (id,enabled,quote_asset,risk_profile,position_percent,max_position_percent,stop_loss_percent,take_profit_percent,daily_loss_limit_percent,min_signal_score,cooldown_minutes,last_trade_at,updated_at) VALUES (1,0,:quote,:profile,:position,:max_position,:stop,:take,:daily,:score,:cooldown,:last_trade,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE quote_asset=VALUES(quote_asset),risk_profile=VALUES(risk_profile),position_percent=VALUES(position_percent),max_position_percent=VALUES(max_position_percent),stop_loss_percent=VALUES(stop_loss_percent),take_profit_percent=VALUES(take_profit_percent),daily_loss_limit_percent=VALUES(daily_loss_limit_percent),min_signal_score=VALUES(min_signal_score),cooldown_minutes=VALUES(cooldown_minutes),last_trade_at=VALUES(last_trade_at),updated_at=UTC_TIMESTAMP()");$quote=strtoupper((string)($legacy['quote_asset']??'IRT'));$stmt->execute([':quote'=>in_array($quote,['IRT','USDT'],true)?$quote:'IRT',':profile'=>(string)($legacy['risk_profile']??'balanced'),':position'=>(float)($legacy['position_percent']??5),':max_position'=>(float)($legacy['max_position_percent']??10),':stop'=>(float)($legacy['stop_loss_percent']??3),':take'=>(float)($legacy['take_profit_percent']??6),':daily'=>(float)($legacy['daily_loss_limit_percent']??5),':score'=>(int)($legacy['min_signal_score']??60),':cooldown'=>(int)($legacy['cooldown_minutes']??15),':last_trade'=>$legacy['last_trade_at']??null]);}}
         $pdo->exec("INSERT IGNORE INTO nobitex_autotrade_settings (id,enabled,quote_asset,risk_profile,position_percent,max_position_percent,stop_loss_percent,take_profit_percent,daily_loss_limit_percent,min_signal_score,cooldown_minutes,updated_at) VALUES (1,0,'IRT','balanced',5,10,3,6,5,60,15,UTC_TIMESTAMP())");
+        self::ensureConfiguredRuntimeDefaults($pdo);
         self::cleanupLegacyExecution($pdo);self::$ensured=true;
     }
 
     public static function settings(?PDO $pdo=null):array{self::ensure();$pdo??=Database::connection();$row=$pdo->query('SELECT * FROM nobitex_autotrade_settings WHERE id=1')->fetch();if(!$row)throw new \RuntimeException('Nobitex auto-trading settings row is missing.');return$row;}
+
+    private static function ensureConfiguredRuntimeDefaults(PDO $pdo):void
+    {
+        // The installer stores max_orders_per_hour in protected config. Older
+        // releases never copied it into the DB key used by NobitexOrderService,
+        // so the runtime silently fell back to 30. Seed the real guard exactly
+        // once while preserving any later Admin/user override.
+        $maxOrders=max(5,min(120,(int)Config::get('trading.max_orders_per_hour',30)));
+        $stmt=$pdo->prepare("INSERT IGNORE INTO settings (key_name,value_text,updated_at) VALUES ('nobitex_max_buy_orders_per_hour',:value,UTC_TIMESTAMP())");
+        $stmt->execute([':value'=>(string)$maxOrders]);
+    }
 
     private static function cleanupLegacyExecution(PDO $pdo):void
     {

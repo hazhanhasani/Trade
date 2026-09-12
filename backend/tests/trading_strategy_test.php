@@ -65,6 +65,22 @@ $adverseSignal = $engine->analyze($adverse, $prices);
 assertTrue((float)($adverseSignal['cost_model']['adverse_flow_reserve_percent'] ?? 0) > 0.0, 'negative order-book imbalance should reserve adverse-flow cost');
 
 $risk = new RiskManager();
+$balancedSettings = $risk->normalizeSettings([
+    'risk_profile'=>'balanced','position_percent'=>3,'max_position_percent'=>8,'stop_loss_percent'=>3,
+    'take_profit_percent'=>6,'daily_loss_limit_percent'=>3,'min_signal_score'=>78,'cooldown_minutes'=>45,
+]);
+$aggressiveSettings = $risk->normalizeSettings([
+    'risk_profile'=>'aggressive','position_percent'=>5,'max_position_percent'=>12,'stop_loss_percent'=>4,
+    'take_profit_percent'=>8,'daily_loss_limit_percent'=>5,'min_signal_score'=>72,'cooldown_minutes'=>30,
+]);
+$safeSettings = $risk->normalizeSettings([
+    'risk_profile'=>'safe','position_percent'=>2,'max_position_percent'=>6,'stop_loss_percent'=>3,
+    'take_profit_percent'=>5,'daily_loss_limit_percent'=>2,'min_signal_score'=>82,'cooldown_minutes'=>3,
+]);
+assertTrue((int)$balancedSettings['cooldown_minutes'] <= 3, 'balanced profile must not restore legacy 45-minute cooldown');
+assertTrue((int)$aggressiveSettings['cooldown_minutes'] <= 3, 'aggressive profile must not restore legacy 30-minute cooldown');
+assertTrue((int)$safeSettings['cooldown_minutes'] >= 30, 'safe profile must preserve its conservative cooldown floor');
+
 $stalePosition = [
     'entry_price' => 100.0,
     'amount' => 1.0,

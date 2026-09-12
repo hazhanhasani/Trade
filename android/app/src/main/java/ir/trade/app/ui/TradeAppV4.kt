@@ -21,14 +21,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Assessment
 import androidx.compose.material.icons.rounded.AutoGraph
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Lock
-import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.ShowChart
@@ -79,8 +80,10 @@ import ir.trade.app.BuildConfig
 import ir.trade.app.TradeAlertWorker
 import ir.trade.app.data.TradeApi
 import ir.trade.app.data.TradePreferences
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.NumberFormat
@@ -101,6 +104,7 @@ private val V4AmberSoft = Color(0xFFFFF5E5)
 private val V4Blue = Color(0xFF2864D7)
 private val V4BlueSoft = Color(0xFFEDF4FF)
 private val V4Stroke = Color(0xFFE5E8F0)
+private val FaLocale = Locale("fa", "IR")
 
 private data class V4Nav(val label: String, val icon: ImageVector)
 
@@ -112,9 +116,11 @@ fun TradeAppV4() {
     val api = remember(prefs.serverUrl(), prefs.apiToken()) { TradeApi(prefs.serverUrl(), prefs.apiToken()) }
 
     var nav by rememberSaveable { mutableIntStateOf(0) }
-    var snapshotJson by rememberSaveable { mutableStateOf(prefs.offlineSnapshot()) }
+    // The command-center JSON can become large. It must stay out of Android's
+    // saved-instance-state Bundle; the encrypted offline copy already persists it.
+    var snapshotJson by remember { mutableStateOf(prefs.offlineSnapshot()) }
     var loading by remember { mutableStateOf(snapshotJson.isNullOrBlank()) }
-    // A cached snapshot must never look live while the first network refresh is pending.
+    var refreshing by remember { mutableStateOf(false) }
     var offline by remember { mutableStateOf(!snapshotJson.isNullOrBlank()) }
     var error by remember { mutableStateOf<String?>(null) }
     var locked by remember { mutableStateOf(prefs.biometricEnabled() && Build.VERSION.SDK_INT >= 28) }
@@ -122,26 +128,39 @@ fun TradeAppV4() {
     var replayJson by remember { mutableStateOf<String?>(null) }
     var emergencyConfirm by remember { mutableStateOf<String?>(null) }
 
+    // Keep each page where the user left it instead of jumping to the top whenever
+    // tabs are switched or a 10-second live refresh recomposes the screen.
+    val homeScroll = rememberLazyListState()
+    val marketScroll = rememberLazyListState()
+    val tradesScroll = rememberLazyListState()
+    val reportsScroll = rememberLazyListState()
+    val settingsScroll = rememberLazyListState()
+
     suspend fun refresh() {
+        if (refreshing) return
+        refreshing = true
         loading = snapshotJson.isNullOrBlank()
         error = null
         try {
-            // status() is the same live BotController source used by the Admin panel.
-            // commandCenter() overlays those exact live values onto the richer payload.
             val status = api.status()
             check(status.ok) { "Backend ${status.code}" }
             check(api.isContractCompatible()) { "نسخه Backend و اپ هماهنگ نیست." }
             val response = api.commandCenter()
-            check(response.ok) { "Command Center ${response.code}" }
+            check(response.ok) { "مرکز فرمان ${response.code}" }
             val data = unwrap(response.body)
-            snapshotJson = data.toString()
-            prefs.saveOfflineSnapshot(data.toString())
+            val serialized = data.toString()
+            snapshotJson = serialized
+            // AES/GCM + SharedPreferences serialization should not run on the UI
+            // thread every ten seconds; doing so caused visible scroll/jank on
+            // larger reports.
+            withContext(Dispatchers.IO) { prefs.saveOfflineSnapshot(serialized) }
             offline = false
         } catch (e: Exception) {
             offline = !snapshotJson.isNullOrBlank()
             error = if (offline) "نمایش آخرین Snapshot ذخیره‌شده" else (e.message ?: "خطا در دریافت اطلاعات")
         } finally {
             loading = false
+            refreshing = false
         }
     }
 
@@ -186,64 +205,65 @@ fun TradeAppV4() {
         )
 
         CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
-        Scaffold(
-            containerColor = V4Bg,
-            bottomBar = {
-                NavigationBar(containerColor = Color.White, modifier = Modifier.navigationBarsPadding()) {
-                    tabs.forEachIndexed { index, item ->
-                        NavigationBarItem(
-                            selected = nav == index,
-                            onClick = { nav = index },
-                            icon = { Icon(item.icon, contentDescription = item.label) },
-                            label = { Text(item.label) },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = V4Primary,
-                                selectedTextColor = V4Primary,
-                                indicatorColor = V4PrimarySoft,
-                                unselectedIconColor = V4Muted,
-                                unselectedTextColor = V4Muted,
-                            ),
-                        )
+            Scaffold(
+                containerColor = V4Bg,
+                bottomBar = {
+                    NavigationBar(containerColor = Color.White, modifier = Modifier.navigationBarsPadding()) {
+                        tabs.forEachIndexed { index, item ->
+                            NavigationBarItem(
+                                selected = nav == index,
+                                onClick = { nav = index },
+                                icon = { Icon(item.icon, contentDescription = item.label) },
+                                label = { Text(item.label) },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = V4Primary,
+                                    selectedTextColor = V4Primary,
+                                    indicatorColor = V4PrimarySoft,
+                                    unselectedIconColor = V4Muted,
+                                    unselectedTextColor = V4Muted,
+                                ),
+                            )
+                        }
                     }
-                }
-            },
-        ) { padding ->
-            Column(Modifier.fillMaxSize().padding(padding).statusBarsPadding()) {
-                V4TopBar(
-                    offline = offline,
-                    loading = loading,
-                    onRefresh = { scope.launch { refresh() } },
-                )
-                if (error != null) {
-                    V4Banner(error.orEmpty(), if (offline) V4AmberSoft else V4RedSoft, if (offline) V4Amber else V4Red)
-                }
-                if (root == null && loading) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-                } else if (root == null) {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(error ?: "اطلاعاتی موجود نیست") }
-                } else {
-                    when (nav) {
-                        0 -> V4Home(root, offline)
-                        1 -> V4Market(root)
-                        2 -> V4Trades(root, onReplay = { id -> scope.launch {
-                            val r = runCatching { api.tradeReplay(id) }.getOrNull()
-                            replayJson = if (r?.ok == true) unwrap(r.body).toString() else "{\"error\":\"Replay unavailable\"}"
-                        } })
-                        3 -> V4Reports(root, api, onRefresh = { scope.launch { refresh() } })
-                        else -> V4Settings(
-                            root = root,
-                            api = api,
-                            prefs = prefs,
-                            historyJson = historyJson,
-                            onHistoryChanged = { historyJson = it },
-                            onReload = { scope.launch { refresh() } },
-                            onConfirmEmergency = { emergencyConfirm = it },
-                            onLockNow = { if (prefs.biometricEnabled() && Build.VERSION.SDK_INT >= 28) locked = true },
-                        )
+                },
+            ) { padding ->
+                Column(Modifier.fillMaxSize().padding(padding).statusBarsPadding()) {
+                    V4TopBar(
+                        offline = offline,
+                        loading = loading || refreshing,
+                        onRefresh = { scope.launch { refresh() } },
+                    )
+                    if (error != null) {
+                        V4Banner(error.orEmpty(), if (offline) V4AmberSoft else V4RedSoft, if (offline) V4Amber else V4Red)
+                    }
+                    if (root == null && loading) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                    } else if (root == null) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(error ?: "اطلاعاتی موجود نیست") }
+                    } else {
+                        when (nav) {
+                            0 -> V4Home(root, offline, homeScroll)
+                            1 -> V4Market(root, marketScroll)
+                            2 -> V4Trades(root, tradesScroll, onReplay = { id -> scope.launch {
+                                val r = runCatching { api.tradeReplay(id) }.getOrNull()
+                                replayJson = if (r?.ok == true) unwrap(r.body).toString() else "{\"error\":\"بازپخش معامله در دسترس نیست\"}"
+                            } })
+                            3 -> V4Reports(root, api, reportsScroll)
+                            else -> V4Settings(
+                                root = root,
+                                api = api,
+                                prefs = prefs,
+                                historyJson = historyJson,
+                                listState = settingsScroll,
+                                onHistoryChanged = { historyJson = it },
+                                onReload = { scope.launch { refresh() } },
+                                onConfirmEmergency = { emergencyConfirm = it },
+                                onLockNow = { if (prefs.biometricEnabled() && Build.VERSION.SDK_INT >= 28) locked = true },
+                            )
+                        }
                     }
                 }
             }
-        }
         }
 
         if (emergencyConfirm != null) {
@@ -273,12 +293,12 @@ fun TradeAppV4() {
             val replay = runCatching { JSONObject(replayJson!!) }.getOrNull()
             AlertDialog(
                 onDismissRequest = { replayJson = null },
-                title = { Text("Trade Replay") },
+                title = { Text("بازپخش معامله") },
                 text = {
                     LazyColumn(Modifier.fillMaxWidth().height(420.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         val steps = jsonObjects(replay?.optJSONArray("steps"))
-                        if (steps.isEmpty()) item { Text(replay?.optString("error", "داده‌ای برای Replay نیست") ?: "—") }
-                        items(steps) { step ->
+                        if (steps.isEmpty()) item { Text(replay?.optString("error", "داده‌ای برای بازپخش نیست") ?: "—") }
+                        items(steps, key = { "replay:${it.optString("time")}:${it.optString("text")}" }) { step ->
                             V4MiniCard {
                                 Text(step.optString("text", "رویداد"), fontWeight = FontWeight.Bold)
                                 Text(step.optString("time", ""), color = V4Muted)
@@ -301,7 +321,7 @@ private fun V4TopBar(offline: Boolean, loading: Boolean, onRefresh: () -> Unit) 
         Column(Modifier.weight(1f)) {
             Text("Trade", fontWeight = FontWeight.Black, color = V4Ink, style = MaterialTheme.typography.titleLarge)
             Text(
-                "${if (offline) "نسخه آفلاین" else "داده زنده"} • v${BuildConfig.RELEASE_VERSION}",
+                "${if (offline) "نسخه آفلاین" else "داده زنده"} • نسخه ${BuildConfig.RELEASE_VERSION}",
                 color = if (offline) V4Amber else V4Green,
                 style = MaterialTheme.typography.labelMedium,
             )
@@ -313,14 +333,15 @@ private fun V4TopBar(offline: Boolean, loading: Boolean, onRefresh: () -> Unit) 
 }
 
 @Composable
-private fun V4Home(root: JSONObject, offline: Boolean) {
+private fun V4Home(root: JSONObject, offline: Boolean, listState: LazyListState) {
     val headline = root.optJSONObject("headline") ?: JSONObject()
     val strip = root.optJSONObject("status_strip") ?: JSONObject()
     val decision = root.optJSONObject("decision_explainability") ?: JSONObject()
     val alerts = jsonObjects(root.optJSONArray("alerts"))
     val activity = jsonObjects(root.optJSONArray("activity_timeline"))
     LazyColumn(
-        Modifier.fillMaxSize(),
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(14.dp, 12.dp, 14.dp, 24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -333,30 +354,30 @@ private fun V4Home(root: JSONObject, offline: Boolean) {
                     "full_stop" -> "توقف کامل"
                     else -> "ربات آماده نیست"
                 },
-                subtitle = "${headline.optInt("active_positions")}/${headline.optInt("effective_max_positions")} پوزیشن • ریسک ${strip.optString("risk", "—")}",
+                subtitle = "${faInt(headline.optInt("active_positions"))}/${faInt(headline.optInt("effective_max_positions"))} پوزیشن • ریسک ${riskFa(strip.optString("risk", "—"))}",
                 chips = listOf(
-                    "API ${strip.optString("api", "—")}",
-                    "Circuit ${strip.optString("circuit", "—")}",
-                    "Cron ${if (strip.optBoolean("cron_healthy")) "OK" else "CHECK"}",
+                    "API ${statusFa(strip.optString("api", "—"))}",
+                    "مدار ریسک ${statusFa(strip.optString("circuit", "—"))}",
+                    "Cron ${if (strip.optBoolean("cron_healthy")) "سالم" else "نیازمند بررسی"}",
                 ),
             )
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 V4Metric("ارزش کل", money(headline.optDouble("portfolio_value_irt")), "تومان • کیف پول زنده", Modifier.weight(1f))
-                V4Metric("PnL امروز ربات", signedMoney(headline.optDouble("today_net_pnl_irt")), "تومان • پنل زنده", Modifier.weight(1f))
+                V4Metric("سود/زیان امروز ربات", signedMoney(headline.optDouble("today_net_pnl_irt")), "تومان • پنل زنده", Modifier.weight(1f))
             }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                V4Metric("PnL کل ربات", signedMoney(headline.optDouble("total_realized_pnl_irt")), "تومان • پنل زنده", Modifier.weight(1f))
-                V4Metric("Drawdown", "${fmt(headline.optDouble("current_drawdown_percent"), 2)}%", "افت واقعی حساب", Modifier.weight(1f))
+                V4Metric("سود/زیان کل ربات", signedMoney(headline.optDouble("total_realized_pnl_irt")), "تومان • پنل زنده", Modifier.weight(1f))
+                V4Metric("افت سرمایه", "${fmt(headline.optDouble("current_drawdown_percent"), 2)}٪", "افت واقعی حساب", Modifier.weight(1f))
             }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                V4Metric("Win Rate", "${fmt(headline.optDouble("win_rate_percent"), 1)}%", "${headline.optInt("closed_positions")} معامله بسته", Modifier.weight(1f))
-                V4Metric("Pending", "${headline.optInt("pending_orders")}/${headline.optInt("max_pending_orders")}", "سفارش در انتظار", Modifier.weight(1f))
+                V4Metric("نرخ برد", "${fmt(headline.optDouble("win_rate_percent"), 1)}٪", "${faInt(headline.optInt("closed_positions"))} معامله بسته", Modifier.weight(1f))
+                V4Metric("در انتظار", "${faInt(headline.optInt("pending_orders"))}/${faInt(headline.optInt("max_pending_orders"))}", "سفارش در انتظار", Modifier.weight(1f))
             }
         }
         if (!offline) item { V4Banner("همگام با داده زنده پنل • بروزرسانی خودکار هر ۱۰ ثانیه", V4GreenSoft, V4Green) }
@@ -369,20 +390,20 @@ private fun V4Home(root: JSONObject, offline: Boolean) {
                         Text(decision.optString("symbol", "بدون نماد"), fontWeight = FontWeight.Black, style = MaterialTheme.typography.titleLarge)
                         Text(decision.optString("reason_fa", decision.optString("reason", "هنوز تصمیمی ثبت نشده")), color = V4Muted)
                     }
-                    V4Pill(decision.optString("action", "—"), V4PrimarySoft, V4Primary)
+                    V4Pill(actionFa(decision.optString("action", "—")), V4PrimarySoft, V4Primary)
                 }
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    V4TinyMetric("Edge", percentOrDash(decision, "tradable_edge_percent"), Modifier.weight(1f))
-                    V4TinyMetric("Spread", percentOrDash(decision, "spread_percent"), Modifier.weight(1f))
-                    V4TinyMetric("Score", decision.opt("score")?.toString() ?: "—", Modifier.weight(1f))
+                    V4TinyMetric("لبه خالص", percentOrDash(decision, "tradable_edge_percent"), Modifier.weight(1f))
+                    V4TinyMetric("اختلاف خرید/فروش", percentOrDash(decision, "spread_percent"), Modifier.weight(1f))
+                    V4TinyMetric("امتیاز", decision.opt("score")?.toString()?.let(::faDigits) ?: "—", Modifier.weight(1f))
                 }
-                Text("Strategy: ${decision.optString("strategy", "—")}", color = V4Muted, style = MaterialTheme.typography.labelMedium)
+                Text("استراتژی: ${decision.optString("strategy", "—")}", color = V4Muted, style = MaterialTheme.typography.labelMedium)
             }
         }
-        item { V4SectionTitle("هشدارها", if (alerts.isEmpty()) "همه‌چیز عادی است" else "${alerts.size} مورد نیازمند توجه") }
+        item { V4SectionTitle("هشدارها", if (alerts.isEmpty()) "همه‌چیز عادی است" else "${faInt(alerts.size)} مورد نیازمند توجه") }
         if (alerts.isEmpty()) item { V4Banner("هشدار مهمی فعال نیست.", V4GreenSoft, V4Green) }
-        items(alerts.take(8)) { alert ->
+        items(alerts.take(8), key = { "alert:${it.optString("category")}:${it.optString("title")}:${it.optString("created_at")}" }) { alert ->
             val critical = alert.optString("priority") == "critical"
             V4Card(container = if (critical) V4RedSoft else V4AmberSoft) {
                 Text(alert.optString("title", "هشدار"), fontWeight = FontWeight.Bold, color = if (critical) V4Red else V4Amber)
@@ -390,32 +411,33 @@ private fun V4Home(root: JSONObject, offline: Boolean) {
             }
         }
         item { V4SectionTitle("تایم‌لاین فعالیت", "تصمیم‌ها و معاملات به زبان ساده") }
-        items(activity.take(12)) { event ->
+        items(activity.take(12), key = { "home:${it.optLong("id", -1)}:${it.optString("created_at_utc")}:${it.optString("text_fa")}" }) { event ->
             V4MiniCard {
                 Text(event.optString("text_fa", "رویداد معاملاتی"), fontWeight = FontWeight.SemiBold)
-                Text(event.optString("created_at_utc", ""), color = V4Muted, style = MaterialTheme.typography.labelSmall)
+                Text(event.optString("created_at_iran", event.optString("created_at_utc", "")), color = V4Muted, style = MaterialTheme.typography.labelSmall)
             }
         }
     }
 }
 
 @Composable
-private fun V4Market(root: JSONObject) {
+private fun V4Market(root: JSONObject, listState: LazyListState) {
     val ranking = jsonObjects(root.optJSONArray("opportunity_ranking"))
     val radar = jsonObjects(root.optJSONArray("market_radar"))
     LazyColumn(
-        Modifier.fillMaxSize(),
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(14.dp, 12.dp, 14.dp, 24.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         item { V4SectionTitle("رادار بازار", "عالی / خوب / زیرنظر / پرریسک") }
         val categories = listOf("excellent" to "عالی", "good" to "خوب", "watch" to "زیرنظر", "avoid" to "پرریسک")
-        items(categories) { (key, label) ->
+        items(categories, key = { it.first }) { (key, label) ->
             val matches = radar.filter { it.optString("category") == key }.take(6)
             V4Card(container = categoryColor(key)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(label, fontWeight = FontWeight.Black, modifier = Modifier.weight(1f))
-                    Text("${matches.size}", color = V4Muted)
+                    Text(faInt(matches.size), color = V4Muted)
                 }
                 if (matches.isEmpty()) Text("موردی در این گروه نیست.", color = V4Muted)
                 matches.forEach { item ->
@@ -423,24 +445,24 @@ private fun V4Market(root: JSONObject) {
                     Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(item.optString("symbol"), fontWeight = FontWeight.Bold)
-                            Text("${item.optString("strategy", "—")} • ${item.optString("regime", "—")}", color = V4Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${item.optString("strategy", "—")} • ${regimeFa(item.optString("regime", "—"))}", color = V4Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        Text("Edge ${fmt(item.optDouble("edge_percent"), 2)}%", color = if (item.optDouble("edge_percent") >= 0) V4Green else V4Red)
+                        Text("لبه ${fmt(item.optDouble("edge_percent"), 2)}٪", color = if (item.optDouble("edge_percent") >= 0) V4Green else V4Red)
                     }
                 }
             }
         }
         item { V4SectionTitle("۱۰ فرصت برتر", "رتبه‌بندی نمایشی؛ سفارش خرید نیست") }
-        items(ranking) { item ->
+        items(ranking, key = { "rank:${it.optString("symbol")}:${it.optString("quote_asset")}" }) { item ->
             V4Card {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(item.optString("symbol"), fontWeight = FontWeight.Black, style = MaterialTheme.typography.titleMedium)
-                        Text("${item.optString("action")} • ${item.optString("category")} • Score ${item.optInt("score")}", color = V4Muted)
+                        Text("${actionFa(item.optString("action"))} • ${categoryFa(item.optString("category"))} • امتیاز ${faInt(item.optInt("score"))}", color = V4Muted)
                     }
                     Column(horizontalAlignment = Alignment.End) {
-                        Text("${fmt(item.optDouble("edge_percent"), 3)}%", fontWeight = FontWeight.Bold, color = if (item.optDouble("edge_percent") >= 0) V4Green else V4Red)
-                        Text("Spread ${fmt(item.optDouble("spread_percent"), 3)}%", color = V4Muted)
+                        Text("${fmt(item.optDouble("edge_percent"), 3)}٪", fontWeight = FontWeight.Bold, color = if (item.optDouble("edge_percent") >= 0) V4Green else V4Red)
+                        Text("اختلاف ${fmt(item.optDouble("spread_percent"), 3)}٪", color = V4Muted)
                     }
                 }
             }
@@ -450,27 +472,28 @@ private fun V4Market(root: JSONObject) {
 }
 
 @Composable
-private fun V4Trades(root: JSONObject, onReplay: (Long) -> Unit) {
+private fun V4Trades(root: JSONObject, listState: LazyListState, onReplay: (Long) -> Unit) {
     val positions = jsonObjects(root.optJSONArray("positions"))
     val activity = jsonObjects(root.optJSONArray("activity_timeline"))
     val heat = root.optJSONObject("risk_heatmap") ?: JSONObject()
     val cells = jsonObjects(heat.optJSONArray("cells")).filter { it.optString("x") < it.optString("y") }
     LazyColumn(
-        Modifier.fillMaxSize(),
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(14.dp, 12.dp, 14.dp, 24.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        item { V4SectionTitle("پوزیشن‌های فعال", "برای Trade Replay روی کارت بزن") }
+        item { V4SectionTitle("پوزیشن‌های فعال", "برای بازپخش معامله روی کارت بزن") }
         if (positions.isEmpty()) item { V4Banner("پوزیشن فعالی وجود ندارد.", V4BlueSoft, V4Blue) }
-        items(positions) { p ->
+        items(positions, key = { "position:${it.optLong("id")}" }) { p ->
             val pnl = p.optDouble("unrealized_net_pnl_percent")
             V4Card(modifier = Modifier.clickable { onReplay(p.optLong("id")) }) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(p.optString("symbol"), fontWeight = FontWeight.Black, style = MaterialTheme.typography.titleLarge)
-                        Text("${p.optString("status")} • ${p.optLong("holding_seconds") / 60} دقیقه", color = V4Muted)
+                        Text("${positionStatusFa(p.optString("status"))} • ${faInt(p.optLong("holding_seconds") / 60)} دقیقه", color = V4Muted)
                     }
-                    Text("${if (pnl >= 0) "+" else ""}${fmt(pnl, 2)}%", fontWeight = FontWeight.Black, color = if (pnl >= 0) V4Green else V4Red)
+                    Text("${if (pnl >= 0) "+" else ""}${fmt(pnl, 2)}٪", fontWeight = FontWeight.Black, color = if (pnl >= 0) V4Green else V4Red)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     V4TinyMetric("ورود", fmt(positionMoney(p, "entry_price"), 4), Modifier.weight(1f))
@@ -480,13 +503,13 @@ private fun V4Trades(root: JSONObject, onReplay: (Long) -> Unit) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     V4TinyMetric("حد ضرر", fmt(positionMoney(p, "stop_loss"), 4), Modifier.weight(1f))
                     V4TinyMetric("حد سود", fmt(positionMoney(p, "take_profit"), 4), Modifier.weight(1f))
-                    V4TinyMetric("خروج", p.optString("probable_exit_reason", "—"), Modifier.weight(1f))
+                    V4TinyMetric("خروج محتمل", exitReasonFa(p.optString("probable_exit_reason", "—")), Modifier.weight(1f))
                 }
             }
         }
         item { V4SectionTitle("نقشه حرارتی ریسک", "همبستگی پوزیشن‌های فعال") }
-        if (cells.isEmpty()) item { Text("برای Heatmap حداقل دو پوزیشن با داده کافی لازم است.", color = V4Muted) }
-        items(cells.take(30)) { cell ->
+        if (cells.isEmpty()) item { Text("برای نقشه حرارتی حداقل دو پوزیشن با داده کافی لازم است.", color = V4Muted) }
+        items(cells.take(30), key = { "heat:${it.optString("x")}:${it.optString("y")}" }) { cell ->
             val risk = cell.optString("risk", "unknown")
             V4MiniCard {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -495,18 +518,18 @@ private fun V4Trades(root: JSONObject, onReplay: (Long) -> Unit) {
                 }
             }
         }
-        item { V4SectionTitle("معاملات اخیر", "Timeline تاییدشده") }
-        items(activity.take(20)) { event ->
+        item { V4SectionTitle("معاملات اخیر", "تایم‌لاین تأییدشده") }
+        items(activity.take(20), key = { "trade:${it.optLong("id", -1)}:${it.optString("created_at_utc")}:${it.optString("text_fa")}" }) { event ->
             V4MiniCard {
                 Text(event.optString("text_fa", "رویداد"), fontWeight = FontWeight.SemiBold)
-                Text(event.optString("created_at_utc", ""), color = V4Muted)
+                Text(event.optString("created_at_iran", event.optString("created_at_utc", "")), color = V4Muted)
             }
         }
     }
 }
 
 @Composable
-private fun V4Reports(root: JSONObject, api: TradeApi, onRefresh: () -> Unit) {
+private fun V4Reports(root: JSONObject, api: TradeApi, listState: LazyListState) {
     val scope = rememberCoroutineScope()
     val performance = root.optJSONObject("performance") ?: JSONObject()
     val reports = root.optJSONObject("reports") ?: JSONObject()
@@ -521,7 +544,8 @@ private fun V4Reports(root: JSONObject, api: TradeApi, onRefresh: () -> Unit) {
     var labBusy by remember { mutableStateOf(false) }
 
     LazyColumn(
-        Modifier.fillMaxSize(),
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(14.dp, 12.dp, 14.dp, 24.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -535,13 +559,13 @@ private fun V4Reports(root: JSONObject, api: TradeApi, onRefresh: () -> Unit) {
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 V4Metric("ماه", money(reports.optJSONObject("monthly")?.optDouble("net_pnl") ?: 0.0), "تومان", Modifier.weight(1f))
-                V4Metric("Profit Factor", fmt(reports.optDouble("profit_factor"), 2), "تحقق‌یافته", Modifier.weight(1f))
+                V4Metric("ضریب سود", fmt(reports.optDouble("profit_factor"), 2), "تحقق‌یافته", Modifier.weight(1f))
             }
         }
-        item { V4SectionTitle("Equity Curve", "ارزش واقعی کیف پول در طول زمان") }
+        item { V4SectionTitle("نمودار ارزش حساب", "ارزش واقعی کیف پول در طول زمان") }
         item { V4EquityBars(curve) }
-        item { V4SectionTitle("Performance by Strategy", "استراتژی و پروفایل") }
-        items(strategies.take(12)) { s ->
+        item { V4SectionTitle("عملکرد بر اساس استراتژی", "استراتژی و پروفایل") }
+        items(strategies.take(12), key = { "strategy:${it.optString("strategy_key")}:${it.optString("profile_key")}:${it.optString("quote_asset")}" }) { s ->
             V4MiniCard {
                 Row(Modifier.fillMaxWidth()) {
                     Column(Modifier.weight(1f)) {
@@ -549,38 +573,40 @@ private fun V4Reports(root: JSONObject, api: TradeApi, onRefresh: () -> Unit) {
                         Text(s.optString("profile_key", "—"), color = V4Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Column(horizontalAlignment = Alignment.End) {
-                        Text("${s.optInt("trades")} معامله")
-                        Text("Avg ${fmt(s.optDouble("average_return_percent"), 3)}%", color = if (s.optDouble("average_return_percent") >= 0) V4Green else V4Red)
+                        Text("${faInt(s.optInt("trades"))} معامله")
+                        Text("میانگین ${fmt(s.optDouble("average_return_percent"), 3)}٪", color = if (s.optDouble("average_return_percent") >= 0) V4Green else V4Red)
                     }
                 }
             }
         }
-        item { V4SectionTitle("Performance by Coin", "بهترین و ضعیف‌ترین دارایی‌ها") }
-        items(coins.take(12)) { c ->
+        item { V4SectionTitle("عملکرد بر اساس دارایی", "بهترین و ضعیف‌ترین دارایی‌ها بر اساس بازده درصدی") }
+        items(coins.take(12), key = { "coin:${it.optString("asset")}:${it.optString("quote_asset")}" }) { c ->
             V4MiniCard {
                 Row(Modifier.fillMaxWidth()) {
                     Text(c.optString("asset", "—"), fontWeight = FontWeight.Black, modifier = Modifier.weight(1f))
-                    Text("${c.optInt("trades")} trade • Win ${fmt(c.optDouble("win_rate_percent"), 1)}%")
+                    Text("${faInt(c.optInt("trades"))} معامله • برد ${fmt(c.optDouble("win_rate_percent"), 1)}٪")
                 }
             }
         }
-        item { V4SectionTitle("Shadow Evaluation", "سیگنال‌های ۱۵ / ۶۰ / ۲۴۰ دقیقه") }
+        item { V4SectionTitle("ارزیابی آزمایشی", "سیگنال‌های ۱۵ / ۶۰ / ۲۴۰ دقیقه") }
         item {
             V4Card {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    V4TinyMetric("Samples", shadow.optInt("samples").toString(), Modifier.weight(1f))
-                    V4TinyMetric("Avg 60m", if (shadow.isNull("average_return_60m")) "—" else "${fmt(shadow.optDouble("average_return_60m"), 3)}%", Modifier.weight(1f))
-                    V4TinyMetric("Positive", if (shadow.isNull("positive_60m_rate_percent")) "—" else "${fmt(shadow.optDouble("positive_60m_rate_percent"), 1)}%", Modifier.weight(1f))
+                    V4TinyMetric("نمونه", faInt(shadow.optInt("samples")), Modifier.weight(1f))
+                    V4TinyMetric("میانگین ۶۰دقیقه", if (shadow.isNull("average_return_60m")) "—" else "${fmt(shadow.optDouble("average_return_60m"), 3)}٪", Modifier.weight(1f))
+                    V4TinyMetric("مثبت", if (shadow.isNull("positive_60m_rate_percent")) "—" else "${fmt(shadow.optDouble("positive_60m_rate_percent"), 1)}٪", Modifier.weight(1f))
                 }
             }
         }
-        item { V4SectionTitle("Strategy Lab", "What-if تاریخی؛ بدون سفارش واقعی") }
+        item { V4SectionTitle("آزمایشگاه استراتژی", "سناریوی تاریخی؛ بدون سفارش واقعی") }
         item {
             V4Card {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(positionPct, { positionPct = it }, label = { Text("Position %") }, modifier = Modifier.weight(1f), singleLine = true)
-                    OutlinedTextField(stopPct, { stopPct = it }, label = { Text("SL %") }, modifier = Modifier.weight(1f), singleLine = true)
-                    OutlinedTextField(takePct, { takePct = it }, label = { Text("TP %") }, modifier = Modifier.weight(1f), singleLine = true)
+                // Three weighted text fields in one row were too narrow on common
+                // Android widths and made cursor/editing unreliable. Stack them.
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(positionPct, { positionPct = it }, label = { Text("درصد پوزیشن") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(stopPct, { stopPct = it }, label = { Text("حد ضرر ٪") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(takePct, { takePct = it }, label = { Text("حد سود ٪") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 }
                 Button(
                     onClick = {
@@ -588,7 +614,7 @@ private fun V4Reports(root: JSONObject, api: TradeApi, onRefresh: () -> Unit) {
                             labBusy = true
                             val body = JSONObject().put("position_percent", positionPct.toDoubleOrNull() ?: 2.0).put("stop_loss_percent", stopPct.toDoubleOrNull() ?: 3.0).put("take_profit_percent", takePct.toDoubleOrNull() ?: 5.0)
                             val r = runCatching { api.strategyLab(body.toString()) }.getOrNull()
-                            labResult = if (r?.ok == true) unwrap(r.body) else JSONObject().put("error", "Strategy Lab unavailable")
+                            labResult = if (r?.ok == true) unwrap(r.body) else JSONObject().put("error", "آزمایشگاه استراتژی در دسترس نیست")
                             labBusy = false
                         }
                     }, enabled = !labBusy, modifier = Modifier.fillMaxWidth(),
@@ -597,9 +623,9 @@ private fun V4Reports(root: JSONObject, api: TradeApi, onRefresh: () -> Unit) {
                     HorizontalDivider(color = V4Stroke)
                     if (result.has("error")) Text(result.optString("error"), color = V4Red) else {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            V4TinyMetric("Win", "${fmt(result.optDouble("win_rate_percent"), 1)}%", Modifier.weight(1f))
-                            V4TinyMetric("Avg", "${fmt(result.optDouble("average_simulated_return_percent"), 3)}%", Modifier.weight(1f))
-                            V4TinyMetric("Max DD", "${fmt(result.optDouble("max_drawdown_percent"), 2)}%", Modifier.weight(1f))
+                            V4TinyMetric("برد", "${fmt(result.optDouble("win_rate_percent"), 1)}٪", Modifier.weight(1f))
+                            V4TinyMetric("میانگین", "${fmt(result.optDouble("average_simulated_return_percent"), 3)}٪", Modifier.weight(1f))
+                            V4TinyMetric("بیشترین افت", "${fmt(result.optDouble("max_drawdown_percent"), 2)}٪", Modifier.weight(1f))
                         }
                         Text(result.optString("note"), color = V4Muted, style = MaterialTheme.typography.labelSmall)
                     }
@@ -615,6 +641,7 @@ private fun V4Settings(
     api: TradeApi,
     prefs: TradePreferences,
     historyJson: String?,
+    listState: LazyListState,
     onHistoryChanged: (String?) -> Unit,
     onReload: () -> Unit,
     onConfirmEmergency: (String) -> Unit,
@@ -632,14 +659,32 @@ private fun V4Settings(
 
     var alertsEnabled by remember { mutableStateOf(prefs.alertsEnabled()) }
     var biometric by remember { mutableStateOf(prefs.biometricEnabled()) }
-    var shadowEnabled by remember(root.toString()) { mutableStateOf(shadow.optBoolean("enabled", true)) }
-    var minPriority by remember(root.toString()) { mutableStateOf(rules.optString("min_priority", "warning")) }
+    var shadowEnabled by rememberSaveable { mutableStateOf(shadow.optBoolean("enabled", true)) }
+    var minPriority by rememberSaveable { mutableStateOf(rules.optString("min_priority", "warning")) }
     var busy by remember { mutableStateOf(false) }
-    var customPosition by remember(root.toString()) { mutableStateOf(current.optDouble("position_percent", 2.0).toString()) }
-    var customExposure by remember(root.toString()) { mutableStateOf(current.optDouble("nobitex_portfolio_exposure_percent", 35.0).toString()) }
-    var customMax by remember(root.toString()) { mutableStateOf(current.optInt("nobitex_max_positions", 6).toString()) }
-    var customDaily by remember(root.toString()) { mutableStateOf(current.optDouble("daily_loss_limit_percent", 2.0).toString()) }
+    var settingsDirty by rememberSaveable { mutableStateOf(false) }
+    // Do not key editable fields to root.toString(). Live refresh changes root every
+    // 10 seconds and previously erased what the user was typing mid-edit.
+    var customPosition by rememberSaveable { mutableStateOf(current.optDouble("position_percent", 2.0).toString()) }
+    var customExposure by rememberSaveable { mutableStateOf(current.optDouble("nobitex_portfolio_exposure_percent", 35.0).toString()) }
+    var customMax by rememberSaveable { mutableStateOf(current.optInt("nobitex_max_positions", 6).toString()) }
+    var customDaily by rememberSaveable { mutableStateOf(current.optDouble("daily_loss_limit_percent", 2.0).toString()) }
     var preview by remember { mutableStateOf<JSONObject?>(null) }
+
+    LaunchedEffect(current.toString(), settingsDirty, busy) {
+        if (!settingsDirty && !busy) {
+            customPosition = current.optDouble("position_percent", 2.0).toString()
+            customExposure = current.optDouble("nobitex_portfolio_exposure_percent", 35.0).toString()
+            customMax = current.optInt("nobitex_max_positions", 6).toString()
+            customDaily = current.optDouble("daily_loss_limit_percent", 2.0).toString()
+        }
+    }
+    LaunchedEffect(rules.toString(), shadow.toString(), busy) {
+        if (!busy) {
+            minPriority = rules.optString("min_priority", "warning")
+            shadowEnabled = shadow.optBoolean("enabled", true)
+        }
+    }
 
     fun reloadHistory() {
         scope.launch {
@@ -649,11 +694,13 @@ private fun V4Settings(
     }
 
     LazyColumn(
-        Modifier.fillMaxSize(),
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(14.dp, 12.dp, 14.dp, 24.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        item { V4SectionTitle("کنترل اضطراری", "وضعیت فعلی: ${emergency.optString("mode", "normal")}") }
+        item { V4Banner("دامنه اجرای فعلی: معاملات Spot فقط در Nobitex. منابع دیگر فقط داده بازار هستند و Futures/معاملات اهرمی در این مسیر اجرا نمی‌شوند.", V4BlueSoft, V4Blue) }
+        item { V4SectionTitle("کنترل اضطراری", "وضعیت فعلی: ${emergencyModeFa(emergency.optString("mode", "normal"))}") }
         item {
             V4Card(container = if (emergency.optString("mode") == "normal") Color.White else V4RedSoft) {
                 listOf(
@@ -678,13 +725,14 @@ private fun V4Settings(
                     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(preset.optString("label", key), fontWeight = FontWeight.Bold)
-                            Text("Position ${fmt(preset.optDouble("position_percent"),1)}% • Exposure ${fmt(preset.optDouble("nobitex_portfolio_exposure_percent"),0)}%", color = V4Muted)
+                            Text("هر خرید ${fmt(preset.optDouble("position_percent"),1)}٪ • سقف درگیری ${fmt(preset.optDouble("nobitex_portfolio_exposure_percent"),0)}٪", color = V4Muted)
                         }
                         FilledTonalButton(
                             onClick = {
                                 scope.launch {
                                     busy = true
-                                    runCatching { api.applyPreset(key) }
+                                    val r = runCatching { api.applyPreset(key) }.getOrNull()
+                                    if (r?.ok == true) settingsDirty = false
                                     reloadHistory(); onReload(); busy = false
                                 }
                             }, enabled = !busy,
@@ -697,10 +745,10 @@ private fun V4Settings(
         item {
             V4Card {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(customPosition, { customPosition = it }, label = { Text("درصد هر خرید") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                    OutlinedTextField(customExposure, { customExposure = it }, label = { Text("سقف سرمایه درگیر") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                    OutlinedTextField(customMax, { customMax = it }, label = { Text("حداکثر پوزیشن") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                    OutlinedTextField(customDaily, { customDaily = it }, label = { Text("حد زیان روزانه") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(customPosition, { customPosition = it; settingsDirty = true }, label = { Text("درصد هر خرید") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(customExposure, { customExposure = it; settingsDirty = true }, label = { Text("سقف سرمایه درگیر") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(customMax, { customMax = it; settingsDirty = true }, label = { Text("حداکثر پوزیشن") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(customDaily, { customDaily = it; settingsDirty = true }, label = { Text("حد زیان روزانه") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 }
                 val body = JSONObject()
                     .put("position_percent", customPosition.toDoubleOrNull() ?: current.optDouble("position_percent",2.0))
@@ -709,11 +757,11 @@ private fun V4Settings(
                     .put("daily_loss_limit_percent", customDaily.toDoubleOrNull() ?: current.optDouble("daily_loss_limit_percent",2.0))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { scope.launch { val r=runCatching{api.previewSettings(body.toString())}.getOrNull();preview=if(r?.ok==true)unwrap(r.body) else null } }, modifier = Modifier.weight(1f)) { Text("پیش‌نمایش") }
-                    Button(onClick = { scope.launch { busy=true; val r=runCatching{api.updateBotSettings(body.toString())}.getOrNull(); if(r?.ok==true){reloadHistory();onReload()};busy=false } }, enabled=!busy, modifier=Modifier.weight(1f)) { Text("ذخیره") }
+                    Button(onClick = { scope.launch { busy=true; val r=runCatching{api.updateBotSettings(body.toString())}.getOrNull(); if(r?.ok==true){settingsDirty=false;reloadHistory();onReload()};busy=false } }, enabled=!busy, modifier=Modifier.weight(1f)) { Text("ذخیره") }
                 }
                 preview?.let { p ->
                     val before=p.optJSONObject("risk_before")?:JSONObject();val after=p.optJSONObject("risk_after")?:JSONObject()
-                    V4Banner("Risk ${fmt(before.optDouble("score"),1)} → ${fmt(after.optDouble("score"),1)} • ${p.optString("impact")}", V4BlueSoft, V4Blue)
+                    V4Banner("ریسک ${fmt(before.optDouble("score"),1)} ← ${fmt(after.optDouble("score"),1)} • ${impactFa(p.optString("impact"))}", V4BlueSoft, V4Blue)
                 }
             }
         }
@@ -724,9 +772,9 @@ private fun V4Settings(
                 scope.launch { runCatching { api.setShadowMode(enabled) }; onReload() }
             }
         }
-        item { V4SectionTitle("اعلان‌های هوشمند", "WorkManager هر ۱۵ دقیقه هشدارهای مهم را بررسی می‌کند") }
+        item { V4SectionTitle("اعلان‌های هوشمند", "Android طبق محدودیت سیستم حداقل هر ۱۵ دقیقه در پس‌زمینه بررسی می‌کند") }
         item {
-            V4SettingRow("اعلان پس‌زمینه", "Critical / Warning طبق قوانین پنل", alertsEnabled) { enabled ->
+            V4SettingRow("اعلان پس‌زمینه", "هشدارهای مهم طبق قوانین پنل", alertsEnabled) { enabled ->
                 alertsEnabled = enabled
                 prefs.setAlertsEnabled(enabled)
                 if (enabled) TradeAlertWorker.schedule(context) else TradeAlertWorker.cancel(context)
@@ -734,7 +782,7 @@ private fun V4Settings(
         }
         item {
             V4Card {
-                Text("حداقل Priority", fontWeight = FontWeight.Bold)
+                Text("حداقل اولویت", fontWeight = FontWeight.Bold)
                 listOf("info", "success", "warning", "critical").chunked(2).forEach { row ->
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
                         row.forEach { p ->
@@ -745,7 +793,7 @@ private fun V4Settings(
                                     runCatching { api.updateNotificationRules(body.toString()) }
                                     onReload()
                                 }
-                            }, modifier = Modifier.weight(1f), colors = ButtonDefaults.filledTonalButtonColors(containerColor = if (minPriority == p) V4PrimarySoft else Color.White)) { Text(p) }
+                            }, modifier = Modifier.weight(1f), colors = ButtonDefaults.filledTonalButtonColors(containerColor = if (minPriority == p) V4PrimarySoft else Color.White)) { Text(priorityFa(p)) }
                         }
                     }
                 }
@@ -764,18 +812,19 @@ private fun V4Settings(
                 Text("این Snapshot فقط برای مشاهده آفلاین است و مبنای اجرای معامله نیست.", color = V4Muted)
             }
         }
-        item { V4SectionTitle("تاریخچه تنظیمات و بازگردانی", "${history.size} نسخه اخیر") }
-        items(history.take(15)) { h ->
+        item { V4SectionTitle("تاریخچه تنظیمات و بازگردانی", "${faInt(history.size)} نسخه اخیر") }
+        items(history.take(15), key = { "history:${it.optLong("id")}" }) { h ->
             V4MiniCard {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("#${h.optLong("id")} • ${h.optString("label")}", fontWeight = FontWeight.Bold)
+                        Text("#${faDigits(h.optLong("id").toString())} • ${h.optString("label")}", fontWeight = FontWeight.Bold)
                         Text("${h.optString("source")} • ${h.optString("created_at")}", color = V4Muted)
                     }
                     TextButton(onClick = {
                         scope.launch {
                             busy = true
-                            runCatching { api.rollbackSettings(h.optLong("id")) }
+                            val r = runCatching { api.rollbackSettings(h.optLong("id")) }.getOrNull()
+                            if (r?.ok == true) settingsDirty = false
                             reloadHistory(); onReload(); busy = false
                         }
                     }, enabled = !busy) { Text("بازگردانی") }
@@ -840,7 +889,8 @@ private fun V4Hero(title: String, subtitle: String, chips: List<String>) {
                     Text(subtitle, color = Color(0xFFC7CAD4))
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { chips.take(3).forEach { V4Pill(it, Color(0xFF292D42), Color.White) } }
+            // Vertical pills avoid clipped text on narrow RTL screens.
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { chips.take(3).forEach { V4Pill(it, Color(0xFF292D42), Color.White) } }
         }
     }
 }
@@ -878,7 +928,7 @@ private fun V4TinyMetric(label: String, value: String, modifier: Modifier = Modi
 
 @Composable
 private fun V4Pill(text: String, bg: Color, fg: Color) {
-    Text(text, modifier = Modifier.background(bg, RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 6.dp), color = fg, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+    Text(text, modifier = Modifier.fillMaxWidth().background(bg, RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 6.dp), color = fg, style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
 }
 
 @Composable
@@ -914,13 +964,16 @@ private fun V4EquityBars(curve: List<JSONObject>) {
             Text("داده کافی برای نمودار وجود ندارد.", color = V4Muted)
             return@V4Card
         }
-        val metricKey = if (curve.any { it.has("portfolio_value_toman") }) "portfolio_value_toman" else "cumulative_net_pnl"
-        val values = curve.map { it.optDouble(metricKey) }
+        // Scale exactly the points that are visible. Previously one historical
+        // outlier among up to 288 samples flattened the last 30 bars.
+        val window = curve.takeLast(30)
+        val metricKey = if (window.any { it.has("portfolio_value_toman") }) "portfolio_value_toman" else "cumulative_net_pnl"
+        val values = window.map { it.optDouble(metricKey) }
         val min = values.minOrNull() ?: 0.0
         val max = values.maxOrNull() ?: 0.0
         val span = (max - min).takeIf { abs(it) > 0.000001 } ?: 1.0
         Row(Modifier.fillMaxWidth().height(150.dp), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.Bottom) {
-            curve.takeLast(30).forEach { point ->
+            window.forEach { point ->
                 val value = point.optDouble(metricKey)
                 val normalized = ((value - min) / span).coerceIn(0.0, 1.0)
                 Box(Modifier.weight(1f).height((20 + normalized * 120).dp).background(if (metricKey == "portfolio_value_toman" || value >= 0) V4Green else V4Red, RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)))
@@ -955,6 +1008,86 @@ private fun categoryColor(category: String): Color = when (category.lowercase())
     else -> V4Bg
 }
 
+private fun categoryFa(value: String): String = when (value.lowercase()) {
+    "excellent" -> "عالی"
+    "good" -> "خوب"
+    "watch" -> "زیرنظر"
+    "avoid" -> "پرریسک"
+    else -> value.ifBlank { "—" }
+}
+
+private fun regimeFa(value: String): String = when (value.lowercase()) {
+    "bull", "bullish", "trend_up" -> "صعودی"
+    "bear", "bearish", "trend_down" -> "نزولی"
+    "range", "ranging", "sideways" -> "خنثی"
+    "volatile", "high_volatility" -> "پرنوسان"
+    else -> value.ifBlank { "—" }
+}
+
+private fun actionFa(value: String): String = when (value.lowercase()) {
+    "buy" -> "خرید"
+    "sell" -> "فروش"
+    "hold" -> "صبر"
+    "skip" -> "رد"
+    else -> value.ifBlank { "—" }
+}
+
+private fun positionStatusFa(value: String): String = when (value.lowercase()) {
+    "open" -> "باز"
+    "pending_open" -> "در انتظار بازشدن"
+    "pending_close" -> "در انتظار بسته‌شدن"
+    "closed" -> "بسته"
+    else -> value.ifBlank { "—" }
+}
+
+private fun exitReasonFa(value: String): String = when (value.lowercase()) {
+    "take_profit" -> "حد سود"
+    "stop_loss" -> "حد ضرر"
+    "trailing_profit", "trailing_stop" -> "تریلینگ سود"
+    "rotation" -> "چرخش پرتفوی"
+    "manual" -> "دستی"
+    else -> value.ifBlank { "—" }
+}
+
+private fun priorityFa(value: String): String = when (value.lowercase()) {
+    "info" -> "اطلاعات"
+    "success" -> "موفق"
+    "warning" -> "هشدار"
+    "critical" -> "بحرانی"
+    else -> value
+}
+
+private fun riskFa(value: String): String = when (value.lowercase()) {
+    "low" -> "کم"
+    "medium" -> "متوسط"
+    "high" -> "زیاد"
+    "critical" -> "بحرانی"
+    else -> value
+}
+
+private fun statusFa(value: String): String = when (value.lowercase()) {
+    "ready", "on", "closed" -> "آماده"
+    "off" -> "خاموش"
+    "open" -> "باز"
+    "missing" -> "تنظیم‌نشده"
+    else -> value
+}
+
+private fun emergencyModeFa(value: String): String = when (value.lowercase()) {
+    "normal" -> "عادی"
+    "pause_buys" -> "توقف خرید"
+    "graceful_close" -> "بستن تدریجی"
+    "full_stop" -> "توقف کامل"
+    else -> value
+}
+
+private fun impactFa(value: String): String = when (value.lowercase()) {
+    "higher_risk" -> "ریسک بیشتر"
+    "lower_risk" -> "ریسک کمتر"
+    "similar_risk" -> "ریسک مشابه"
+    else -> value
+}
+
 private fun positionMoney(position: JSONObject, key: String): Double {
     val raw = position.optDouble(key)
     val displayUnit = position.optString("display_unit", "")
@@ -962,10 +1095,16 @@ private fun positionMoney(position: JSONObject, key: String): Double {
     return if (position.optString("quote_asset", "").equals("IRT", ignoreCase = true)) raw / 10.0 else raw
 }
 
-private fun fmt(value: Double, digits: Int = 2): String = String.format(Locale.US, "%.${digits}f", value)
-private fun money(value: Double): String = NumberFormat.getNumberInstance(Locale.US).apply { maximumFractionDigits = 0 }.format(value)
+private fun fmt(value: Double, digits: Int = 2): String = NumberFormat.getNumberInstance(FaLocale).apply {
+    isGroupingUsed = false
+    minimumFractionDigits = digits
+    maximumFractionDigits = digits
+}.format(value)
+private fun money(value: Double): String = NumberFormat.getNumberInstance(FaLocale).apply { maximumFractionDigits = 0 }.format(value)
 private fun signedMoney(value: Double): String = (if (value > 0) "+" else "") + money(value)
-private fun percentOrDash(obj: JSONObject, key: String): String = if (!obj.has(key) || obj.isNull(key)) "—" else "${fmt(obj.optDouble(key), 3)}%"
+private fun faInt(value: Number): String = NumberFormat.getIntegerInstance(FaLocale).format(value)
+private fun faDigits(value: String): String = value.map { c -> if (c in '0'..'9') "۰۱۲۳۴۵۶۷۸۹"[c - '0'] else c }.joinToString("")
+private fun percentOrDash(obj: JSONObject, key: String): String = if (!obj.has(key) || obj.isNull(key)) "—" else "${fmt(obj.optDouble(key), 3)}٪"
 private fun emergencyDescription(mode: String): String = when (mode) {
     "normal" -> "حالت اضطراری لغو و ورودهای جدید دوباره طبق قوانین عادی مجاز می‌شوند."
     "pause_buys" -> "خریدهای جدید متوقف می‌شوند؛ خروج‌ها و Reconcile همچنان فعال می‌مانند."
