@@ -12,8 +12,12 @@ $api=(string)file_get_contents($root.'/android/app/src/main/java/ir/trade/app/da
 $manifest=(string)file_get_contents($root.'/android/app/src/main/AndroidManifest.xml');
 $rotation=(string)file_get_contents($root.'/android/app/src/main/java/ir/trade/app/RotationActivity.kt');
 $learning=(string)file_get_contents($root.'/android/app/src/main/java/ir/trade/app/StrategyLearningActivity.kt');
+$devices=(string)file_get_contents($root.'/backend/public/admin/devices.php');
 
 appDebugAssert(str_contains($entry,'ManualSetupScreen('),'Manual app setup must render a real credential form.');
+appDebugAssert(str_contains($entry,'PairCodeSetupScreen('),'Primary app pairing must provide one-time code entry inside the trusted app.');
+appDebugAssert(str_contains($entry,'redeemPairingCode('),'One-time pairing must use one canonical validation path.');
+appDebugAssert(str_contains($entry,'pairedApi.isContractCompatible()'),'Pair-code redemption must validate Backend/App API contract before saving.');
 appDebugAssert(str_contains($entry,'api.isContractCompatible()'),'Manual setup must validate Backend/App API contract before saving.');
 appDebugAssert(!str_contains($entry,'paired || prefs.isConfigured() || manualSetup'),'Manual setup must not bypass credential validation and enter the dashboard directly.');
 appDebugAssert(str_contains($entry,'PasswordVisualTransformation()'),'Manual token must be visually protected.');
@@ -22,10 +26,13 @@ $pairedApiPos=strpos($entry,'val pairedApi = TradeApi(server, token)');
 $pairedStatusPos=strpos($entry,'val status = pairedApi.status()');
 $pairedContractPos=strpos($entry,'if (!pairedApi.isContractCompatible())');
 $pairedSavePos=strpos($entry,'withContext(Dispatchers.IO) { prefs.save(server, token) }');
-appDebugAssert($pairedApiPos!==false&&$pairedStatusPos!==false&&$pairedContractPos!==false&&$pairedSavePos!==false,'Automatic pairing must authenticate the returned token and validate the API contract.');
-appDebugAssert($pairedApiPos<$pairedStatusPos&&$pairedStatusPos<$pairedContractPos&&$pairedContractPos<$pairedSavePos,'Automatic pairing must validate before encrypted token persistence.');
-appDebugAssert(str_contains($entry,'if (server != TRUSTED_SERVER)'),'Pairing callback must pin the Backend to the trusted server.');
-appDebugAssert(str_contains($entry,'if (token.isBlank())'),'Pairing callback must reject a blank token.');
+appDebugAssert($pairedApiPos!==false&&$pairedStatusPos!==false&&$pairedContractPos!==false&&$pairedSavePos!==false,'Pair-code redemption must authenticate the returned token and validate the API contract.');
+appDebugAssert($pairedApiPos<$pairedStatusPos&&$pairedStatusPos<$pairedContractPos&&$pairedContractPos<$pairedSavePos,'Pair-code redemption must validate before encrypted token persistence.');
+appDebugAssert(str_contains($entry,'if (server != TRUSTED_SERVER)'),'Pair-code redemption must pin the Backend to the trusted server.');
+appDebugAssert(str_contains($entry,'if (token.isBlank())'),'Pair-code redemption must reject a blank token.');
+appDebugAssert(!str_contains($manifest,'android:scheme="trade" android:host="pair"'),'Unverified custom-scheme pairing must not be exported by Android.');
+appDebugAssert(!str_contains($devices,'trade://pair'),'Admin must not generate interceptable custom-scheme pairing links.');
+appDebugAssert(str_contains($devices,'کد اتصال فقط ۱۰ دقیقه اعتبار دارد'),'Admin must explain the secure one-time-code pairing flow.');
 
 appDebugAssert(str_contains($worker,'if (!canNotify()) return Result.success()'),'Missing Android notification permission must not consume unread alerts.');
 appDebugAssert(str_contains($worker,'api.notifications(100, true)'),'Worker must consume a bounded unread batch instead of one notification.');
@@ -35,7 +42,6 @@ appDebugAssert(!str_contains($worker,'api.markNotificationRead(all = true)'),'Wo
 appDebugAssert(str_contains($api,'suspend fun markNotificationsRead'),'Android API client must expose exact batch notification acknowledgement.');
 appDebugAssert(str_contains($api,'notifications.batch_read_v1'),'Batch acknowledgement must be capability-gated.');
 appDebugAssert(str_contains($manifest,'android.permission.POST_NOTIFICATIONS'),'Android 13 notification permission must remain declared.');
-appDebugAssert(str_contains($manifest,'android:scheme="trade" android:host="pair"'),'Pairing callback must remain registered until the verified-link migration is complete.');
 
 appDebugAssert(str_contains($app,'var snapshotJson by remember { mutableStateOf(prefs.offlineSnapshot()) }'),'Large command-center snapshot must not use rememberSaveable/Bundle persistence.');
 appDebugAssert(!str_contains($app,'var snapshotJson by rememberSaveable'),'Large snapshot must stay out of Android saved-instance state.');
@@ -69,4 +75,4 @@ foreach([$api,$entry,$app,$rotation,$learning] as $source){
     appDebugAssert(!preg_match('/createFuture|openShort|setLeverage|liquidationOrder|futuresOrder/i',$source),'Android must not expose an undeclared Futures/leveraged execution path.');
 }
 
-echo "App callback/notification/state/scroll/chart/page-boundary regression tests passed.\n";
+echo "App pairing/notification/state/scroll/chart/page-boundary regression tests passed.\n";
