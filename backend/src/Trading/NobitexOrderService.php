@@ -248,70 +248,83 @@ final class NobitexOrderService
             ':request'=>json_encode($requestLog,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES),
         ]);
 
+        $ambiguousNetworkError=null;
         try{
+            // Never blindly retry this write. If transport fails after Nobitex
+            // accepted the order, a second POST could create duplicate exposure.
             $response=$client->createOrder($payload);
-            $order=$this->firstOrder($response);
-            $exchangeId=trim((string)($order['id']??''));
-            $state=strtolower(trim((string)($order['status']??'')));
-            $localStatus=in_array($state,['done','completed','filled'],true)?'filled':'submitted';
-            $stmt=$pdo->prepare("UPDATE orders SET exchange_order_id=:id,status=:status,response_json=:response,updated_at=UTC_TIMESTAMP() WHERE local_id=:local");
-            $stmt->execute([
-                ':id'=>$exchangeId!==''?$exchangeId:null,
-                ':status'=>$localStatus,
-                ':response'=>json_encode($response,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES),
-                ':local'=>$localId,
-            ]);
-            $this->audit('nobitex.order_submitted',[
-                'local_id'=>$localId,
-                'exchange_order_id'=>$exchangeId,
-                'side'=>$side,
-                'mode'=>$mode,
-                'source'=>$source,
-                'order_rules'=>$orderRules,
-                'order_value_guard'=>$orderValueGuard,
-                'execution_plan'=>$executionPlan,
-                'execution_learning'=>$executionLearning,
-                'adaptive_execution'=>$adaptiveExecution,
-                'global_risk'=>$globalRisk,
-                'replace_position_id'=>$replacePositionId?:null,
-            ]);
-            try{
-                (new TradeNotificationCenter())->emit(
-                    'order:'.$localId,
-                    'trade',
-                    'success',
-                    $side==='buy'?'سفارش خرید ارسال شد':'سفارش فروش ارسال شد',
-                    $symbol.' • '.strtoupper($mode),
-                    ['local_id'=>$localId,'symbol'=>$symbol,'side'=>$side,'mode'=>$mode]
-                );
-            }catch(\Throwable){}
-            return[
-                'local_id'=>$localId,
-                'exchange'=>$response,
-                'order'=>$order,
-                'order_rules'=>$orderRules,
-                'order_value_guard'=>$orderValueGuard,
-                'execution_plan'=>$executionPlan,
-                'execution_learning'=>$executionLearning,
-                'adaptive_execution'=>$adaptiveExecution,
-                'global_risk'=>$globalRisk,
-            ];
         }catch(\Throwable $e){
-            $stmt=$pdo->prepare("UPDATE orders SET status='failed',error_text=:error,updated_at=UTC_TIMESTAMP() WHERE local_id=:local");
-            $stmt->execute([':error'=>mb_substr($e->getMessage(),0,1000),':local'=>$localId]);
-            $this->audit('nobitex.order_failed',['local_id'=>$localId,'error'=>$e->getMessage(),'source'=>$source,'symbol'=>$symbol,'side'=>$side,'mode'=>$mode,'order_rules'=>$orderRules]);
-            try{
-                (new TradeNotificationCenter())->emit(
-                    'order-failed:'.$localId,
-                    'execution',
-                    'critical',
-                    'ارسال سفارش ناموفق بود',
-                    $symbol.' • '.mb_substr($e->getMessage(),0,180),
-                    ['local_id'=>$localId,'symbol'=>$symbol,'side'=>$side]
-                );
-            }catch(\Throwable){}
-            throw$e;
+            if(NobitexClient::isTransientNetworkError($e->getMessage())){
+                $response=$this->recoverAmbiguousSubmission($client,$clientOrderId);
+                if($response!==null){
+                    $ambiguousNetworkError=$e->getMessage();
+                    $this->audit('nobitex.order_ambiguous_recovered',[
+                        'local_id'=>$localId,
+                        'client_order_id'=>$clientOrderId,
+                        'source'=>$source,
+                        'symbol'=>$symbol,
+                        'side'=>$side,
+                        'mode'=>$mode,
+                        'network_error'=>mb_substr($e->getMessage(),0,500),
+                    ]);
+                }
+            }
+
+            if(!isset($response)||!is_array($response)){
+                $this->markOrderFailed($pdo,$localId,$e,$source,$symbol,$side,$mode,$orderRules);
+                throw $e;
+            }
         }
+
+        $order=$this->firstOrder($response);
+        $exchangeId=trim((string)($order['id']??''));
+        $localStatus=$this->localStatusForOrder($order);
+        $stmt=$pdo->prepare("UPDATE orders SET exchange_order_id=:id,status=:status,response_json=:response,error_text=:error,updated_at=UTC_TIMESTAMP() WHERE local_id=:local");
+        $stmt->execute([
+            ':id'=>$exchangeId!==''?$exchangeId:null,
+            ':status'=>$localStatus,
+            ':response'=>json_encode($response,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES),
+            ':error'=>$ambiguousNetworkError===null?null:'Recovered after ambiguous network error: '.mb_substr($ambiguousNetworkError,0,850),
+            ':local'=>$localId,
+        ]);
+        $this->audit('nobitex.order_submitted',[
+            'local_id'=>$localId,
+            'exchange_order_id'=>$exchangeId,
+            'side'=>$side,
+            'mode'=>$mode,
+            'source'=>$source,
+            'order_rules'=>$orderRules,
+            'order_value_guard'=>$orderValueGuard,
+            'execution_plan'=>$executionPlan,
+            'execution_learning'=>$executionLearning,
+            'adaptive_execution'=>$adaptiveExecution,
+            'global_risk'=>$globalRisk,
+            'replace_position_id'=>$replacePositionId?:null,
+            'recovered_after_ambiguous_network_error'=>$ambiguousNetworkError!==null,
+        ]);
+        try{
+            (new TradeNotificationCenter())->emit(
+                'order:'.$localId,
+                'trade',
+                'success',
+                $side==='buy'?'سفارش خرید ارسال شد':'سفارش فروش ارسال شد',
+                $symbol.' • '.strtoupper($mode).($ambiguousNetworkError!==null?' • بازیابی پس از قطع ارتباط':''),
+                ['local_id'=>$localId,'symbol'=>$symbol,'side'=>$side,'mode'=>$mode,'ambiguous_recovered'=>$ambiguousNetworkError!==null]
+            );
+        }catch(\Throwable){}
+
+        return[
+            'local_id'=>$localId,
+            'exchange'=>$response,
+            'order'=>$order,
+            'order_rules'=>$orderRules,
+            'order_value_guard'=>$orderValueGuard,
+            'execution_plan'=>$executionPlan,
+            'execution_learning'=>$executionLearning,
+            'adaptive_execution'=>$adaptiveExecution,
+            'global_risk'=>$globalRisk,
+            'ambiguous_submission_recovered'=>$ambiguousNetworkError!==null,
+        ];
     }
 
     public function cancel(string $orderId):array
@@ -392,6 +405,60 @@ final class NobitexOrderService
         $strategy=(string)($details['strategy_key']??$details['selected_strategy']['key']??'');
         return in_array($strategy,['trend_momentum_v1','breakout_v1','mean_reversion_v1'],true)
             && str_starts_with((string)($details['decision_model']??''),'multi_strategy_regime_router_');
+    }
+
+    /**
+     * Recover a possibly-accepted order by idempotently querying its exact
+     * clientOrderId. The create POST is intentionally never repeated.
+     */
+    private function recoverAmbiguousSubmission(NobitexClient $client,string $clientOrderId):?array
+    {
+        foreach([0,250000,750000] as $delayMicros){
+            if($delayMicros>0) usleep($delayMicros);
+            try{
+                $response=$client->orderStatus(null,$clientOrderId);
+                $order=$this->firstOrder($response);
+                if($this->isRecoveredRemoteOrder($order,$clientOrderId)) return $response;
+            }catch(\Throwable){}
+        }
+        return null;
+    }
+
+    private function isRecoveredRemoteOrder(array $order,string $clientOrderId):bool
+    {
+        if($order===[]) return false;
+        $id=trim((string)($order['id']??''));
+        $remoteClientId=trim((string)($order['clientOrderId']??$order['client_order_id']??''));
+        $state=NobitexOrderFill::status($order);
+        if(in_array($state,['failed','rejected'],true)) return false;
+        return $id!==''||($remoteClientId!==''&&hash_equals($clientOrderId,$remoteClientId));
+    }
+
+    private function localStatusForOrder(array $order):string
+    {
+        if(NobitexOrderFill::isDone($order)) return 'filled';
+        return match(NobitexOrderFill::status($order)){
+            'canceled','cancelled'=>'cancelled',
+            'failed','rejected'=>'failed',
+            default=>'submitted',
+        };
+    }
+
+    private function markOrderFailed(\PDO $pdo,string $localId,\Throwable $e,string $source,string $symbol,string $side,string $mode,array $orderRules):void
+    {
+        $stmt=$pdo->prepare("UPDATE orders SET status='failed',error_text=:error,updated_at=UTC_TIMESTAMP() WHERE local_id=:local");
+        $stmt->execute([':error'=>mb_substr($e->getMessage(),0,1000),':local'=>$localId]);
+        $this->audit('nobitex.order_failed',['local_id'=>$localId,'error'=>$e->getMessage(),'source'=>$source,'symbol'=>$symbol,'side'=>$side,'mode'=>$mode,'order_rules'=>$orderRules]);
+        try{
+            (new TradeNotificationCenter())->emit(
+                'order-failed:'.$localId,
+                'execution',
+                'critical',
+                'ارسال سفارش ناموفق بود',
+                $symbol.' • '.mb_substr($e->getMessage(),0,180),
+                ['local_id'=>$localId,'symbol'=>$symbol,'side'=>$side]
+            );
+        }catch(\Throwable){}
     }
 
     private function assertEnabled():void
