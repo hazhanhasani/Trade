@@ -39,6 +39,7 @@ object ReleaseContract {
         "analytics.risk_heatmap_v1",
         "analytics.equity_curve_v1",
         "notifications.center_v1",
+        "notifications.batch_read_v1",
         "notifications.rules_v1",
         "updates.coordinated_backend_android",
         "updates.sha256_verified_apk",
