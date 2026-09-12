@@ -48,9 +48,20 @@ fun TradeEntry(pairingUri: String?, onPairingHandled: () -> Unit) {
             }
 
             val data = JSONObject(response.body).getJSONObject("data")
-            val token = data.getString("token")
+            val token = data.getString("token").trim()
             val server = data.optString("server_url", TRUSTED_SERVER).trimEnd('/')
             if (server != TRUSTED_SERVER) throw SecurityException("آدرس سرور تأیید نشد.")
+            if (token.isBlank()) throw IllegalStateException("Backend توکن اتصال معتبری برنگرداند.")
+
+            // A pairing code is only the credential exchange step. Before the
+            // token enters encrypted device storage, prove that it authenticates
+            // against the trusted server and that Backend/App contracts match.
+            val pairedApi = TradeApi(server, token)
+            val status = pairedApi.status()
+            if (!status.ok) throw IllegalStateException("توکن اتصال تأیید نشد (HTTP ${status.code}).")
+            if (!pairedApi.isContractCompatible()) {
+                throw IllegalStateException("نسخه Backend و اپ هماهنگ نیست؛ اتصال ذخیره نشد.")
+            }
 
             withContext(Dispatchers.IO) { prefs.save(server, token) }
             paired = true
