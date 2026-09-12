@@ -1,217 +1,80 @@
 # Trade
 
-Trade is a production-oriented crypto trading backend for cPanel/shared hosting with a companion Android app. The current production path is focused on **Nobitex spot trading**, live account observability, fee-aware entry filtering, reconciliation, runtime safety, and coordinated backend/Android releases.
+Trade is a production-oriented crypto trading backend for cPanel/shared hosting with a companion Android app. **Nobitex is the sole execution exchange.** Bitpin, AbanTether, Bit24 and Tabdeal are read-only market-data inputs used for consensus and execution hardening.
 
-> Automated trading can lose money. Trade's controls are designed to reduce operational and execution risk; they do not guarantee profit.
+> Automated trading can lose money. Trade's controls reduce operational/execution risk; they do not guarantee profit.
 
 ## Current release
 
-**Backend 1.4.8**
+**Backend 1.4.33**
 
-The stable channel publishes coordinated cPanel and Android artifacts under the `trade-latest` release.
+The stable channel publishes coordinated cPanel and Android artifacts under `trade-latest`.
 
-## What Trade does
+## Core architecture
 
-- live Nobitex spot execution with encrypted API credentials;
-- full IRT/USDT market scanning with internal 1m/5m/15m analysis;
-- multi-strategy regime routing;
-- fee/spread/liquidity/slippage-aware Net Edge filtering;
-- stop loss, take profit, cooldown, daily-loss protection, exposure limits, and position limits;
-- adaptive runtime capacity based on recent realized performance;
-- pending-order watchdog and exchange-wallet reconciliation;
-- global entry circuit for repeated API/runtime failures;
-- stale-safe portfolio snapshots to reduce unnecessary exchange requests;
-- execution learning, strategy learning, edge calibration, Shadow Evaluation, Strategy Lab, and Trade Replay;
-- live Admin Command Center and Android dashboard using the same account-status truth source;
-- Bale notifications for trades, risk events, system warnings, and actionable Cron failures;
-- automatic cPanel update flow with coordinated version/manifest handling;
-- permanently signed Android release pipeline.
+- Nobitex spot execution with encrypted READ + TRADE credentials; withdrawal permission is not required.
+- Full Nobitex IRT/USDT scanning with internal 1m/5m/15m analysis.
+- Read-only multi-source market intelligence from Bitpin, AbanTether, Bit24 and Tabdeal.
+- Median/outlier filtering and Rial/Toman normalization before external data can influence execution.
+- External data is harden-only: it can consume edge, constrain execution or veto an extreme premium; it cannot create BUYs or place orders.
+- Fee/spread/liquidity/slippage-aware Net Edge filtering, stop/take/trailing, cooldown, daily-loss, exposure and position limits.
+- Wallet/order reconciliation, pending watchdog, adaptive capacity, strategy/execution learning and edge calibration.
+- Admin Command Center + Android live dashboard sharing the same Nobitex account truth source.
+- Bale notifications, cPanel auto-update, coordinated manifest and permanently signed Android releases.
 
-## Operator workflow
+## Exchange / Market Data setup
 
-The main operational pages are:
+Use `/admin/exchanges.php`:
 
-- `/admin/` — main dashboard;
-- `/admin/command-center.php` — live trading command center;
-- `/admin/project-health.php` — read-only project/runtime review and BUY readiness;
-- `/admin/bot/` — trading state and positions;
-- `/admin/bot/settings.php` — the canonical trading-settings editor;
-- `/admin/analytics.php` — fee-aware performance analytics;
-- `/admin/notifications.php` — notification center;
-- `/admin/system.php` — host/backend health;
-- `/admin/logs.php` — PHP/runtime errors;
-- `/admin/repair.php` — diagnostics and real CLI Cron test;
-- `/admin/update/` — update center.
+- **Nobitex** — execution credentials and Bot/Live controls.
+- **AbanTether** — encrypted API key, Market Data only.
+- **Bit24** — encrypted API key + Secret Key, Market Data only.
+- **Tabdeal** — public Order Book; optional private keys can be stored for future data features.
+- **Bitpin** — public Order Book only; no private credential, wallet, bot or order surface exists.
 
-### BUY readiness
+The 1.4.32 cleanup removed the retired Bitpin execution implementation and its old database/config state. Version 1.4.33 also removes the final private Bitpin diagnostics from Repair/System Health, leaving Bitpin exclusively inside `MarketDataHub`.
 
-A new automated BUY is allowed only after three layers pass:
+## Operator pages
 
-1. **Runtime readiness** — Bot, API, Live execution, Cron, emergency state, and entry circuit.
-2. **Opportunity quality** — valid strategy/regime, executable liquidity/spread, and positive tradable Net Edge after estimated costs and uncertainty buffers.
-3. **Portfolio risk** — quote balance, pending capacity, effective position capacity, exposure, cooldown, strategy learning, order minimums, and global risk checks.
+- `/admin/` — dashboard
+- `/admin/command-center.php` — live trading command center
+- `/admin/project-health.php` — runtime/BUY readiness
+- `/admin/bot/` — Nobitex bot/positions
+- `/admin/bot/settings.php` — canonical risk/trading settings
+- `/admin/analytics.php` — performance analytics
+- `/admin/exchanges.php` — execution + market-data connections
+- `/admin/notifications.php` — notification center
+- `/admin/system.php` — host/backend health
+- `/admin/logs.php` — runtime errors
+- `/admin/repair.php` — Nobitex/Market Data/Cron diagnostics
+- `/admin/update/` — updater
 
-`/admin/project-health.php` separates these states so an operator can distinguish:
+## BUY readiness
 
-- `READY` — runtime and latest BUY opportunity are both ready;
-- `WAITING_MARKET` — infrastructure is healthy but no acceptable current entry exists;
-- `BLOCKED` — a runtime/risk control is actively preventing new BUYs.
-
-This page is read-only and never submits orders or changes trading settings.
-
-## Settings source of truth
-
-Trading settings are edited only from `/admin/bot/settings.php`. Other trading pages may display the active settings but do not own a second independent configuration state.
-
-Core settings include:
-
-- quote market;
-- risk profile;
-- target position percentage;
-- maximum per-position percentage;
-- stop loss / take profit;
-- daily loss limit;
-- cooldown;
-- maximum positions;
-- scan limit;
-- portfolio exposure limit;
-- maximum pending orders;
-- pending timeout.
-
-## Runtime safety
-
-Trade uses reduction-first/fail-safe behavior for runtime problems:
-
-- SELL/reconciliation paths remain available when fresh BUY risk is blocked;
-- repeated exchange API failures can open a temporary entry circuit;
-- pending orders are reconciled/cancelled instead of silently occupying capacity forever;
-- wallet drift can reduce/close tracked positions without inventing PnL;
-- over-capacity portfolios are reduced sequentially;
-- scaled public market aliases that the authenticated Nobitex order API cannot execute are excluded from automated order submission;
-- portfolio display snapshots are cached/locked to limit avoidable 429 pressure, while live order-risk checks remain fresh.
-
-## Performance and learning
-
-Performance should be evaluated from multiple metrics together:
-
-- realized Net PnL;
-- account equity and drawdown;
-- win rate;
-- profit factor;
-- average realized return;
-- expected edge vs realized return;
-- strategy-level sample counts;
-- execution rejects and failure rate;
-- API/Cron health.
-
-Low trade count alone is not treated as a defect: a healthy bot may intentionally remain in `no_trade` when no candidate survives fees, spread, liquidity, execution and risk filters.
-
-## Project operating system
-
-The repository includes an explicit operating framework for review, prioritization, research, debugging, product decisions, and release discipline:
-
-`docs/PROJECT_OPERATING_SYSTEM.md`
-
-It maps the `/human`, `/expert`, `/ceo`, `/seo`, `/critic`, `/plan`, `/habit`, `/focus`, `/track`, `/review`, `/planner`, `/prioritize`, `/concise`, `/customer`, `/audience`, `/competitor`, `/research`, `/evaluate`, `/innovate`, and `/debug` modes into concrete project rules.
-
-## Private-surface indexing policy
-
-Admin, API, and installer routes are operational/private surfaces. Web requests to these prefixes emit:
-
-`X-Robots-Tag: noindex, nofollow, noarchive`
-
-Trade also emits baseline `X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin` headers for normal web requests.
-
-## Nobitex API setup
-
-Create a Nobitex API key for the bot with the minimum permissions required for account reading and spot trading. Withdrawal permission is not required for Trade and should remain disabled.
-
-Trade keeps exchange secrets on the backend; the Android app does not contain Nobitex private API credentials.
-
-PHP Sodium is required for Nobitex Ed25519 signing.
+A new automated BUY must pass runtime readiness, opportunity quality and portfolio risk. A healthy bot may intentionally remain `no_trade` when no candidate survives fees, spread, liquidity, execution and risk filters.
 
 ## Cron
 
 Recommended cPanel schedule: **Every Minute**.
 
-Example production command:
-
 ```text
 '/opt/cpanel/ea-php83/root/usr/bin/php' '/home/USER/public_html/cron/tick.php' >> '/home/USER/public_html/storage/cron.log' 2>&1
 ```
 
-Use the exact PHP path and account path shown by the Repair/Cron page for the deployed host.
-
-The main tick performs updater checks, reconciliation/safety work, automatic trading, notifications, and run logging. One exchange/runtime component failing should be recorded with a concrete reason instead of being hidden behind a generic Cron message.
+Use the exact paths reported by the Repair/Cron page for the deployed host.
 
 ## Auto update
 
-The backend updater checks the stable GitHub channel periodically, validates the coordinated manifest/checksums, backs up the current backend, installs the package, validates health, and can roll back on failed validation.
+The backend checks the stable GitHub manifest, validates checksums, creates a backup, installs the cPanel package and validates runtime state. When an update is installed during a tick, trading resumes on the following tick rather than continuing inside the process that replaced its own code.
 
-After a backend update is installed during a tick, trading waits until the next tick so execution does not continue inside a process that just replaced its own code.
+Stable release assets: `Trade-cPanel.zip`, `latest.json`, `Trade.apk`.
 
-Stable release:
+## Quality gates
 
-```text
-https://github.com/hazhanhasani/Trade/releases/tag/trade-latest
-```
-
-Release assets:
-
-- `Trade-cPanel.zip`
-- `latest.json`
-- `Trade.apk`
-
-## Quality gate
-
-The PHP Quality Gate covers syntax plus regression tests for:
-
-- strategy/regime routing;
-- signal sanity;
-- strategy/execution learning;
-- edge calibration;
-- fill semantics and accounting;
-- position reconciliation and capacity;
-- runtime safety;
-- external trade reconciliation;
-- executable-symbol policy;
-- portfolio snapshot/rate-limit behavior;
-- currency/Toman display;
-- Iran clock;
-- Admin mobile layout and observability;
-- canonical trading settings;
-- Command Center behavior;
-- Project Operating System / Project Health invariants;
-- Android live-panel parity;
-- Backend ↔ Android API contract parity.
+A release must pass PHP syntax/regression, destructive legacy-cleanup invariants, cPanel packaging, permanent Android signing/signature verification and coordinated manifest publication.
 
 ## Requirements
 
-### cPanel backend
+Backend: PHP 8.2+ (8.3 recommended), PDO MySQL/MariaDB, cURL, OpenSSL, JSON, ZIP, Sodium, HTTPS.
 
-- PHP 8.2+ (8.3 recommended)
-- PDO MySQL / MariaDB
-- cURL
-- OpenSSL
-- JSON
-- ZIP
-- Sodium
-- HTTPS
-
-### Android
-
-- JDK 17
-- Jetpack Compose
-- permanent production signing key
-
-## Release discipline
-
-A release is considered complete only after:
-
-1. PHP syntax and regression tests pass;
-2. cPanel package builds;
-3. Android release builds with permanent signing;
-4. APK signature is verified;
-5. coordinated manifest is generated;
-6. stable assets publish successfully;
-7. the live cPanel host subsequently reports the new backend version.
+Android: JDK 17, Jetpack Compose, permanent production signing key.
