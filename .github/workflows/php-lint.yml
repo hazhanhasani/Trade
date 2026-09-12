@@ -5,16 +5,22 @@ on:
     paths:
       - 'backend/**'
       - 'docs/**'
+      - 'android/app/src/main/AndroidManifest.xml'
+      - 'android/app/src/main/java/ir/trade/app/TradeAlertWorker.kt'
       - 'android/app/src/main/java/ir/trade/app/data/ReleaseContract.kt'
       - 'android/app/src/main/java/ir/trade/app/data/TradeApi.kt'
+      - 'android/app/src/main/java/ir/trade/app/ui/TradeEntry.kt'
       - 'android/app/src/main/java/ir/trade/app/ui/TradeAppV4.kt'
       - '.github/workflows/php-lint.yml'
   pull_request:
     paths:
       - 'backend/**'
       - 'docs/**'
+      - 'android/app/src/main/AndroidManifest.xml'
+      - 'android/app/src/main/java/ir/trade/app/TradeAlertWorker.kt'
       - 'android/app/src/main/java/ir/trade/app/data/ReleaseContract.kt'
       - 'android/app/src/main/java/ir/trade/app/data/TradeApi.kt'
+      - 'android/app/src/main/java/ir/trade/app/ui/TradeEntry.kt'
       - 'android/app/src/main/java/ir/trade/app/ui/TradeAppV4.kt'
 jobs:
   lint:
@@ -29,6 +35,10 @@ jobs:
         run: find backend -type f -name '*.php' -print0 | xargs -0 -n1 php -l
       - name: Database nested transaction regression tests
         run: php backend/tests/database_nested_transaction_test.php
+      - name: App callback and notification regression tests
+        run: php backend/tests/app_runtime_debug_test.php
+      - name: Reporting currency safety regression tests
+        run: php backend/tests/reporting_currency_safety_test.php
       - name: Nobitex strategy regression tests
         run: php backend/tests/trading_strategy_test.php
       - name: Multi-strategy regime/router regression tests
