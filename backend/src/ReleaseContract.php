@@ -56,6 +56,7 @@ final class ReleaseContract
         'analytics.risk_heatmap_v1',
         'analytics.equity_curve_v1',
         'notifications.center_v1',
+        'notifications.batch_read_v1',
         'notifications.rules_v1',
         'observability.host_health_v1',
         'observability.sensitive_error_alerting_v1',
