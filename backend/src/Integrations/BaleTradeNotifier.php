@@ -138,11 +138,20 @@ final class BaleTradeNotifier
         $buysQueued=0;
         $sellsQueued=0;
 
-        $stmt=$pdo->prepare("SELECT id,symbol,asset,quote_asset,amount,entry_price,entry_order_local_id,opened_at FROM nobitex_autotrade_positions WHERE opened_at IS NOT NULL AND opened_at>=:since ORDER BY id ASC LIMIT {$limit}");
+        // Apply LIMIT after excluding already-known deliveries. This prevents a
+        // high-volume 24h recovery scan from repeatedly returning the same first
+        // 100 rows while newer unsent fills wait behind them.
+        $stmt=$pdo->prepare("SELECT p.id,p.symbol,p.asset,p.quote_asset,p.amount,p.entry_price,p.entry_order_local_id,p.opened_at
+            FROM nobitex_autotrade_positions p
+            WHERE p.opened_at IS NOT NULL AND p.opened_at>=:since
+              AND NOT EXISTS (
+                SELECT 1 FROM bale_trade_deliveries d
+                WHERE d.event_key=CONCAT('nobitex-buy-position:',p.id)
+              )
+            ORDER BY p.id ASC LIMIT {$limit}");
         $stmt->execute([':since'=>$since]);
         foreach($stmt->fetchAll()as$row){
             $eventKey='nobitex-buy-position:'.(int)$row['id'];
-            if($this->deliveryExists($pdo,$eventKey))continue;
             $meta=$this->signalMeta($pdo,(string)($row['entry_order_local_id']??''));
             $this->queueConfirmedTrade($eventKey,'buy',[
                 'position_id'=>(int)$row['id'],'symbol'=>(string)$row['symbol'],'asset'=>(string)$row['asset'],
@@ -154,11 +163,19 @@ final class BaleTradeNotifier
             $buysQueued++;
         }
 
-        $stmt=$pdo->prepare("SELECT r.id AS pnl_id,r.position_id,r.pnl,r.pnl_percent,r.net_pnl,r.exit_price,r.amount,r.created_at,p.symbol,p.asset,p.quote_asset,p.entry_price,p.entry_order_local_id FROM nobitex_autotrade_pnl r JOIN nobitex_autotrade_positions p ON p.id=r.position_id WHERE r.created_at>=:since ORDER BY r.id ASC LIMIT {$limit}");
+        $stmt=$pdo->prepare("SELECT r.id AS pnl_id,r.position_id,r.pnl,r.pnl_percent,r.net_pnl,r.exit_price,r.amount,r.created_at,
+                p.symbol,p.asset,p.quote_asset,p.entry_price,p.entry_order_local_id
+            FROM nobitex_autotrade_pnl r
+            JOIN nobitex_autotrade_positions p ON p.id=r.position_id
+            WHERE r.created_at>=:since
+              AND NOT EXISTS (
+                SELECT 1 FROM bale_trade_deliveries d
+                WHERE d.event_key=CONCAT('nobitex-sell-pnl:',r.id)
+              )
+            ORDER BY r.id ASC LIMIT {$limit}");
         $stmt->execute([':since'=>$since]);
         foreach($stmt->fetchAll()as$row){
             $eventKey='nobitex-sell-pnl:'.(int)$row['pnl_id'];
-            if($this->deliveryExists($pdo,$eventKey))continue;
             $meta=$this->signalMeta($pdo,(string)($row['entry_order_local_id']??''));
             $positionId=(int)$row['position_id'];
             $this->queueConfirmedTrade($eventKey,'sell',[
