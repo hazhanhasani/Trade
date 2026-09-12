@@ -82,13 +82,14 @@ final class NobitexFastCycleRunner
                     break;
                 }
 
-                // Align an immediately-filled BUY with the actual spot-wallet base
-                // quantity before another micro-cycle or Bale message. Nobitex may
-                // deduct the BUY fee from received base asset; this reconciliation
-                // is reduction-only and can never create/increase a position.
+                // RuntimeSafety already reconciles wallet/position state before
+                // every engine cycle. Re-query the real wallet after a cycle only
+                // when that cycle actually submitted a BUY, because that is the
+                // moment Nobitex may deduct the fee from received base quantity.
+                // This keeps Bale/next-cycle position amount exact without adding
+                // redundant wallet API traffic to ordinary HOLD/SELL cycles.
                 try {
-                    $openCount=(int)$pdo->query("SELECT COUNT(*) FROM nobitex_autotrade_positions WHERE status='open'")->fetchColumn();
-                    if($openCount>0){
+                    if ($this->containsBuySubmission($last)) {
                         $walletReconcileRuns[]=['cycle'=>$cycle]+(new NobitexPositionReconciler())->reconcile($pdo);
                     }
                 } catch (\Throwable $e) {
@@ -134,6 +135,15 @@ final class NobitexFastCycleRunner
         } finally {
             try { $pdo->query("SELECT RELEASE_LOCK('trade_nobitex_fast_cycle_v1')"); } catch (\Throwable) {}
         }
+    }
+
+    private function containsBuySubmission(array $result): bool
+    {
+        if ((string)($result['status'] ?? '') === 'buy_submitted') return true;
+        foreach ((array)($result['actions'] ?? []) as $action) {
+            if (is_array($action) && (string)($action['status'] ?? '') === 'buy_submitted') return true;
+        }
+        return false;
     }
 
     private function intSetting(PDO $pdo, string $key, int $default, int $min, int $max): int
