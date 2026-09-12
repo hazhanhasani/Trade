@@ -4,13 +4,17 @@ declare(strict_types=1);
 
 namespace Trade\Trading;
 
+use Trade\Database;
+
 /**
- * Profit-first Nobitex signal engine with shadow regime diagnostics.
+ * Cost-aware live multi-strategy Nobitex signal engine.
  *
- * Profit-First v5 remains the primary economic model. The adaptive policy
- * learner is applied only after explicit fee/spread/slippage costs are deducted,
- * so learned evidence may tune residual forecast uncertainty without inventing
- * profitability or bypassing market executability.
+ * Profit-First v5 remains one live candidate, while the regime router can now
+ * promote Trend/Momentum, Breakout, Mean Reversion or High-Volatility Momentum
+ * into live execution when that strategy still has positive edge after the
+ * exact same fee/spread/slippage and uncertainty costs. A bounded inactivity
+ * policy may relax only residual forecast uncertainty; explicit costs and hard
+ * risk/executability gates are never bypassed.
  */
 final class NobitexInternalSignalEngine
 {
@@ -22,12 +26,24 @@ final class NobitexInternalSignalEngine
     private const TARGET_LIQUIDITY_MULTIPLE = 16.0;
     private const MIN_EDGE_BUFFER_PERCENT = 0.12;
     private const MAX_EDGE_BUFFER_PERCENT = 0.55;
+    private const STARVATION_START_SECONDS = 21600;
+    private const STARVATION_FULL_SECONDS = 86400;
+    private const MAX_STARVATION_RELAX_PERCENT = 0.06;
+    private const MIN_STARVATION_BUFFER_PERCENT = 0.06;
+
+    /** @var array<string,mixed>|null */
+    private static ?array $activityCache = null;
 
     public function __construct(
         private readonly SignalEngine $base = new SignalEngine(),
         private readonly NobitexMarketRegimeDetector $regimes = new NobitexMarketRegimeDetector(),
         private readonly NobitexMultiStrategyRouter $router = new NobitexMultiStrategyRouter(),
     ) {}
+
+    public static function resetActivityCache(): void
+    {
+        self::$activityCache = null;
+    }
 
     public function analyze(array $market, array $minutePrices, int $legacyThreshold = 60): array
     {
@@ -46,14 +62,14 @@ final class NobitexInternalSignalEngine
         $i5 = is_array($fiveSignal['indicators'] ?? null) ? $fiveSignal['indicators'] : [];
         $i15 = is_array($fifteenSignal['indicators'] ?? null) ? $fifteenSignal['indicators'] : [];
 
-        $shadowContext = [
+        $strategyContext = [
             'market'=>$market,
             'prices'=>['1m'=>$minute,'5m'=>$five,'15m'=>$fifteen],
             'indicators'=>['1m'=>$i1,'5m'=>$i5,'15m'=>$i15],
         ];
         $marketRegime = $this->regimes->detect($market, $minute, $i1, $i5, $i15);
-        $shadowRoute = $this->router->route($shadowContext, $marketRegime);
-        $shadowSelected = is_array($shadowRoute['selected'] ?? null) ? $shadowRoute['selected'] : [];
+        $strategyRoute = $this->router->route($strategyContext, $marketRegime);
+        $routedSelected = is_array($strategyRoute['selected'] ?? null) ? $strategyRoute['selected'] : [];
 
         $spread = max(0.0, (float) ($market['spread_percent'] ?? 0.0));
         $imbalance = $this->clamp((float) ($market['orderbook_imbalance'] ?? 0.0), -1.0, 1.0);
@@ -127,28 +143,96 @@ final class NobitexInternalSignalEngine
         $liquiditySlippageReserve = $liquidityReady ? (1.0 - $liquidityCoverage) * 0.35 : 0.75;
         $adverseFlowReserve = $imbalance < 0.0 ? min(0.20, abs($imbalance) * 0.20) : 0.0;
         $estimatedCost = $baseFee + $spreadCost + $volatilitySlippageReserve + $liquiditySlippageReserve + $adverseFlowReserve;
-        $netEdge = $gross - $estimatedCost;
 
         $forecastBuffer = self::forecastUncertaintyBuffer(
             $spreadCost, $liquiditySlippageReserve, $adverseFlowReserve, $volatility, $disagreementPenalty, $exhaustionPenalty
         );
-        $edgeBuffer = (float) $forecastBuffer['total_percent'];
+        $activity = $this->entryActivity();
+        $starvation = self::starvationPolicy($activity, (float)$forecastBuffer['total_percent']);
+        $edgeBuffer = (float)$starvation['effective_buffer_percent'];
+
+        $netEdge = $gross - $estimatedCost;
         $tradableNetEdge = $netEdge - $edgeBuffer;
         $expectedNetProfit = $tradableNetEdge > 0.0;
+
         $ready = $liquidityReady && $spread <= $dynamicSpreadLimit
             && is_finite($gross) && is_finite($estimatedCost) && is_finite($netEdge) && is_finite($tradableNetEdge);
 
-        $buyGate = $ready && $expectedNetProfit;
+        $profitBuyGate = $ready && $expectedNetProfit;
         $estimatedExitCost = max($baseFee * 0.50, ($spreadCost * 0.50) + ($volatilitySlippageReserve * 0.50));
-        $sellGate = $ready && $gross < -max(0.05, $estimatedExitCost);
+        $profitSellGate = $ready && $gross < -max(0.05, $estimatedExitCost);
+
+        $routedGross = (float)($routedSelected['gross_edge_percent'] ?? 0.0);
+        $routedNetEdge = $routedGross - $estimatedCost;
+        $routedTradableNetEdge = $routedNetEdge - $edgeBuffer;
+        $routedReady = $ready
+            && (bool)($strategyRoute['entry_enabled'] ?? false)
+            && (bool)($routedSelected['eligible'] ?? false)
+            && is_finite($routedGross)
+            && is_finite($routedTradableNetEdge);
+        $routedBuyGate = $routedReady
+            && (bool)($routedSelected['entry_allowed'] ?? false)
+            && $routedTradableNetEdge > 0.0;
+        $routedSellGate = $ready
+            && (bool)($routedSelected['eligible'] ?? false)
+            && (bool)($routedSelected['exit_bias'] ?? false)
+            && $routedGross < -max(0.05, $estimatedExitCost);
+
         $action = 'hold';
         $reason = 'edge_below_adaptive_safety_buffer';
-        if ($buyGate) { $action = 'buy'; $reason = 'positive_tradable_net_edge_after_costs_and_buffer'; }
-        elseif ($sellGate) { $action = 'sell'; $reason = 'expected_forward_move_negative_after_exit_cost'; }
-        elseif (!$ready) {
+        $liveStrategyKey = 'profit_first_v5';
+        $liveGross = $gross;
+        $liveNetEdge = $netEdge;
+        $liveTradableNetEdge = $tradableNetEdge;
+        $liveConfidence = 0;
+        $liveSelected = [
+            'key'=>'profit_first_v5','eligible'=>true,'entry_allowed'=>$profitBuyGate,'exit_bias'=>$profitSellGate,
+            'gross_edge_percent'=>round($gross, 4),'confidence'=>0,'reason'=>$reason,'holding_horizon_minutes'=>60,
+            'diagnostics'=>[
+                'raw_gross_percent'=>round($rawGross, 4),'regime_penalty_percent'=>round($regimePenalty, 4),
+                'disagreement_penalty_percent'=>round($disagreementPenalty, 4),'exhaustion_penalty_percent'=>round($exhaustionPenalty, 4),
+            ],
+        ];
+
+        if ($profitSellGate || $routedSellGate) {
+            if ($routedSellGate && (!$profitSellGate || $routedGross < $gross)) {
+                $action = 'sell';
+                $reason = 'live_routed_strategy_negative_after_exit_cost';
+                $liveStrategyKey = (string)($routedSelected['key'] ?? 'none');
+                $liveGross = $routedGross;
+                $liveNetEdge = $routedNetEdge;
+                $liveTradableNetEdge = $routedTradableNetEdge;
+                $liveConfidence = (int)($routedSelected['confidence'] ?? 0);
+                $liveSelected = $routedSelected + ['key'=>$liveStrategyKey];
+            } else {
+                $action = 'sell';
+                $reason = 'expected_forward_move_negative_after_exit_cost';
+            }
+        } elseif ($profitBuyGate || $routedBuyGate) {
+            if ($routedBuyGate && (!$profitBuyGate || $routedTradableNetEdge > $tradableNetEdge + 0.0001)) {
+                $action = 'buy';
+                $reason = 'live_routed_strategy_positive_after_costs_and_buffer';
+                $liveStrategyKey = (string)($routedSelected['key'] ?? 'none');
+                $liveGross = $routedGross;
+                $liveNetEdge = $routedNetEdge;
+                $liveTradableNetEdge = $routedTradableNetEdge;
+                $liveConfidence = (int)($routedSelected['confidence'] ?? 0);
+                $liveSelected = $routedSelected + ['key'=>$liveStrategyKey];
+            } else {
+                $action = 'buy';
+                $reason = 'positive_tradable_net_edge_after_costs_and_buffer';
+            }
+        } elseif (!$ready) {
             if (!$liquidityReady) $reason = 'liquidity_not_executable';
             elseif ($spread > $dynamicSpreadLimit) $reason = 'spread_not_executable';
             else $reason = 'market_quality_not_ready';
+        } elseif ((bool)($routedSelected['eligible'] ?? false)) {
+            if ((bool)($routedSelected['entry_allowed'] ?? false) && $routedTradableNetEdge <= 0.0) {
+                $reason = 'routed_strategy_edge_below_cost_and_buffer';
+            } elseif (!(bool)($routedSelected['entry_allowed'] ?? false)) {
+                $routeReason = trim((string)($routedSelected['reason'] ?? 'strategy_not_entry_ready'));
+                $reason = 'routed_strategy_blocked:' . ($routeReason !== '' ? $routeReason : 'strategy_not_entry_ready');
+            }
         }
 
         $spreadQuality = $dynamicSpreadLimit > 0.0 ? 1.0 - $this->clamp($spread / $dynamicSpreadLimit, 0.0, 1.0) : 0.0;
@@ -158,21 +242,40 @@ final class NobitexInternalSignalEngine
             ($liquidityCoverage * 0.35) + ($spreadQuality * 0.30) + ($flowQuality * 0.15)
             + ($trendConsistency * 0.10) + ($agreementQuality * 0.10), 0.0, 1.0
         ));
-        $edgeToCost = $estimatedCost > 0.0 ? $tradableNetEdge / $estimatedCost : $tradableNetEdge;
+        $edgeToCost = $estimatedCost > 0.0 ? $liveTradableNetEdge / $estimatedCost : $liveTradableNetEdge;
         $edgeConfidence = $ready ? min(100, max(0, (int) round(50.0 + ($edgeToCost * 35.0)))) : 0;
         $confidence = $ready ? (int) round(($edgeConfidence * 0.75) + ($qualityScore * 0.25)) : 0;
+        if ($liveConfidence > 0) $confidence = (int)round(($confidence * 0.55) + ($liveConfidence * 0.45));
+
+        $liveSelected['entry_allowed'] = $action === 'buy';
+        $liveSelected['exit_bias'] = $action === 'sell';
+        $liveSelected['reason'] = $reason;
+        $liveSelected['gross_edge_percent'] = round($liveGross, 4);
+        $liveSelected['net_edge_after_execution_cost_percent'] = round($liveNetEdge, 4);
+        $liveSelected['tradable_net_edge_percent'] = round($liveTradableNetEdge, 4);
+        $liveSelected['required_uncertainty_buffer_percent'] = round($edgeBuffer, 4);
+        $liveSelected['confidence'] = $confidence;
 
         $reasons = [];
         foreach ([$one, $fiveSignal, $fifteenSignal] as $signal) {
             foreach ((array) ($signal['reasons'] ?? []) as $r) if (is_string($r) && $r !== '') $reasons[] = $r;
         }
         $strategyCandidates = [];
-        foreach ((array)($shadowRoute['evaluations'] ?? []) as $candidate) {
+        foreach ((array)($strategyRoute['evaluations'] ?? []) as $candidate) {
             if (!is_array($candidate)) continue;
+            $candidateGross = (float)($candidate['gross_edge_percent'] ?? 0.0);
+            $candidateNet = $candidateGross - $estimatedCost;
+            $candidateTradable = $candidateNet - $edgeBuffer;
             $strategyCandidates[] = [
                 'key'=>$candidate['key'] ?? 'unknown','eligible'=>(bool)($candidate['eligible'] ?? false),
                 'entry_allowed'=>(bool)($candidate['entry_allowed'] ?? false),'exit_bias'=>(bool)($candidate['exit_bias'] ?? false),
-                'gross_edge_percent'=>round((float)($candidate['gross_edge_percent'] ?? 0.0), 4),
+                'gross_edge_percent'=>round($candidateGross, 4),
+                'net_edge_after_execution_cost_percent'=>round($candidateNet, 4),
+                'tradable_net_edge_percent'=>round($candidateTradable, 4),
+                'live_cost_gate_passed'=>(bool)($candidate['eligible'] ?? false)
+                    && (bool)($candidate['entry_allowed'] ?? false)
+                    && $ready
+                    && $candidateTradable > 0.0,
                 'confidence'=>(int)($candidate['confidence'] ?? 0),'reason'=>$candidate['reason'] ?? null,
                 'holding_horizon_minutes'=>(int)($candidate['holding_horizon_minutes'] ?? 0),
             ];
@@ -181,29 +284,39 @@ final class NobitexInternalSignalEngine
         $result = [
             'ready'=>$ready,'score'=>0,'confidence'=>$confidence,'confidence_is_gate'=>false,
             'execution_quality_score'=>$qualityScore,'action'=>$action,'reason'=>$reason,
-            'decision_model'=>'profit_first_net_edge_v5_uncertainty_buffer_v2','strategy_key'=>'profit_first_v5',
-            'expected_net_profit'=>$ready && $expectedNetProfit,
-            'expected_gross_move_percent'=>round($gross, 4),'raw_expected_gross_move_percent'=>round($rawGross, 4),
+            'decision_model'=>'cost_aware_live_multistrategy_v1','strategy_key'=>$liveStrategyKey,
+            'expected_net_profit'=>$ready && $action === 'buy' && $liveTradableNetEdge > 0.0,
+            'expected_gross_move_percent'=>round($liveGross, 4),'raw_expected_gross_move_percent'=>round($rawGross, 4),
             'regime_risk_penalty_percent'=>round($regimePenalty, 4),'regime_uncertainty_buffer_percent'=>0.0,
             'strategy_uncertainty_buffer_percent'=>0.0,'timeframe_disagreement_penalty_percent'=>round($disagreementPenalty, 4),
             'exhaustion_penalty_percent'=>round($exhaustionPenalty, 4),'estimated_roundtrip_cost_percent'=>round($estimatedCost, 4),
-            'estimated_exit_cost_percent'=>round($estimatedExitCost, 4),'expected_net_edge_percent'=>round($netEdge, 4),
-            'required_edge_buffer_percent'=>round($edgeBuffer, 4),'tradable_net_edge_percent'=>round($tradableNetEdge, 4),
+            'estimated_exit_cost_percent'=>round($estimatedExitCost, 4),'expected_net_edge_percent'=>round($liveNetEdge, 4),
+            'required_edge_buffer_percent'=>round($edgeBuffer, 4),'tradable_net_edge_percent'=>round($liveTradableNetEdge, 4),
             'minimum_net_edge_percent'=>round($edgeBuffer, 4),'forecast_uncertainty_buffer'=>$forecastBuffer,
+            'entry_starvation_policy'=>$starvation,
             'market_regime'=>$marketRegime,
-            'selected_strategy'=>[
-                'key'=>'profit_first_v5','eligible'=>true,'entry_allowed'=>$buyGate,'exit_bias'=>$sellGate,
-                'gross_edge_percent'=>round($gross, 4),'confidence'=>$confidence,'reason'=>$reason,'holding_horizon_minutes'=>60,
-                'diagnostics'=>[
-                    'raw_gross_percent'=>round($rawGross, 4),'regime_penalty_percent'=>round($regimePenalty, 4),
-                    'disagreement_penalty_percent'=>round($disagreementPenalty, 4),'exhaustion_penalty_percent'=>round($exhaustionPenalty, 4),
-                ],
-            ],
+            'selected_strategy'=>$liveSelected,
             'strategy_candidates'=>$strategyCandidates,
+            'live_multi_strategy'=>[
+                'enabled'=>true,
+                'mode'=>'cost_aware_regime_router',
+                'profit_first_buy_gate'=>$profitBuyGate,
+                'profit_first_tradable_net_edge_percent'=>round($tradableNetEdge, 4),
+                'preferred_strategy'=>$strategyRoute['preferred_strategy'] ?? null,
+                'routed_strategy_key'=>$routedSelected['key'] ?? 'none',
+                'routed_reason'=>$routedSelected['reason'] ?? null,
+                'routed_entry_allowed_before_costs'=>(bool)($routedSelected['entry_allowed'] ?? false),
+                'routed_tradable_net_edge_percent'=>round($routedTradableNetEdge, 4),
+                'routed_live_buy_gate'=>$routedBuyGate,
+                'routed_live_sell_gate'=>$routedSellGate,
+                'selected_live_strategy'=>$liveStrategyKey,
+            ],
+            // Kept for old clients; this block is no longer shadow-only.
             'shadow_multi_strategy'=>[
-                'preferred_strategy'=>$shadowRoute['preferred_strategy'] ?? null,'selected_strategy_key'=>$shadowSelected['key'] ?? 'none',
-                'selected_reason'=>$shadowSelected['reason'] ?? null,'selected_entry_allowed'=>(bool)($shadowSelected['entry_allowed'] ?? false),
-                'selected_exit_bias'=>(bool)($shadowSelected['exit_bias'] ?? false),
+                'execution_mode'=>'live_cost_aware',
+                'preferred_strategy'=>$strategyRoute['preferred_strategy'] ?? null,'selected_strategy_key'=>$routedSelected['key'] ?? 'none',
+                'selected_reason'=>$routedSelected['reason'] ?? null,'selected_entry_allowed'=>(bool)($routedSelected['entry_allowed'] ?? false),
+                'selected_exit_bias'=>(bool)($routedSelected['exit_bias'] ?? false),
             ],
             'execution_quality'=>[
                 'depth_quote'=>round($depthQuote, 8),'minimum_order_quote'=>round($minimumOrder, 8),
@@ -223,9 +336,11 @@ final class NobitexInternalSignalEngine
                 'forecast_buffer_volatility_uncertainty_percent'=>$forecastBuffer['volatility_uncertainty_percent'],
                 'forecast_buffer_disagreement_uncertainty_percent'=>$forecastBuffer['disagreement_uncertainty_percent'],
                 'forecast_buffer_exhaustion_uncertainty_percent'=>$forecastBuffer['exhaustion_uncertainty_percent'],
+                'starvation_relaxation_percent'=>$starvation['relaxation_percent'],
+                'explicit_costs_untouched_by_starvation'=>true,
                 'regime_uncertainty_buffer_percent'=>0.0,'strategy_uncertainty_buffer_percent'=>0.0,'volatility_hard_gate'=>false,
             ],
-            'reasons'=>array_values(array_unique($reasons)),'source'=>'nobitex_profit_first_v5_shadow_multi_strategy_v1',
+            'reasons'=>array_values(array_unique($reasons)),'source'=>'nobitex_live_multistrategy_v1',
             'timeframes'=>[
                 '1m'=>['momentum_percent'=>round($m1,4),'ema_gap_percent'=>round($e1,4),'macd_histogram_percent'=>round($h1,4),'rsi14'=>round($rsi1,2),'samples'=>count($minute)],
                 '5m'=>['momentum_percent'=>round($m5,4),'ema_gap_percent'=>round($e5,4),'macd_histogram_percent'=>round($h5,4),'rsi14'=>round($rsi5,2),'samples'=>count($five)],
@@ -276,6 +391,85 @@ final class NobitexInternalSignalEngine
         ];
     }
 
+    /**
+     * Bounded anti-starvation rule. It can only relax residual uncertainty,
+     * never explicit fees/spread/slippage or structural market/risk gates.
+     */
+    public static function starvationPolicy(array $activity, float $baseBuffer): array
+    {
+        $baseBuffer = max(0.0, $baseBuffer);
+        $idle = is_numeric($activity['seconds_since_last_trade'] ?? null)
+            ? max(0, (int)$activity['seconds_since_last_trade'])
+            : 0;
+
+        $requestedRelax = 0.0;
+        if ($idle >= self::STARVATION_START_SECONDS) {
+            $span = max(1, self::STARVATION_FULL_SECONDS - self::STARVATION_START_SECONDS);
+            $progress = min(1.0, max(0.0, ($idle - self::STARVATION_START_SECONDS) / $span));
+            $requestedRelax = min(
+                self::MAX_STARVATION_RELAX_PERCENT,
+                0.015 + (0.045 * $progress)
+            );
+        }
+
+        $floor = min($baseBuffer, self::MIN_STARVATION_BUFFER_PERCENT);
+        $effective = max($floor, $baseBuffer - $requestedRelax);
+        $actualRelax = max(0.0, $baseBuffer - $effective);
+
+        return [
+            'model'=>'bounded_uncertainty_starvation_v1',
+            'last_trade_at'=>$activity['last_trade_at'] ?? null,
+            'seconds_since_last_trade'=>$idle,
+            'idle_hours'=>round($idle / 3600.0, 2),
+            'armed'=>$actualRelax > 0.0,
+            'base_buffer_percent'=>round($baseBuffer, 4),
+            'relaxation_percent'=>round($actualRelax, 4),
+            'effective_buffer_percent'=>round($effective, 4),
+            'minimum_buffer_percent'=>self::MIN_STARVATION_BUFFER_PERCENT,
+            'explicit_execution_costs_untouched'=>true,
+            'hard_risk_gates_untouched'=>true,
+        ];
+    }
+
+    private function entryActivity(): array
+    {
+        if (self::$activityCache !== null) return self::$activityCache;
+
+        $lastTradeAt = null;
+        $seconds = 0;
+        try {
+            $pdo = Database::connection();
+            $stmt = $pdo->prepare("SELECT value_text FROM settings WHERE key_name='nobitex_last_trade_at' LIMIT 1");
+            $stmt->execute();
+            $value = $stmt->fetchColumn();
+            if ($value !== false && trim((string)$value) !== '') {
+                $lastTradeAt = trim((string)$value);
+            }
+
+            if ($lastTradeAt === null) {
+                $value = $pdo->query(
+                    "SELECT created_at FROM orders WHERE exchange_name='nobitex' ORDER BY id DESC LIMIT 1"
+                )->fetchColumn();
+                if ($value !== false && trim((string)$value) !== '') {
+                    $lastTradeAt = trim((string)$value);
+                }
+            }
+
+            if ($lastTradeAt !== null) {
+                $ts = strtotime($lastTradeAt . ' UTC');
+                if ($ts !== false) $seconds = max(0, time() - $ts);
+            }
+        } catch (\Throwable) {
+            $lastTradeAt = null;
+            $seconds = 0;
+        }
+
+        return self::$activityCache = [
+            'last_trade_at'=>$lastTradeAt,
+            'seconds_since_last_trade'=>$seconds,
+        ];
+    }
+
     private function baseRoundtripFeePercent(array $market): float
     {
         $quote = strtoupper(trim((string) ($market['quote_asset'] ?? 'IRT')));
@@ -286,7 +480,7 @@ final class NobitexInternalSignalEngine
     {
         return [
             'ready'=>false,'score'=>0,'confidence'=>0,'confidence_is_gate'=>false,'execution_quality_score'=>0,
-            'action'=>'hold','reason'=>$reason,'decision_model'=>'profit_first_net_edge_v5_uncertainty_buffer_v2','strategy_key'=>'profit_first_v5',
+            'action'=>'hold','reason'=>$reason,'decision_model'=>'cost_aware_live_multistrategy_v1','strategy_key'=>'none',
             'expected_net_profit'=>false,'expected_gross_move_percent'=>0.0,'raw_expected_gross_move_percent'=>0.0,
             'regime_risk_penalty_percent'=>0.0,'regime_uncertainty_buffer_percent'=>0.0,'strategy_uncertainty_buffer_percent'=>0.0,
             'timeframe_disagreement_penalty_percent'=>0.0,'exhaustion_penalty_percent'=>0.0,'estimated_roundtrip_cost_percent'=>0.0,
@@ -296,13 +490,16 @@ final class NobitexInternalSignalEngine
                 'model'=>'uncertainty_only_v2','base_percent'=>0.0,'friction_uncertainty_percent'=>0.0,
                 'volatility_uncertainty_percent'=>0.0,'disagreement_uncertainty_percent'=>0.0,'exhaustion_uncertainty_percent'=>0.0,'total_percent'=>0.0,
             ],
+            'entry_starvation_policy'=>self::starvationPolicy([], 0.0),
             'market_regime'=>['regime'=>'uncertain','confidence'=>0,'entry_enabled'=>false,'metrics'=>['reason'=>$reason]],
             'selected_strategy'=>[
-                'key'=>'profit_first_v5','eligible'=>false,'entry_allowed'=>false,'exit_bias'=>false,'gross_edge_percent'=>0.0,
-                'confidence'=>0,'reason'=>$reason,'holding_horizon_minutes'=>60,'diagnostics'=>[],
+                'key'=>'none','eligible'=>false,'entry_allowed'=>false,'exit_bias'=>false,'gross_edge_percent'=>0.0,
+                'confidence'=>0,'reason'=>$reason,'holding_horizon_minutes'=>0,'diagnostics'=>[],
             ],
-            'strategy_candidates'=>[],'shadow_multi_strategy'=>[],'execution_quality'=>[],'cost_model'=>[],'reasons'=>[],
-            'source'=>'nobitex_profit_first_v5_shadow_multi_strategy_v1',
+            'strategy_candidates'=>[],'live_multi_strategy'=>['enabled'=>true,'mode'=>'cost_aware_regime_router'],
+            'shadow_multi_strategy'=>['execution_mode'=>'live_cost_aware'],
+            'execution_quality'=>[],'cost_model'=>[],'reasons'=>[],
+            'source'=>'nobitex_live_multistrategy_v1',
             'timeframes'=>['1m'=>['samples'=>count($minute)],'5m'=>['samples'=>count($five)],'15m'=>['samples'=>count($fifteen)]],
             'indicators'=>['samples'=>count($minute)],'tradingview'=>['enabled'=>false,'used'=>false,'required'=>false],
         ];

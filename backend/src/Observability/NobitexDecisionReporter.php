@@ -37,16 +37,16 @@ final class NobitexDecisionReporter
         foreach ($reasonCounts as $key => $count) $reasonSummary[] = $key . '=' . $count;
 
         $summary = [
-            'Backend: ' . $backendVersion . ' | مدل اصلی BUY: Profit-First v5',
+            'Backend: ' . $backendVersion . ' | موتور BUY: Live Multi-Strategy + Cost Gate',
             'تصمیم خرید Nobitex: هیچ سفارش BUY جدیدی ثبت نشد.',
             'علت نهایی: ' . $reason . ' — ' . self::reasonFa($reason),
             'کاندیداهای گزارش‌شده: ' . count($candidates) . ' | ردهای ثبت‌شده: ' . count($rejections),
             'پوزیشن فعال: ' . (string)($result['active_positions'] ?? '—') . '/' . (string)($result['max_positions'] ?? '—')
                 . ' | Pending: ' . (string)($result['pending_orders'] ?? '—') . '/' . (string)($result['max_pending_orders'] ?? '—'),
-            'محل تصمیم: backend/src/Trading/NobitexInternalSignalEngine.php → Profit-First v5 | سپس NobitexPortfolioEngine.php → entryBudget()',
+            'محل تصمیم: NobitexInternalSignalEngine.php → Live Regime Router + Cost Gate | سپس NobitexPortfolioEngine.php → entryBudget()',
         ];
         if ($reasonSummary !== []) $summary[] = 'خلاصه دلایل رد: ' . implode(' | ', array_slice($reasonSummary, 0, 8));
-        $summary[] = 'نکته: Profit-First ابتدا هزینه‌های صریح اجرا را از Gross کم می‌کند؛ Buffer جدید فقط عدم‌قطعیت باقی‌مانده مدل را پوشش می‌دهد و هزینه‌ها را دوباره شارژ نمی‌کند. سپس Risk/Balance/Capacity بررسی می‌شود.';
+        $summary[] = 'نکته: هر استراتژی Live فقط وقتی BUY می‌دهد که پس از کارمزد، Spread، Slippage و Buffer عدم‌قطعیت هنوز Edge مثبت داشته باشد. Anti-starvation فقط Buffer عدم‌قطعیت را محدوداً کاهش می‌دهد و هزینه/ریسک سخت را دور نمی‌زند.';
 
         ErrorReporter::log(
             implode("\n", $summary),
@@ -60,8 +60,8 @@ final class NobitexDecisionReporter
                 'candidate_count'=>count($candidates),
                 'rejection_count'=>count($rejections),
                 'backend_version'=>$backendVersion,
-                'primary_entry_model'=>'profit_first_v5',
-                'multi_strategy_role'=>'shadow_diagnostics',
+                'primary_entry_model'=>'cost_aware_live_multistrategy_v1',
+                'multi_strategy_role'=>'live_execution',
             ],
             'info'
         );
@@ -175,8 +175,8 @@ final class NobitexDecisionReporter
             'spread_not_executable' => 'Spread فعلی از سقف پویا برای اجرای معامله بزرگ‌تر است.',
             'market_quality_not_ready' => 'یکی از مؤلفه‌های کیفیت اجرای بازار معتبر/قابل استفاده نیست.',
             'already_positioned' => 'همین دارایی از قبل پوزیشن فعال دارد و ورود تکراری مسدود است.',
-            'range_reversion_not_entry_ready' => 'این علت مربوط به Shadow/نسخه چنداستراتژی است و دیگر به‌تنهایی گیت اصلی Profit-First را نمی‌بندد.',
-            'strategy_edge_below_execution_costs' => 'این علت مربوط به مدل چنداستراتژی است؛ در مسیر اصلی، Edge Profit-First بعد از کل هزینه‌ها ملاک است.',
+            'range_reversion_not_entry_ready' => 'استراتژی Mean Reversion در این وضعیت Entry آماده ندارد؛ Router استراتژی‌های Live دیگر را نیز بررسی می‌کند.',
+            'strategy_edge_below_execution_costs' => 'Edge استراتژی پس از هزینه‌های اجرا مثبت نیست و سفارش Live ثبت نمی‌شود.',
             'insufficient_balance' => 'موجودی Quote لازم برای این بازار کافی نیست.',
             'daily_loss_limit_reached' => 'حد زیان روزانه تنظیم‌شده فعال شده و BUY جدید را متوقف کرده است.',
             'symbol_cooldown_active' => 'Cooldown همین نماد هنوز تمام نشده است.',
@@ -201,7 +201,7 @@ final class NobitexDecisionReporter
             'high_volatility_rsi_1m_extreme',
             'high_volatility_rsi_5m_exhausted',
             'high_volatility_not_directional_enough',
-            'high_volatility_edge_not_positive' => 'این وضعیت در Shadow Multi-Strategy ثبت شده است؛ در نسخه اصلاح‌شده به‌تنهایی BUY اصلی Profit-First را قفل نمی‌کند.',
+            'high_volatility_edge_not_positive' => 'استراتژی نوسان شدید Live است، اما در این لحظه Edge مثبت قابل معامله پس از هزینه‌ها ندارد.',
             'not_explicitly_recorded' => 'این Candidate در Top List دیده شده ولی دلیل جداگانه‌ای در آرایه Rejections ثبت نشده است.',
             default => 'یکی از شروط سیگنال، اجرا یا ریسک این Candidate را برای BUY نپذیرفته است.',
         };
