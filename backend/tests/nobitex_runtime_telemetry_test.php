@@ -42,7 +42,8 @@ telemetryAssert(str_contains($signal, "'shadow_multi_strategy'=>["), 'Legacy mul
 telemetryAssert(str_contains($signal, "'execution_mode'=>'live_cost_aware'"), 'Legacy diagnostics must disclose that the router now executes live.');
 telemetryAssert(str_contains($signal, '$profitBuyGate = $ready && $expectedNetProfit;'), 'Profit-First candidate must still require executable market plus positive tradable net edge.');
 telemetryAssert(str_contains($signal, '$routedTradableNetEdge > 0.0;'), 'Routed live strategies must pass a positive post-cost/post-buffer edge gate.');
-telemetryAssert(str_contains($signal, "'explicit_execution_costs_untouched_by_starvation'=>true"), 'Anti-starvation must never relax explicit execution costs.');
+telemetryAssert(str_contains($signal, "'explicit_costs_untouched_by_starvation'=>true"), 'Anti-starvation must never relax explicit execution costs.');
+telemetryAssert(str_contains($signal, "'explicit_execution_costs_untouched'=>true"), 'Starvation policy must explicitly preserve execution costs.');
 telemetryAssert(str_contains($engine, 'NobitexInternalSignalEngine::resetActivityCache()'), 'AutoTrader must reset anti-starvation activity cache once per cycle.');
 telemetryAssert(!str_contains($engine, "'global_portfolio_model'=>'global_quote_normalization_v1'"), 'Legacy global portfolio v1 label leaked into runtime telemetry.');
 telemetryAssert(str_contains($engine, 'NobitexRuntimeModels::DECISION'), 'AutoTrader is not using canonical decision telemetry.');
