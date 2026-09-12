@@ -24,6 +24,7 @@ import ir.trade.app.data.TradePreferences
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 
 class RotationActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -45,10 +46,11 @@ private val RotationAmberSoft = Color(0xFFFFF7E5)
 private val RotationRed = Color(0xFFD14343)
 private val RotationRedSoft = Color(0xFFFFF0F0)
 private val RotationStroke = Color(0xFFE7E9F0)
+private val RotationFaLocale = Locale("fa", "IR")
 
 private data class RotationUi(
     val state: String = "loading",
-    val reason: String = "در حال دریافت وضعیت Rotation…",
+    val reason: String = "در حال دریافت وضعیت چرخش سبد…",
     val activePositions: Int = 0,
     val maxPositions: Int = 0,
     val pendingOrders: Int = 0,
@@ -96,7 +98,7 @@ private fun RotationDashboard() {
 
         suspend fun refresh() {
             if (!prefs.isConfigured()) {
-                error = "ابتدا اپ Trade را به Backend متصل کن."
+                error = "ابتدا اپ Trade را به بک‌اند متصل کن."
                 return
             }
             refreshing = true
@@ -109,7 +111,7 @@ private fun RotationDashboard() {
                 val data = JSONObject(response.body).getJSONObject("data")
                 ui = parseRotation(data)
             } catch (e: Exception) {
-                error = e.message ?: "دریافت وضعیت Rotation ناموفق بود."
+                error = e.message ?: "دریافت وضعیت چرخش سبد ناموفق بود."
             } finally {
                 refreshing = false
             }
@@ -132,8 +134,8 @@ private fun RotationDashboard() {
                 item {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("Portfolio Rotation", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
-                            Text("Nobitex • Live decision preview", color = RotationMuted, style = MaterialTheme.typography.bodySmall)
+                            Text("چرخش هوشمند سبد", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+                            Text("نوبیتکس • پیش‌نمایش تصمیم زنده", color = RotationMuted, style = MaterialTheme.typography.bodySmall)
                         }
                         TextButton(onClick = { refreshKey++ }, enabled = !refreshing) { Text(if (refreshing) "…" else "بروزرسانی") }
                     }
@@ -144,7 +146,7 @@ private fun RotationDashboard() {
                         RotationCardBlock {
                             Text("اتصال اپ کامل نیست", fontWeight = FontWeight.Bold, color = RotationRed)
                             Spacer(Modifier.height(8.dp))
-                            Text("ابتدا صفحه اصلی Trade را باز کن و اتصال امن Backend را انجام بده.")
+                            Text("ابتدا صفحه اصلی Trade را باز کن و اتصال امن بک‌اند را انجام بده.")
                             Spacer(Modifier.height(10.dp))
                             Button(onClick = {
                                 context.startActivity(Intent(context, MainActivity::class.java))
@@ -165,17 +167,17 @@ private fun RotationDashboard() {
                     item { RotationComparisonCard(ui) }
                     item { RotationDecisionCard(ui) }
                     item {
-                        Text("تاریخچه Rotation", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+                        Text("تاریخچه چرخش سبد", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
                     }
                     if (ui.history.isEmpty()) {
-                        item { RotationCardBlock { Text("هنوز رویداد Rotation ثبت نشده است.", color = RotationMuted) } }
+                        item { RotationCardBlock { Text("هنوز رویداد چرخش سبد ثبت نشده است.", color = RotationMuted) } }
                     } else {
                         items(ui.history) { row -> RotationHistoryCard(row) }
                     }
                     item {
                         Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFEEF5FF)), shape = RoundedCornerShape(16.dp)) {
                             Text(
-                                "این صفحه فقط Preview است. موتور واقعی قبل از Rotation دوباره بازار را اسکن می‌کند و تمام محدودیت‌های Live، PnL، Pending، Cooldown و هزینه خروج را مجدداً بررسی می‌کند.",
+                                "این صفحه فقط پیش‌نمایش است. موتور واقعی قبل از تعویض دوباره بازار را اسکن می‌کند و وضعیت اجرای زنده، سود/زیان، سفارش‌های در انتظار، وقفه زمانی و هزینه خروج را مجدداً بررسی می‌کند.",
                                 modifier = Modifier.padding(14.dp),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Color(0xFF244C93),
@@ -205,14 +207,14 @@ private fun RotationStateCard(ui: RotationUi, refreshing: Boolean) {
     Card(colors = CardDefaults.cardColors(containerColor = container), shape = RoundedCornerShape(20.dp)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("وضعیت Rotation", fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+                Text("وضعیت چرخش", fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
                 Text(stateFa(ui.state), color = accent, fontWeight = FontWeight.Bold)
             }
             Text(ui.reason, style = MaterialTheme.typography.bodyMedium)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                RotationMetric("پوزیشن", "${ui.activePositions}/${ui.maxPositions}", Modifier.weight(1f))
-                RotationMetric("Pending", ui.pendingOrders.toString(), Modifier.weight(1f))
-                RotationMetric("Cooldown", "${ui.cooldownSeconds}s", Modifier.weight(1f))
+                RotationMetric("پوزیشن", "${faIntRotation(ui.activePositions)}/${faIntRotation(ui.maxPositions)}", Modifier.weight(1f))
+                RotationMetric("در انتظار", faIntRotation(ui.pendingOrders), Modifier.weight(1f))
+                RotationMetric("وقفه", "${faIntRotation(ui.cooldownSeconds)} ثانیه", Modifier.weight(1f))
             }
             Text("آخرین محاسبه: ${ui.generatedAt}${if (refreshing) " • در حال بروزرسانی" else ""}", color = RotationMuted, style = MaterialTheme.typography.bodySmall)
         }
@@ -229,7 +231,7 @@ private fun RotationComparisonCard(ui: RotationUi) {
                 title = "ضعیف‌ترین پوزیشن",
                 symbol = ui.weakestSymbol,
                 edge = ui.weakestEdge,
-                secondary = ui.weakestPnl?.let { "Net PnL ${pct(it)}" } ?: "PnL —",
+                secondary = ui.weakestPnl?.let { "سود/زیان خالص ${pct(it)}" } ?: "سود/زیان —",
                 container = RotationAmberSoft,
                 modifier = Modifier.weight(1f),
             )
@@ -237,7 +239,7 @@ private fun RotationComparisonCard(ui: RotationUi) {
                 title = "بهترین جایگزین",
                 symbol = ui.bestSymbol,
                 edge = ui.bestEdge,
-                secondary = ui.executionQuality?.let { "Quality ${one(it)}" } ?: "Quality —",
+                secondary = ui.executionQuality?.let { "کیفیت ${one(it)}" } ?: "کیفیت —",
                 container = RotationGreenSoft,
                 modifier = Modifier.weight(1f),
             )
@@ -251,14 +253,14 @@ private fun RotationDecisionCard(ui: RotationUi) {
         Text("تصمیم تعویض", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
         Spacer(Modifier.height(10.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            RotationMetric("Edge Diff", ui.advantage?.let(::pct) ?: "—", Modifier.weight(1f))
-            RotationMetric("Required", ui.required?.let(::pct) ?: "—", Modifier.weight(1f))
-            RotationMetric("Surplus", ui.surplus?.let(::pct) ?: "—", Modifier.weight(1f))
+            RotationMetric("اختلاف برتری", ui.advantage?.let(::pct) ?: "—", Modifier.weight(1f))
+            RotationMetric("حد لازم", ui.required?.let(::pct) ?: "—", Modifier.weight(1f))
+            RotationMetric("مازاد", ui.surplus?.let(::pct) ?: "—", Modifier.weight(1f))
         }
         Spacer(Modifier.height(10.dp))
         val rotate = ui.state == "ready" && ui.surplus != null && ui.surplus >= 0
         Text(
-            if (rotate) "ROTATE آماده است — اجرای واقعی هنوز باید اسکن تازه را تأیید کند." else "HOLD — در حال حاضر تعویض توجیه کافی ندارد.",
+            if (rotate) "تعویض آماده است — اجرای واقعی هنوز باید اسکن تازه را تأیید کند." else "نگهداری — در حال حاضر تعویض توجیه کافی ندارد.",
             color = if (rotate) RotationGreen else RotationMuted,
             fontWeight = FontWeight.Bold,
         )
@@ -292,7 +294,7 @@ private fun RotationOpportunity(
     Column(modifier.background(container, RoundedCornerShape(15.dp)).padding(12.dp)) {
         Text(title, color = RotationMuted, style = MaterialTheme.typography.labelSmall)
         Text(symbol, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
-        Text(edge?.let(::pct) ?: "Edge —", color = RotationPrimary, fontWeight = FontWeight.Bold)
+        Text(edge?.let { "لبه ${pct(it)}" } ?: "لبه —", color = RotationPrimary, fontWeight = FontWeight.Bold)
         Text(secondary, color = RotationMuted, style = MaterialTheme.typography.bodySmall)
     }
 }
@@ -368,13 +370,14 @@ private fun JSONObject.optNullableDouble(key: String): Double? {
     return value.takeIf { it.isFinite() }
 }
 
-private fun pct(value: Double): String = String.format(java.util.Locale.US, "%.3f%%", value)
-private fun one(value: Double): String = String.format(java.util.Locale.US, "%.1f", value)
+private fun pct(value: Double): String = String.format(RotationFaLocale, "%.3f%%", value)
+private fun one(value: Double): String = String.format(RotationFaLocale, "%.1f", value)
+private fun faIntRotation(value: Int): String = String.format(RotationFaLocale, "%d", value)
 
 private fun stateFa(state: String): String = when (state) {
     "ready" -> "آماده جایگزینی"
     "standby" -> "آماده‌باش"
-    "cooldown" -> "Cooldown"
+    "cooldown" -> "وقفه زمانی"
     "blocked" -> "مسدود"
     "waiting_data" -> "انتظار داده"
     "disabled" -> "غیرفعال"
@@ -383,20 +386,21 @@ private fun stateFa(state: String): String = when (state) {
 
 private fun reasonFa(reason: String): String = when (reason) {
     "superior_opportunity_after_rotation_costs" -> "فرصت جایگزین پس از هزینه‌های تعویض، برتری کافی دارد."
-    "portfolio_has_free_slot" -> "پورتفو هنوز اسلات آزاد دارد و Rotation لازم نیست."
-    "pending_order_present" -> "تا تعیین تکلیف سفارش Pending، Rotation متوقف است."
-    "rotation_cooldown_active" -> "Cooldown تعویض هنوز تمام نشده است."
+    "portfolio_has_free_slot" -> "سبد هنوز جای خالی دارد و تعویض لازم نیست."
+    "pending_order_present" -> "تا تعیین تکلیف سفارش در انتظار، تعویض متوقف است."
+    "rotation_cooldown_active" -> "وقفه زمانی تعویض هنوز تمام نشده است."
     "no_profitable_replacement_candidate" -> "فرصت خرید جایگزین سودمند پیدا نشده است."
-    "no_rotation_eligible_position" -> "هیچ پوزیشن فعلی شرایط Rotation را ندارد."
-    "replacement_advantage_insufficient" -> "اختلاف Edge برای جبران هزینه تعویض کافی نیست."
-    "position_signal_data_stale" -> "داده پایش پوزیشن‌ها برای Preview تازه نیست."
-    "rotation_disabled" -> "Portfolio Rotation غیرفعال است."
+    "no_rotation_eligible_position" -> "هیچ پوزیشن فعلی شرایط تعویض را ندارد."
+    "replacement_advantage_insufficient" -> "اختلاف لبه برای جبران هزینه تعویض کافی نیست."
+    "position_signal_data_stale" -> "داده پایش پوزیشن‌ها برای پیش‌نمایش تازه نیست."
+    "rotation_disabled" -> "چرخش هوشمند سبد غیرفعال است."
     "kill_switch" -> "توقف اضطراری فعال است."
+    "rotation_preview_unavailable" -> "پیش‌نمایش چرخش در دسترس نیست."
     else -> reason
 }
 
 private fun eventFa(event: String): String = when (event) {
-    "nobitex.rotation.sell_submitted" -> "فروش Rotation ارسال شد"
+    "nobitex.rotation.sell_submitted" -> "فروش برای تعویض ارسال شد"
     "nobitex.rotation.local_state_conflict" -> "نیاز به همگام‌سازی وضعیت"
     "nobitex.rotation.position_scan_failed" -> "خطا در پایش پوزیشن"
     else -> event
