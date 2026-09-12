@@ -56,8 +56,8 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
 
     fun isContractCompatible():Boolean=contractLoaded&&backendApiContract==ReleaseContract.API_CONTRACT&&ReleaseContract.missingCapabilities(backendCapabilities).isEmpty()
     fun apiContract():Int?=backendApiContract
-    fun capabilities():Set<String>=backendCapabilities
-    fun missingCapabilities():Set<String>=ReleaseContract.missingCapabilities(backendCapabilities)
+    fun capabilities(): Set<String> = backendCapabilities
+    fun missingCapabilities(): Set<String> = ReleaseContract.missingCapabilities(backendCapabilities)
 
     private fun cacheStatusData(response:Response){latestStatusDataJson=try{val root=JSONObject(response.body);(root.optJSONObject("data")?:root).toString()}catch(_:Exception){null}}
     private fun mergeLivePanelStatus(response:Response):Response{
