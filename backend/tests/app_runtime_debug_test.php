@@ -10,11 +10,23 @@ $app=(string)file_get_contents($root.'/android/app/src/main/java/ir/trade/app/ui
 $worker=(string)file_get_contents($root.'/android/app/src/main/java/ir/trade/app/TradeAlertWorker.kt');
 $api=(string)file_get_contents($root.'/android/app/src/main/java/ir/trade/app/data/TradeApi.kt');
 $manifest=(string)file_get_contents($root.'/android/app/src/main/AndroidManifest.xml');
+$rotation=(string)file_get_contents($root.'/android/app/src/main/java/ir/trade/app/RotationActivity.kt');
+$learning=(string)file_get_contents($root.'/android/app/src/main/java/ir/trade/app/StrategyLearningActivity.kt');
 
 appDebugAssert(str_contains($entry,'ManualSetupScreen('),'Manual app setup must render a real credential form.');
 appDebugAssert(str_contains($entry,'api.isContractCompatible()'),'Manual setup must validate Backend/App API contract before saving.');
 appDebugAssert(!str_contains($entry,'paired || prefs.isConfigured() || manualSetup'),'Manual setup must not bypass credential validation and enter the dashboard directly.');
 appDebugAssert(str_contains($entry,'PasswordVisualTransformation()'),'Manual token must be visually protected.');
+
+$pairedApiPos=strpos($entry,'val pairedApi = TradeApi(server, token)');
+$pairedStatusPos=strpos($entry,'val status = pairedApi.status()');
+$pairedContractPos=strpos($entry,'if (!pairedApi.isContractCompatible())');
+$pairedSavePos=strpos($entry,'withContext(Dispatchers.IO) { prefs.save(server, token) }');
+appDebugAssert($pairedApiPos!==false&&$pairedStatusPos!==false&&$pairedContractPos!==false&&$pairedSavePos!==false,'Automatic pairing must authenticate the returned token and validate the API contract.');
+appDebugAssert($pairedApiPos<$pairedStatusPos&&$pairedStatusPos<$pairedContractPos&&$pairedContractPos<$pairedSavePos,'Automatic pairing must validate before encrypted token persistence.');
+appDebugAssert(str_contains($entry,'if (server != TRUSTED_SERVER)'),'Pairing callback must pin the Backend to the trusted server.');
+appDebugAssert(str_contains($entry,'if (token.isBlank())'),'Pairing callback must reject a blank token.');
+
 appDebugAssert(str_contains($worker,'if (!canNotify()) return Result.success()'),'Missing Android notification permission must not consume unread alerts.');
 appDebugAssert(str_contains($worker,'api.notifications(100, true)'),'Worker must consume a bounded unread batch instead of one notification.');
 appDebugAssert(str_contains($worker,'MAX_VISIBLE_NOTIFICATIONS'),'Worker must bound visible notification fan-out.');
@@ -37,4 +49,17 @@ appDebugAssert(str_contains($app,'val values = window.map'),'Equity chart min/ma
 appDebugAssert(str_contains($app,'private val FaLocale = Locale("fa", "IR")'),'Primary Android dashboard numbers must use Persian locale formatting.');
 appDebugAssert(str_contains($app,'Futures/معاملات اهرمی در این مسیر اجرا نمی‌شوند'),'App must make the current Spot-only execution boundary explicit.');
 
-echo "App callback/notification/state/scroll/chart regression tests passed.\n";
+// Specialized deep-link dashboards may observe learning/rotation, but they must
+// bootstrap the same authenticated status/capability contract as the main app.
+appDebugAssert(str_contains($rotation,'val status = api.status()'),'Rotation page must authenticate through the canonical status endpoint before loading data.');
+appDebugAssert(str_contains($rotation,'api.rotationStatus(20)'),'Rotation page must use the read-only rotation monitor endpoint.');
+appDebugAssert(str_contains($learning,'val status = api.status()'),'Strategy-learning page must authenticate through the canonical status endpoint before loading data.');
+appDebugAssert(str_contains($learning,'api.strategyLearning(240)')&&str_contains($learning,'api.edgeCalibration()'),'Strategy-learning page must stay on read-only learning/calibration endpoints.');
+
+// Futures/leveraged execution is intentionally absent from the current Spot
+// product. Do not silently introduce leverage through app code or deep links.
+foreach([$api,$entry,$app,$rotation,$learning] as $source){
+    appDebugAssert(!preg_match('/createFuture|openShort|setLeverage|liquidationOrder|futuresOrder/i',$source),'Android must not expose an undeclared Futures/leveraged execution path.');
+}
+
+echo "App callback/notification/state/scroll/chart/page-boundary regression tests passed.\n";
