@@ -57,6 +57,7 @@ $breakout = [
     'market_regime'=>['regime'=>'breakout_up'],
 ];
 assertLearning(NobitexStrategyLearning::strategyKey($breakout) === 'breakout_v1', 'selected strategy fallback mismatch');
+assertLearning(NobitexStrategyLearning::supportsStrategy('high_volatility_momentum_v3'), 'high-volatility live strategy must participate in learning');
 
 $mean = [
     'strategy_key'=>'mean_reversion_v1',

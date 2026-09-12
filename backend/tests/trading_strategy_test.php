@@ -35,23 +35,39 @@ $baseMarket = [
 
 $engine = new NobitexInternalSignalEngine();
 $signal = $engine->analyze($baseMarket, $prices);
-assertTrue(($signal['source'] ?? '') === 'nobitex_profit_first_v5_shadow_multi_strategy_v1', 'restored profit-first source marker missing');
-assertTrue(($signal['decision_model'] ?? '') === 'profit_first_net_edge_v5_uncertainty_buffer_v2', 'restored profit-first decision model missing');
-assertTrue(($signal['strategy_key'] ?? '') === 'profit_first_v5', 'profit-first primary strategy marker missing');
-assertTrue(isset($signal['market_regime']['regime']), 'shadow market regime missing');
-assertTrue(isset($signal['selected_strategy']['key']), 'primary strategy diagnostics missing');
-assertTrue(isset($signal['shadow_multi_strategy']) && is_array($signal['shadow_multi_strategy']), 'shadow multi-strategy diagnostics missing');
+assertTrue(($signal['source'] ?? '') === 'nobitex_live_multistrategy_v1', 'live multi-strategy source marker missing');
+assertTrue(($signal['decision_model'] ?? '') === 'cost_aware_live_multistrategy_v1', 'cost-aware live decision model missing');
+assertTrue(in_array(($signal['strategy_key'] ?? ''), ['profit_first_v5','trend_momentum_v1','breakout_v1','mean_reversion_v1','high_volatility_momentum_v3'], true), 'live strategy marker is invalid');
+assertTrue(isset($signal['market_regime']['regime']), 'market regime missing');
+assertTrue(isset($signal['selected_strategy']['key']), 'selected live strategy diagnostics missing');
+assertTrue(isset($signal['live_multi_strategy']) && is_array($signal['live_multi_strategy']), 'live multi-strategy diagnostics missing');
+assertTrue(($signal['live_multi_strategy']['enabled'] ?? false) === true, 'live multi-strategy execution must be enabled');
+assertTrue(($signal['live_multi_strategy']['mode'] ?? '') === 'cost_aware_regime_router', 'live multi-strategy mode mismatch');
+assertTrue(isset($signal['shadow_multi_strategy']) && is_array($signal['shadow_multi_strategy']), 'legacy multi-strategy compatibility diagnostics missing');
+assertTrue(($signal['shadow_multi_strategy']['execution_mode'] ?? '') === 'live_cost_aware', 'legacy block must disclose live execution mode');
 assertTrue(isset($signal['strategy_candidates']) && is_array($signal['strategy_candidates']), 'strategy candidate diagnostics missing');
-assertTrue(count($signal['strategy_candidates']) === 4, 'all four shadow strategies should still be evaluated');
+assertTrue(count($signal['strategy_candidates']) === 4, 'all four routed strategies should be evaluated');
+foreach ($signal['strategy_candidates'] as $candidate) {
+    assertTrue(array_key_exists('net_edge_after_execution_cost_percent', $candidate), 'strategy candidate must expose post-cost edge');
+    assertTrue(array_key_exists('tradable_net_edge_percent', $candidate), 'strategy candidate must expose tradable post-buffer edge');
+    assertTrue(array_key_exists('live_cost_gate_passed', $candidate), 'strategy candidate must expose the live cost gate');
+}
 assertTrue(isset($signal['execution_quality']) && is_array($signal['execution_quality']), 'execution quality diagnostics missing');
 assertTrue((float)($signal['execution_quality']['liquidity_multiple'] ?? 0) >= 15.9, 'liquidity multiple was not calculated');
 assertTrue(isset($signal['execution_quality_score']), 'execution quality score missing');
 assertTrue(isset($signal['cost_model']['liquidity_slippage_reserve_percent']), 'liquidity cost reserve missing');
 assertTrue(isset($signal['cost_model']['adverse_flow_reserve_percent']), 'adverse flow reserve missing');
-assertTrue(array_key_exists('regime_uncertainty_buffer_percent', $signal['cost_model']), 'shadow regime uncertainty marker missing');
-assertTrue(array_key_exists('strategy_uncertainty_buffer_percent', $signal['cost_model']), 'shadow strategy uncertainty marker missing');
-assertTrue((float)$signal['cost_model']['regime_uncertainty_buffer_percent'] === 0.0, 'shadow regime must not harden the primary BUY gate');
-assertTrue((float)$signal['cost_model']['strategy_uncertainty_buffer_percent'] === 0.0, 'shadow strategy must not harden the primary BUY gate');
+assertTrue(($signal['cost_model']['explicit_costs_untouched_by_starvation'] ?? false) === true, 'inactivity policy must never relax explicit execution costs');
+assertTrue(isset($signal['entry_starvation_policy']) && is_array($signal['entry_starvation_policy']), 'bounded inactivity policy diagnostics missing');
+
+$noStarvation = NobitexInternalSignalEngine::starvationPolicy(['seconds_since_last_trade'=>3600], 0.20);
+assertTrue(abs((float)$noStarvation['effective_buffer_percent'] - 0.20) < 0.000001, 'recent activity must keep uncertainty buffer unchanged');
+$starved = NobitexInternalSignalEngine::starvationPolicy(['seconds_since_last_trade'=>86400], 0.20);
+assertTrue(abs((float)$starved['relaxation_percent'] - 0.06) < 0.000001, '24h inactivity relaxation must remain capped at 0.06%');
+assertTrue(abs((float)$starved['effective_buffer_percent'] - 0.14) < 0.000001, '24h inactivity should relax residual uncertainty only');
+assertTrue(($starved['explicit_execution_costs_untouched'] ?? false) === true, 'starvation policy must preserve explicit costs');
+$smallBuffer = NobitexInternalSignalEngine::starvationPolicy(['seconds_since_last_trade'=>172800], 0.08);
+assertTrue((float)$smallBuffer['effective_buffer_percent'] >= 0.06, 'starvation must preserve its uncertainty floor');
 
 $illiquid = $baseMarket;
 $illiquid['depth_quote'] = 6_000_000.0;
@@ -94,6 +110,24 @@ $stalePosition = [
 ];
 $staleReason = $risk->exitReason(100.1, $stalePosition, 'sell');
 assertTrue($staleReason === 'strategy_stale_capital_release', 'stale near-flat capital should be released on a sell reversal');
+
+$recyclePosition = [
+    'entry_price' => 100.0,
+    'amount' => 1.0,
+    'quote_asset' => 'USDT',
+    'stop_loss' => 95.0,
+    'take_profit' => 108.0,
+    'trailing_stop' => 0.0,
+    'peak_price' => 100.4,
+    'opened_at' => gmdate('Y-m-d H:i:s', time() - 25 * 3600),
+];
+$recycleReason = $risk->exitReason(100.26, $recyclePosition, 'hold');
+assertTrue($recycleReason === 'time_based_capital_recycle', '24h near-flat capital must recycle without waiting for a SELL forecast');
+$youngRecycle = $recyclePosition;
+$youngRecycle['opened_at'] = gmdate('Y-m-d H:i:s', time() - 3600);
+assertTrue($risk->exitReason(100.26, $youngRecycle, 'hold') === null, 'young near-flat position must not be force-recycled');
+$deepLossRecycle = $recyclePosition;
+assertTrue($risk->exitReason(99.0, $deepLossRecycle, 'hold') === null, 'time-based recycler must not force-close a material loss');
 
 $givebackPosition = $stalePosition;
 $givebackPosition['opened_at'] = gmdate('Y-m-d H:i:s', time() - 3600);
@@ -149,4 +183,4 @@ $weakPlan = $rotation->plan($positions, $weakCandidate, $rotationConfig, $now);
 assertTrue(($weakPlan['rotate'] ?? true) === false, 'insufficient replacement edge should not churn the portfolio');
 assertTrue(($weakPlan['reason'] ?? '') === 'replacement_advantage_insufficient', 'insufficient advantage rejection reason mismatch');
 
-echo "Nobitex restored profit-first entry + shadow multi-strategy + execution quality + portfolio rotation regression tests passed.\n";
+echo "Nobitex cost-aware live multi-strategy + bounded anti-starvation + capital recycling regression tests passed.\n";

@@ -26,6 +26,7 @@ final class NobitexStrategyLearning
         'trend_momentum_v1',
         'breakout_v1',
         'mean_reversion_v1',
+        'high_volatility_momentum_v3',
     ];
 
     /** @var array<string,mixed>|null */

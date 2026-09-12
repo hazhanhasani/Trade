@@ -24,6 +24,7 @@ final class NobitexAutoTraderEngine
     public function run(): array
     {
         NobitexUniverseScanner::resetProcessCache();
+        NobitexInternalSignalEngine::resetActivityCache();
         $safety = $this->safeRuntimeSafety();
         $accounting = new NobitexTradeAccounting();
         $accountingBefore = $this->safeAccountingSync($accounting);

@@ -12,13 +12,13 @@ namespace Trade\Trading;
 final class NobitexRuntimeModels
 {
     /**
-     * Profit-first v5 is the primary economic selector. Multi-strategy remains
-     * shadow telemetry; Adaptive Policy Learner may only tune residual forecast
-     * uncertainty after explicit costs have already been deducted.
+     * The regime router is live. Every selected strategy must still prove a
+     * positive edge after explicit fees/spread/slippage and the bounded residual
+     * uncertainty buffer before a real BUY can be submitted.
      */
-    public const STRATEGY_MODE = 'profit_first_v5_shadow_multi_strategy_v1';
-    public const DECISION = 'profit_first_net_edge_v5_uncertainty_buffer_v2';
-    public const SELECTION = 'positive_tradable_net_edge_after_explicit_costs_uncertainty_buffer_v2';
+    public const STRATEGY_MODE = 'live_cost_aware_multi_strategy_v1';
+    public const DECISION = 'cost_aware_live_multistrategy_v1';
+    public const SELECTION = 'best_positive_tradable_edge_across_live_strategies_v1';
     public const PRICE_REFERENCE = NobitexCrossMarketPriceOracle::MODEL;
     public const EXECUTION = 'execution_quality_v2';
     public const EXECUTION_LEARNING = NobitexExecutionLearning::MODEL;

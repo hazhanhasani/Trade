@@ -44,10 +44,13 @@ expectFastCycle(str_contains($schema, "'nobitex_fast_max_runtime_seconds','50'")
 expectFastCycle(str_contains($schema, "cooldown_minutes=LEAST(cooldown_minutes,3)"), 'Balanced/aggressive upgrade must reduce the stale 15-minute re-entry cooldown.');
 expectFastCycle(str_contains($schema, "risk_profile IN ('balanced','aggressive')"), 'Fast cooldown migration must not target safe profile.');
 
-// Faster analysis must never mean forced churn. The profitability model still
-// requires positive tradable edge after fees/slippage/uncertainty.
-expectFastCycle(str_contains($signal, '$expectedNetProfit = $tradableNetEdge > 0.0;'), 'Positive post-cost tradable edge must remain mandatory.');
-expectFastCycle(str_contains($signal, '$buyGate = $ready && $expectedNetProfit;'), 'BUY must still require the positive-edge gate.');
+// Faster analysis must never mean forced churn. Profit-First and every routed
+// live strategy must independently remain positive after execution costs and
+// residual uncertainty before the engine may enter the BUY branch.
+expectFastCycle(str_contains($signal, '$expectedNetProfit = $tradableNetEdge > 0.0;'), 'Profit-First positive post-cost tradable edge must remain mandatory.');
+expectFastCycle(str_contains($signal, '$profitBuyGate = $ready && $expectedNetProfit;'), 'Profit-First BUY must keep the positive-edge gate.');
+expectFastCycle(str_contains($signal, '$routedTradableNetEdge > 0.0;'), 'Routed BUY must keep a positive post-cost/post-buffer edge gate.');
+expectFastCycle(str_contains($signal, 'elseif ($profitBuyGate || $routedBuyGate)'), 'Live BUY branch must be reachable only through a validated positive-edge strategy gate.');
 expectFastCycle(str_contains($risk, '$cooldown = max($cooldown, 30);'), 'Safe risk profile must keep its 30-minute cooldown floor.');
 
 fwrite(STDOUT, "Nobitex fast-cycle responsiveness regression tests passed.\n");

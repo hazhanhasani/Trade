@@ -13,6 +13,11 @@ final class RiskManager
     private const STRATEGY_PROFIT_GIVEBACK_PERCENT = 0.45;
     private const STRATEGY_STALE_RELEASE_SECONDS = 21600;
     private const STRATEGY_STALE_MAX_NET_PERCENT = 0.10;
+    private const CAPITAL_RECYCLE_SOFT_SECONDS = 43200;
+    private const CAPITAL_RECYCLE_HARD_SECONDS = 86400;
+    private const CAPITAL_RECYCLE_SOFT_MIN_NET_PERCENT = 0.05;
+    private const CAPITAL_RECYCLE_HARD_MIN_NET_PERCENT = -0.25;
+    private const CAPITAL_RECYCLE_MAX_NET_PERCENT = 0.35;
     private const IRT_TAKER_FEE_PERCENT = 0.25;
     private const USDT_TAKER_FEE_PERCENT = 0.13;
 
@@ -144,17 +149,31 @@ final class RiskManager
         $configuredTakePercent = $take > 0 ? (($take - $entry) / $entry) * 100.0 : 0.0;
         if ($configuredStopPercent > 0 && $netMovePercent <= -$configuredStopPercent) return 'stop_loss_after_fees';
         if ($configuredTakePercent > 0 && $netMovePercent >= $configuredTakePercent) return 'take_profit_after_fees';
-        if ($signalAction !== 'sell') return null;
 
+        // Capital recycling is independent from a SELL forecast. The previous
+        // implementation placed stale-release logic behind the SELL-signal gate,
+        // allowing near-flat positions to occupy slots indefinitely. Recycle is
+        // deliberately bounded to old, near-flat positions only; it never closes
+        // a material loss and never overrides stop/take/trailing safeguards.
         $heldSeconds = 0;
         $openedAt = trim((string) ($position['opened_at'] ?? ''));
         if ($openedAt !== '') {
             $opened = strtotime($openedAt . ' UTC');
-            if ($opened !== false) {
-                $heldSeconds = max(0, time() - $opened);
-                if ($heldSeconds < self::STRATEGY_MIN_HOLD_SECONDS) return null;
-            }
+            if ($opened !== false) $heldSeconds = max(0, time() - $opened);
         }
+        if ($heldSeconds >= self::CAPITAL_RECYCLE_HARD_SECONDS
+            && $netMovePercent >= self::CAPITAL_RECYCLE_HARD_MIN_NET_PERCENT
+            && $netMovePercent <= self::CAPITAL_RECYCLE_MAX_NET_PERCENT) {
+            return 'time_based_capital_recycle';
+        }
+        if ($heldSeconds >= self::CAPITAL_RECYCLE_SOFT_SECONDS
+            && $netMovePercent >= self::CAPITAL_RECYCLE_SOFT_MIN_NET_PERCENT
+            && $netMovePercent <= self::CAPITAL_RECYCLE_MAX_NET_PERCENT) {
+            return 'time_based_small_profit_recycle';
+        }
+
+        if ($signalAction !== 'sell') return null;
+        if ($heldSeconds < self::STRATEGY_MIN_HOLD_SECONDS) return null;
         if ($netMovePercent >= self::STRATEGY_MIN_NET_PROFIT_PERCENT) return 'strategy_net_profit_capture';
 
         $highestNetPercent = isset($position['highest_net_pnl_percent']) && is_numeric($position['highest_net_pnl_percent'])
