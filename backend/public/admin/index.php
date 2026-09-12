@@ -66,9 +66,9 @@ AppAccess::cleanup($pdo);
 
 $controller = new BotController();
 $status = $controller->status();
-$exchanges = $status['exchanges'];
+$exchanges = is_array($status['exchanges'] ?? null) ? $status['exchanges'] : [];
 $version = Updater::currentVersion();
-$kill = (bool)$status['kill_switch'];
+$kill = (bool)($status['kill_switch'] ?? false);
 $cron = is_array($status['cron_health'] ?? null) ? $status['cron_health'] : [];
 $deviceCount = AppAccess::activeCount($pdo);
 $orders = $pdo->query('SELECT exchange_name,exchange_order_id,market_code,side,status,created_at FROM orders ORDER BY id DESC LIMIT 12')->fetchAll();
@@ -83,10 +83,8 @@ catch (Throwable $e) { $intelligence = ['error'=>mb_substr($e->getMessage(),0,24
 try { $portfolioTruth = (new NobitexPortfolioSnapshotCache())->snapshot($pdo); }
 catch (Throwable $e) { $portfolioTruth = ['status'=>'deferred','reason'=>'valuation_failed','message'=>mb_substr($e->getMessage(),0,240)]; }
 
-$nobitex = $exchanges['nobitex'];
-$bitpin = $exchanges['bitpin'];
+$nobitex = is_array($exchanges['nobitex'] ?? null) ? $exchanges['nobitex'] : [];
 $nbPerf = is_array($nobitex['performance'] ?? null) ? $nobitex['performance'] : [];
-$bpPerf = is_array($bitpin['performance'] ?? null) ? $bitpin['performance'] : [];
 $perfIrt = is_array($nbPerf['by_quote']['IRT'] ?? null)
     ? $nbPerf['by_quote']['IRT']
     : (((string)($nbPerf['quote_asset'] ?? '') === 'IRT' || (string)($nbPerf['display_unit'] ?? '') === 'TOMAN') ? $nbPerf : []);
@@ -129,7 +127,7 @@ require __DIR__ . '/_nav.php';
 <?php tradeAdminNav('dashboard', $version); ?>
 <div class="page-head"><div><div class="page-eyebrow">OVERVIEW / READ ONLY</div><h1>داشبورد</h1><p>این صفحه فقط برای آمار و وضعیت لحظه‌ای است؛ هیچ تنظیم یا کنترل عملیاتی در داشبورد انجام نمی‌شود.</p></div></div>
 
-<section class="hero-panel"><div class="page-eyebrow" style="color:#d8d4ff">PORTFOLIO SNAPSHOT</div><h2>وضعیت معاملات در یک نگاه</h2><p>Nobitex + Bitpin • Portfolio Intelligence • Smart Candidate Fallback</p><div class="hero-pills"><span class="hero-pill">Nobitex Bot <?=onOff((bool)$nobitex['bot_enabled'])?></span><span class="hero-pill">Live <?=onOff((bool)$nobitex['live_execution_enabled'])?></span><span class="hero-pill">Cron <?=$cronHealthy?'HEALTHY':'CHECK'?></span><span class="hero-pill">Kill Switch <?=$kill?'ON':'OFF'?></span><span class="hero-pill">Backend v<?=h($version)?></span></div></section>
+<section class="hero-panel"><div class="page-eyebrow" style="color:#d8d4ff">PORTFOLIO SNAPSHOT</div><h2>وضعیت معاملات در یک نگاه</h2><p>Nobitex Execution • Multi-source Market Data • Portfolio Intelligence</p><div class="hero-pills"><span class="hero-pill">Nobitex Bot <?=onOff((bool)($nobitex['bot_enabled']??false))?></span><span class="hero-pill">Live <?=onOff((bool)($nobitex['live_execution_enabled']??false))?></span><span class="hero-pill">Cron <?=$cronHealthy?'HEALTHY':'CHECK'?></span><span class="hero-pill">Kill Switch <?=$kill?'ON':'OFF'?></span><span class="hero-pill">Backend v<?=h($version)?></span></div></section>
 
 <div class="stat-grid">
 <div class="stat-card live-truth-card"><span>ارزش کیف پول نوبیتکس</span><b><?=$walletTotal!==null?n($walletTotal,0):'—'?></b><small><?=$walletTotal!==null?'تومان • '.h($cacheState).' • '.($cacheAge!==null?n($cacheAge,0).' ثانیه':'—'):'داده معتبر کیف پول در دسترس نیست'?></small></div>
@@ -143,9 +141,8 @@ require __DIR__ . '/_nav.php';
 </div>
 
 <div class="panel-grid">
-<?php foreach(['nobitex'=>'Nobitex','bitpin'=>'Bitpin'] as $key=>$name): $e=$exchanges[$key]; $perf=is_array($e['performance']??null)?$e['performance']:[]; $cap=is_array($e['portfolio_capacity']??null)?$e['portfolio_capacity']:[]; ?>
-<section class="panel"><div class="panel-head"><div><h2><?=$name?></h2><p><?=$key==='nobitex'?'Primary live execution gateway':'Secondary exchange gateway'?></p></div><span class="badge <?=$e['credentials_configured']?'good':'bad'?>">API <?=$e['credentials_configured']?'READY':'OFF'?></span></div><div class="status-line"><span class="badge <?=$e['bot_enabled']?'good':'bad'?>">BOT <?=onOff((bool)$e['bot_enabled'])?></span><span class="badge <?=$e['live_execution_enabled']?'good':'bad'?>">LIVE <?=onOff((bool)$e['live_execution_enabled'])?></span></div><div class="metric-grid" style="margin-top:12px"><div class="metric"><span>Active Positions</span><b><?=n($e['active_position_count']??0,0)?></b></div><div class="metric"><span>Today PnL</span><b><?=n($perf['today_realized_pnl']??0,2)?></b></div><div class="metric"><span>Win Rate</span><b><?=n($perf['win_rate_percent']??0,1)?>٪</b></div></div><?php if($key==='nobitex'&&$max>0):?><div style="margin-top:13px"><div class="progress"><i style="width:<?=round($capPct,2)?>%"></i></div><div class="progress-labels"><span><?=n($active,0)?> پوزیشن فعال</span><span><?=n($cap['remaining_position_slots']??0,0)?> اسلات آزاد</span></div></div><?php endif?></section>
-<?php endforeach; ?>
+<section class="panel"><div class="panel-head"><div><h2>Nobitex</h2><p>Primary live execution gateway</p></div><span class="badge <?=($nobitex['credentials_configured']??false)?'good':'bad'?>">API <?=($nobitex['credentials_configured']??false)?'READY':'OFF'?></span></div><div class="status-line"><span class="badge <?=($nobitex['bot_enabled']??false)?'good':'bad'?>">BOT <?=onOff((bool)($nobitex['bot_enabled']??false))?></span><span class="badge <?=($nobitex['live_execution_enabled']??false)?'good':'bad'?>">LIVE <?=onOff((bool)($nobitex['live_execution_enabled']??false))?></span></div><div class="metric-grid" style="margin-top:12px"><div class="metric"><span>Active Positions</span><b><?=n($nobitex['active_position_count']??0,0)?></b></div><div class="metric"><span>Today PnL</span><b><?=n($perfIrt['today_realized_pnl']??0,2)?></b></div><div class="metric"><span>Win Rate</span><b><?=n($perfIrt['win_rate_percent']??0,1)?>٪</b></div></div><?php if($max>0):?><div style="margin-top:13px"><div class="progress"><i style="width:<?=round($capPct,2)?>%"></i></div><div class="progress-labels"><span><?=n($active,0)?> پوزیشن فعال</span><span><?=n($nbCap['remaining_position_slots']??0,0)?> اسلات آزاد</span></div></div><?php endif?></section>
+<section class="panel"><div class="panel-head"><div><h2>Market Data</h2><p>Bitpin، آبان‌تتر، بیت۲۴ و تبدیل فقط ورودی تحلیلی هستند.</p></div><span class="badge info">READ ONLY</span></div><div class="status-line"><span class="badge info">NO WALLET</span><span class="badge info">NO ORDER</span><span class="badge info">NO LIVE EXECUTION</span></div><div class="metric-grid" style="margin-top:12px"><div class="metric"><span>Execution Venue</span><b>Nobitex only</b></div><div class="metric"><span>External Sources</span><b>4</b></div><div class="metric"><span>Role</span><b>Consensus</b></div></div></section>
 </div>
 
 <section class="panel soft"><div class="panel-head"><div><h2>Portfolio Intelligence</h2><p>خلاصه آماری ریسک تطبیقی؛ تنظیمات Intelligence در ماژول مستقل خودش قرار دارد.</p></div><span class="badge info">READ ONLY</span></div><?php if(isset($intelligence['error'])):?><div class="notice bad">Snapshot در دسترس نیست: <?=h($intelligence['error'])?></div><?php else:?><div class="stat-grid" style="margin-top:0"><div class="stat-card"><span>Current Drawdown</span><b class="<?=$drawdown>=4?'warn-text':'ok'?>"><?=n($drawdown,2)?>٪</b></div><div class="stat-card"><span>Position Multiplier</span><b><?=n($multiplier*100,0)?>٪</b></div><div class="stat-card"><span>Realized Samples</span><b><?=n($samples,0)?></b></div><div class="stat-card"><span>Losing Streak</span><b class="<?=$streak>=3?'warn-text':''?>"><?=n($streak,0)?></b></div></div><?php endif?></section>
