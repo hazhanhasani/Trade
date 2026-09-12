@@ -129,10 +129,10 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     INDEX idx_audit_event (event_name, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS autotrade_settings (
+CREATE TABLE IF NOT EXISTS nobitex_autotrade_settings (
     id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
     enabled TINYINT(1) NOT NULL DEFAULT 0,
-    quote_asset VARCHAR(20) NOT NULL DEFAULT 'USDT',
+    quote_asset VARCHAR(20) NOT NULL DEFAULT 'IRT',
     risk_profile VARCHAR(20) NOT NULL DEFAULT 'balanced',
     position_percent DECIMAL(8,4) NOT NULL DEFAULT 5.0000,
     max_position_percent DECIMAL(8,4) NOT NULL DEFAULT 10.0000,
@@ -143,73 +143,5 @@ CREATE TABLE IF NOT EXISTS autotrade_settings (
     cooldown_minutes SMALLINT UNSIGNED NOT NULL DEFAULT 15,
     last_trade_at DATETIME NULL,
     updated_at DATETIME NOT NULL,
-    INDEX idx_autotrade_enabled (enabled)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS autotrade_signals (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    market_id BIGINT UNSIGNED NOT NULL,
-    symbol VARCHAR(80) NOT NULL,
-    asset VARCHAR(20) NOT NULL DEFAULT 'GRAM',
-    quote_asset VARCHAR(20) NOT NULL,
-    action VARCHAR(12) NOT NULL,
-    score SMALLINT NOT NULL,
-    price DECIMAL(36,18) NOT NULL,
-    details_json LONGTEXT NULL,
-    executed TINYINT(1) NOT NULL DEFAULT 0,
-    order_local_id VARCHAR(64) NULL,
-    created_at DATETIME NOT NULL,
-    INDEX idx_autotrade_signal_created (created_at),
-    INDEX idx_autotrade_signal_action (action, created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS autotrade_positions (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    market_id BIGINT UNSIGNED NOT NULL,
-    symbol VARCHAR(80) NOT NULL,
-    asset VARCHAR(20) NOT NULL DEFAULT 'GRAM',
-    quote_asset VARCHAR(20) NOT NULL,
-    amount DECIMAL(36,18) NOT NULL DEFAULT 0,
-    entry_price DECIMAL(36,18) NOT NULL DEFAULT 0,
-    stop_loss DECIMAL(36,18) NOT NULL DEFAULT 0,
-    take_profit DECIMAL(36,18) NOT NULL DEFAULT 0,
-    status VARCHAR(30) NOT NULL,
-    entry_identifier VARCHAR(80) NOT NULL,
-    entry_order_local_id VARCHAR(64) NULL,
-    entry_exchange_order_id VARCHAR(190) NULL,
-    exit_identifier VARCHAR(80) NULL,
-    exit_order_local_id VARCHAR(64) NULL,
-    exit_exchange_order_id VARCHAR(190) NULL,
-    exit_price DECIMAL(36,18) NULL,
-    realized_pnl DECIMAL(36,18) NULL,
-    opened_at DATETIME NULL,
-    closed_at DATETIME NULL,
-    created_at DATETIME NOT NULL,
-    updated_at DATETIME NOT NULL,
-    INDEX idx_autotrade_position_status (status, created_at),
-    UNIQUE KEY uq_autotrade_entry_identifier (entry_identifier)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS autotrade_pnl (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    position_id BIGINT UNSIGNED NOT NULL,
-    pnl DECIMAL(36,18) NOT NULL,
-    pnl_percent DECIMAL(18,8) NOT NULL,
-    quote_asset VARCHAR(20) NOT NULL,
-    entry_price DECIMAL(36,18) NOT NULL,
-    exit_price DECIMAL(36,18) NOT NULL,
-    amount DECIMAL(36,18) NOT NULL,
-    created_at DATETIME NOT NULL,
-    INDEX idx_autotrade_pnl_created (created_at),
-    CONSTRAINT fk_autotrade_pnl_position FOREIGN KEY (position_id) REFERENCES autotrade_positions(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS autotrade_events (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    level VARCHAR(20) NOT NULL,
-    event_name VARCHAR(120) NOT NULL,
-    context_json LONGTEXT NULL,
-    created_at DATETIME NOT NULL,
-    INDEX idx_autotrade_event_created (created_at),
-    INDEX idx_autotrade_event_name (event_name, created_at)
+    INDEX idx_nobitex_autotrade_settings_enabled (enabled)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

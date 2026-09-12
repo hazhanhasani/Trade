@@ -1,79 +1,47 @@
 # Multi-Exchange Market Data Architecture
 
-## Execution policy
+## Roles
 
-Trade has exactly one live execution venue: **Nobitex**.
+Trade has exactly one execution venue: **Nobitex**.
 
-| Provider | Market data | Order execution |
+| Provider | Market data | Execution credentials / orders |
 | --- | --- | --- |
 | Nobitex | Yes | **Yes — sole execution venue** |
 | AbanTether | Yes | No |
 | Bit24 | Yes | No |
 | Tabdeal | Yes | No |
-| Bitpin | Yes | **No — permanently blocked** |
+| Bitpin | Yes | No |
 
-Bitpin's legacy trading classes remain only as compatibility shims. `OrderService` rejects create/cancel operations, `AutoTraderEngine` is a deterministic `market_data_only` no-op, `BotController` rejects every non-Nobitex execution request, and the cron schedules only `NobitexAutoTraderEngine`.
+Bitpin is implemented only as a public read-only market-data adapter inside `MarketDataHub`, at the same architectural layer as AbanTether, Bit24 and Tabdeal. It has no exchange client, wallet API, order service, bot state, live-execution flag, execution route, private credential record, position table or trading history in Trade.
 
-## Unit normalization
+Upgrades from older Trade builds perform a one-time destructive cleanup of the retired secondary execution stack. Risk settings are migrated to `nobitex_autotrade_settings`, while obsolete execution tables, credentials, orders/history, settings and stale PHP source files are removed.
 
-Nobitex stores logical `IRT` market prices internally in **RLS (Rial)**. External Iranian sources are normalized to **Toman** before they enter the multi-exchange consensus. `NobitexExternalMarketOracle` therefore converts the Nobitex candidate from RLS to Toman before comparing it with the external reference.
+## Unit normalization and consensus
 
-This boundary is intentional and protects the strategy from false 10x arbitrage signals caused by Rial/Toman mismatches.
+Nobitex stores logical `IRT` prices internally in RLS (Rial). External Iranian market sources are normalized to Toman before consensus. `MarketDataHub` requires at least two usable sources and applies both a broad unit/outlier guard and a final market-outlier guard.
 
-## Consensus
-
-`MarketDataHub` requires at least two usable sources. The reference is built with a two-stage median filter:
-
-1. A broad unit/outlier guard rejects quotes more than 12% away from the initial median.
-2. A final market-outlier guard rejects quotes more than 3.5% away from the remaining median.
-
-A single provider can never influence live execution by itself.
-
-## Harden-only rule
-
-External market data is advisory and may only make a Nobitex BUY safer. It can:
-
-- consume part of the expected execution edge;
-- downgrade a market order to the already bounded limit plan;
-- veto an extreme Nobitex premium when consensus quality is sufficient.
-
-It cannot:
-
-- create a BUY signal;
-- increase expected edge or profit;
-- relax a hard price/risk bound;
-- submit, cancel or modify an order on AbanTether, Bit24, Tabdeal or Bitpin.
-
-If external sources are unavailable, stale, malformed or insufficient, the external guard is neutral and the existing Nobitex risk/execution rules remain authoritative.
+External market data is advisory and can only harden a Nobitex BUY: consume expected execution edge, downgrade an execution plan to bounded Limit, or veto an extreme premium. It cannot create a BUY, increase edge, relax risk bounds, or submit/cancel an order.
 
 ## Credentials
 
-Market-data credentials are stored encrypted in `exchange_credentials` using the existing application encryption key. They are entered through **Admin → Exchanges** and are never rendered back into the UI.
-
-- AbanTether: API key used for its authenticated coin-price endpoint.
-- Bit24: API key sent through `X-BIT24-APIKEY` for market-data requests.
-- Tabdeal: public order-book data works without a key; an optional encrypted key/secret slot is retained for future authenticated data features.
-- Bitpin: public order-book only; no trading credential is used by the new architecture.
-
-Nobitex credentials remain separate because they are the only credentials permitted to reach an execution service.
+- AbanTether: encrypted API key.
+- Bit24: encrypted API key + secret/private key.
+- Tabdeal: public order book; optional encrypted key/secret slots for future authenticated data.
+- Bitpin: public order book only; no stored private credentials.
+- Nobitex: separate encrypted execution credentials with READ + TRADE only; withdrawal permission is unnecessary.
 
 ## Operational test
 
-From **Admin → Exchanges**, use **Test USDT/IRT and Consensus** after entering credentials. The result exposes source health, normalized mids and consensus state, but never exposes API keys.
-
-Authenticated provider calls must be verified from the deployed server because CI intentionally disables external-network influence on trading tests.
+Use **Admin → Exchanges → Test USDT/IRT and Consensus**. The result exposes source health, normalized mids and consensus state without rendering stored keys.
 
 ## Regression guarantees
 
-`backend/tests/multi_exchange_market_data_test.php` covers:
+CI verifies that:
 
-- 10x unit-outlier rejection;
-- minimum two-source consensus;
-- no positive edge boost from external data;
-- external premium penalty and extreme-premium veto;
-- AbanTether per-asset response isolation;
-- permanent Bitpin order create/cancel blocking;
-- Nobitex-only Admin/Controller execution ownership;
-- Nobitex-only cron scheduling.
-
-The dedicated GitHub Actions workflow also runs PHP syntax validation and the existing adaptive-execution regression test.
+- the old Bitpin exchange/trading classes no longer exist;
+- installer/API/Android execution paths are Nobitex-only;
+- old Bitpin database tables/data/settings are explicitly purged on upgrade;
+- Bitpin remains present as a public Market Data source;
+- 10x Rial/Toman anomalies are rejected;
+- a single external provider cannot influence execution;
+- external data never creates a positive edge boost.

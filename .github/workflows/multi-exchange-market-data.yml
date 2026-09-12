@@ -2,26 +2,32 @@ name: Multi-Exchange Market Data Gate
 
 on:
   push:
-    branches:
-      - main
-      - debug/multi-exchange-market-data
-  pull_request:
+    branches: [main, debug/multi-exchange-market-data]
     paths:
       - 'backend/src/MarketData/**'
-      - 'backend/src/Exchange/NobitexClient.php'
-      - 'backend/src/Exchange/NobitexOrderRules.php'
-      - 'backend/src/Trading/OrderService.php'
-      - 'backend/src/Trading/AutoTraderEngine.php'
+      - 'backend/src/Trading/Schema.php'
+      - 'backend/src/Trading/NobitexSchema.php'
       - 'backend/src/Trading/BotController.php'
       - 'backend/src/Trading/NobitexOrderService.php'
       - 'backend/src/Trading/NobitexAdaptiveExecutionPolicy.php'
       - 'backend/src/Trading/NobitexExternalMarketOracle.php'
-      - 'backend/cron/tick.php'
+      - 'backend/public/index.php'
+      - 'backend/public/install/index.php'
       - 'backend/public/admin/exchanges.php'
+      - 'backend/database/schema.sql'
       - 'backend/tests/multi_exchange_market_data_test.php'
       - 'backend/tests/bit24_credentials_test.php'
-      - 'backend/tests/nobitex_order_rules_test.php'
+      - 'backend/tests/bitpin_market_data_only_cleanup_test.php'
+      - 'android/app/src/main/java/ir/trade/app/data/TradeApi.kt'
       - '.github/workflows/multi-exchange-market-data.yml'
+  pull_request:
+    paths:
+      - 'backend/src/MarketData/**'
+      - 'backend/src/Trading/**'
+      - 'backend/public/**'
+      - 'backend/database/schema.sql'
+      - 'backend/tests/**'
+      - 'android/app/src/main/java/ir/trade/app/data/TradeApi.kt'
 
 permissions:
   contents: read
@@ -42,8 +48,10 @@ jobs:
         run: find backend -type f -name '*.php' -print0 | xargs -0 -n1 php -l
       - name: Multi-exchange regression
         run: php backend/tests/multi_exchange_market_data_test.php
-      - name: Bit24 two-key credentials regression
+      - name: Bit24 credentials regression
         run: php backend/tests/bit24_credentials_test.php
+      - name: Destructive legacy cleanup regression
+        run: php backend/tests/bitpin_market_data_only_cleanup_test.php
       - name: Nobitex order rules regression
         run: php backend/tests/nobitex_order_rules_test.php
       - name: Existing adaptive execution regression

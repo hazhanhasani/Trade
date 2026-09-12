@@ -105,10 +105,6 @@ final class NobitexSchema
         ];
         foreach($statements as$sql)$pdo->exec($sql);
 
-        // Schema v4 introduced fee accounting/trailing columns. Existing cPanel
-        // installs only need this DDL once. Native PDO prepares are intentionally
-        // not used for SHOW COLUMNS because some MariaDB builds reject placeholders
-        // in SHOW statements and would turn /admin into a generic internal_error.
         if($previous!=='4'){
             self::ensureColumn($pdo,'nobitex_autotrade_positions','entry_fee_quote','DECIMAL(36,18) NULL');
             self::ensureColumn($pdo,'nobitex_autotrade_positions','entry_fee_source','VARCHAR(24) NULL');
@@ -123,7 +119,6 @@ final class NobitexSchema
             self::ensureColumn($pdo,'nobitex_autotrade_positions','unrealized_net_pnl','DECIMAL(36,18) NULL');
             self::ensureColumn($pdo,'nobitex_autotrade_positions','unrealized_net_pnl_percent','DECIMAL(18,8) NULL');
             self::ensureColumn($pdo,'nobitex_autotrade_positions','highest_net_pnl_percent','DECIMAL(18,8) NULL');
-
             self::ensureColumn($pdo,'nobitex_autotrade_pnl','gross_pnl','DECIMAL(36,18) NULL');
             self::ensureColumn($pdo,'nobitex_autotrade_pnl','entry_fee_quote','DECIMAL(36,18) NULL');
             self::ensureColumn($pdo,'nobitex_autotrade_pnl','exit_fee_quote','DECIMAL(36,18) NULL');
@@ -133,8 +128,6 @@ final class NobitexSchema
             self::ensureColumn($pdo,'nobitex_autotrade_pnl','accounted_at','DATETIME NULL');
         }
 
-        $legacy=(bool)(Schema::settings($pdo)['enabled']??false);
-        self::seedSetting($pdo,'autotrade_bitpin_enabled',$legacy?'1':'0');
         self::seedSetting($pdo,'autotrade_nobitex_enabled','0');
         self::seedSetting($pdo,'live_trading_nobitex_enabled','0');
         self::seedSetting($pdo,'nobitex_bootstrap_first_buy_pending','0');
@@ -161,7 +154,6 @@ final class NobitexSchema
             self::writeSetting($pdo,'nobitex_bootstrap_first_buy_pending','1');
             self::writeSetting($pdo,'nobitex_bootstrap_first_buy_armed_at',gmdate('Y-m-d H:i:s'));
         }
-
         if($previous!=='3'&&$previous!=='4'){
             self::writeSetting($pdo,'tradingview_enabled','0');
             self::writeSetting($pdo,'nobitex_scan_limit','20');
@@ -173,17 +165,17 @@ final class NobitexSchema
         self::$ensured=true;
     }
 
-    public static function botEnabled(string $exchange):bool
+    public static function botEnabled(string $exchange='nobitex'):bool
     {
-        self::ensure();$exchange=self::exchange($exchange);$key='autotrade_'.$exchange.'_enabled';
-        $stmt=Database::connection()->prepare('SELECT value_text FROM settings WHERE key_name=:key LIMIT 1');$stmt->execute([':key'=>$key]);
+        self::ensure();self::executionExchange($exchange);
+        $stmt=Database::connection()->prepare("SELECT value_text FROM settings WHERE key_name='autotrade_nobitex_enabled' LIMIT 1");$stmt->execute();
         return in_array(strtolower(trim((string)($stmt->fetchColumn()?:'0'))),['1','true','yes','on'],true);
     }
 
     public static function setBotEnabled(string $exchange,bool $enabled):void
     {
-        self::ensure();$exchange=self::exchange($exchange);self::writeSetting(Database::connection(),'autotrade_'.$exchange.'_enabled',$enabled?'1':'0');
-        if($exchange==='bitpin')Database::connection()->prepare('UPDATE autotrade_settings SET enabled=:v,updated_at=UTC_TIMESTAMP() WHERE id=1')->execute([':v'=>$enabled?1:0]);
+        self::ensure();self::executionExchange($exchange);
+        self::writeSetting(Database::connection(),'autotrade_nobitex_enabled',$enabled?'1':'0');
     }
 
     private static function canArmExistingInstallation(PDO $pdo):bool
@@ -222,22 +214,13 @@ final class NobitexSchema
     private static function ensureColumn(PDO $pdo,string $table,string $column,string $definition):void
     {
         if(!preg_match('/^[a-z0-9_]+$/i',$table)||!preg_match('/^[a-z0-9_]+$/i',$column))throw new \InvalidArgumentException('Invalid schema identifier.');
-        $quoted=$pdo->quote($column);
-        $stmt=$pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$quoted}");
-        if($stmt&&$stmt->fetch())return;
-        try{
-            $pdo->exec("ALTER TABLE `{$table}` ADD COLUMN `{$column}` {$definition}");
-        }catch(\PDOException $e){
-            // A concurrent cron/admin request may have added the same column after
-            // our check. Re-read and accept that race only when the column exists.
-            $check=$pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$quoted}");
-            if($check&&$check->fetch())return;
-            throw $e;
-        }
+        $quoted=$pdo->quote($column);$stmt=$pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$quoted}");if($stmt&&$stmt->fetch())return;
+        try{$pdo->exec("ALTER TABLE `{$table}` ADD COLUMN `{$column}` {$definition}");}
+        catch(\PDOException $e){$check=$pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$quoted}");if($check&&$check->fetch())return;throw$e;}
     }
 
-    private static function exchange(string $exchange):string
+    private static function executionExchange(string $exchange):void
     {
-        $exchange=strtolower(trim($exchange));if(!in_array($exchange,['bitpin','nobitex'],true))throw new \InvalidArgumentException('Unsupported exchange.');return$exchange;
+        if(strtolower(trim($exchange))!=='nobitex')throw new \InvalidArgumentException('Nobitex is the only execution exchange.');
     }
 }
