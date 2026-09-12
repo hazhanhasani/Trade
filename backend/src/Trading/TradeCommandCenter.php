@@ -56,7 +56,7 @@ final class TradeCommandCenter
         $decision = $this->decisionExplainability($pdo);
 
         return [
-            'model'=>'trade_command_center_v2_account_truth',
+            'model'=>'trade_command_center_v3_reporting_truth',
             'headline'=>[
                 'portfolio_value_irt'=>(float)($global['wallet_total_toman'] ?? $global['portfolio_value_irt'] ?? 0),
                 'today_net_pnl_irt'=>(float)($summaryIrt['today_net_pnl'] ?? 0),
@@ -64,7 +64,8 @@ final class TradeCommandCenter
                 'today_realized_bot_pnl_irt'=>(float)($summaryIrt['today_net_pnl'] ?? 0),
                 'month_realized_bot_pnl_irt'=>(float)($summaryIrt['month_net_pnl'] ?? 0),
                 'current_drawdown_percent'=>$accountDd,
-                'drawdown_source'=>'full_spot_wallet_equity',
+                'drawdown_source'=>'raw_spot_wallet_equity_unadjusted_for_cash_flows',
+                'drawdown_cash_flow_adjusted'=>false,
                 'active_positions'=>$activeCount,
                 'configured_max_positions'=>$configuredMax,
                 'effective_max_positions'=>$effectiveMax,
@@ -103,7 +104,7 @@ final class TradeCommandCenter
             'shadow'=>$shadow,
             'settings'=>['current'=>$settings,'presets'=>$this->presets(),'risk_score'=>$this->settingsRiskScore($settings)],
             'notification_rules'=>$this->notificationRules($pdo),
-            'emergency'=>['mode'=>$emergency,'entry_circuit'=>$circuit,'supported_modes'=>['normal','pause_buys','graceful_close','full_stop']],
+            'emergency'=>['mode'=>$emergency,'entry_circuit'=>$circuit,'supported_modes'=>['normal','pause_buys','graceful_close','full_stop'],'kill_switch_owned'=>$this->boolSetting($pdo,'trade_emergency_kill_switch_owned',false)],
             'generated_at'=>gmdate(DATE_ATOM),'generated_at_iran'=>IranClock::nowPayload(),
         ];
     }
@@ -147,10 +148,41 @@ final class TradeCommandCenter
 
     public function setEmergencyMode(string $mode,?PDO $pdo=null):array
     {
-        $pdo??=Database::connection();$mode=strtolower(trim($mode));if(!in_array($mode,['normal','pause_buys','graceful_close','full_stop'],true))throw new \InvalidArgumentException('Unsupported emergency mode.');$current=$this->emergencyMode($pdo);$this->setSetting($pdo,'trade_emergency_mode',$mode);$this->setSetting($pdo,'trade_emergency_changed_at',gmdate('Y-m-d H:i:s'));$controller=new BotController();
-        if($mode==='full_stop')$controller->setKillSwitch(true);elseif($mode==='normal'){$controller->setKillSwitch(false);if(str_starts_with((string)($this->setting($pdo,'nobitex_entry_circuit_reason')??''),'emergency_')){$this->setSetting($pdo,'nobitex_entry_circuit_until','');$this->setSetting($pdo,'nobitex_entry_circuit_reason','');}}else{$this->setSetting($pdo,'nobitex_entry_circuit_until','2099-12-31 23:59:59');$this->setSetting($pdo,'nobitex_entry_circuit_reason','emergency_'.$mode);}
-        $this->event($pdo,'warning','trade.emergency.mode_changed',['from'=>$current,'to'=>$mode]);try{(new TradeNotificationCenter())->emit('emergency:'.time(),'risk',$mode==='normal'?'info':'critical','حالت اضطراری تغییر کرد','وضعیت جدید: '.$mode,['from'=>$current,'to'=>$mode],$pdo);}catch(\Throwable){}
-        return['mode'=>$mode,'previous'=>$current,'graceful_action'=>$mode==='graceful_close'?(new NobitexEmergencyController())->enforce($pdo):null];
+        $pdo??=Database::connection();
+        $mode=strtolower(trim($mode));
+        if(!in_array($mode,['normal','pause_buys','graceful_close','full_stop'],true))throw new \InvalidArgumentException('Unsupported emergency mode.');
+        $current=$this->emergencyMode($pdo);
+        $controller=new BotController();
+        $killBefore=$this->boolSetting($pdo,'kill_switch',false);
+
+        // Emergency may temporarily own the kill switch only when it changed it
+        // from OFF to ON. Leaving emergency must never disable a manually-enabled
+        // kill switch that existed before full_stop was entered.
+        if($mode==='full_stop'&&$current!=='full_stop'){
+            $this->setSetting($pdo,'trade_emergency_kill_switch_owned',$killBefore?'0':'1');
+        }
+
+        $this->setSetting($pdo,'trade_emergency_mode',$mode);
+        $this->setSetting($pdo,'trade_emergency_changed_at',gmdate('Y-m-d H:i:s'));
+
+        if($mode==='full_stop'){
+            $controller->setKillSwitch(true);
+        }elseif($mode==='normal'){
+            $owned=$current==='full_stop'&&$this->boolSetting($pdo,'trade_emergency_kill_switch_owned',false);
+            if($owned)$controller->setKillSwitch(false);
+            $this->setSetting($pdo,'trade_emergency_kill_switch_owned','0');
+            if(str_starts_with((string)($this->setting($pdo,'nobitex_entry_circuit_reason')??''),'emergency_')){
+                $this->setSetting($pdo,'nobitex_entry_circuit_until','');
+                $this->setSetting($pdo,'nobitex_entry_circuit_reason','');
+            }
+        }else{
+            $this->setSetting($pdo,'nobitex_entry_circuit_until','2099-12-31 23:59:59');
+            $this->setSetting($pdo,'nobitex_entry_circuit_reason','emergency_'.$mode);
+        }
+
+        $this->event($pdo,'warning','trade.emergency.mode_changed',['from'=>$current,'to'=>$mode,'kill_switch_before'=>$killBefore,'kill_switch_owned'=>$this->boolSetting($pdo,'trade_emergency_kill_switch_owned',false)]);
+        try{(new TradeNotificationCenter())->emit('emergency:'.time(),'risk',$mode==='normal'?'info':'critical','حالت اضطراری تغییر کرد','وضعیت جدید: '.$mode,['from'=>$current,'to'=>$mode],$pdo);}catch(\Throwable){}
+        return['mode'=>$mode,'previous'=>$current,'kill_switch_preserved'=>$mode==='normal'&&!$this->boolSetting($pdo,'trade_emergency_kill_switch_owned',false),'graceful_action'=>$mode==='graceful_close'?(new NobitexEmergencyController())->enforce($pdo):null];
     }
 
     public function emergencyMode(?PDO $pdo=null):string
@@ -200,22 +232,57 @@ final class TradeCommandCenter
 
     private function correlationHeatmap(PDO $pdo,array $positions):array
     {
-        $symbols=array_slice(array_values(array_unique(array_filter(array_map(static fn($p)=>(string)($p['symbol']??''),$positions)))),0,10);$series=[];foreach($symbols as$s){$st=$pdo->prepare('SELECT price FROM nobitex_autotrade_signals WHERE symbol=:s ORDER BY id DESC LIMIT 60');$st->execute([':s'=>$s]);$prices=array_reverse(array_map('floatval',array_column($st->fetchAll(),'price')));$ret=[];for($i=1;$i<count($prices);$i++)if($prices[$i-1]>0){$r=(($prices[$i]-$prices[$i-1])/$prices[$i-1])*100;if(abs($r)<=25)$ret[]=$r;}$series[$s]=$ret;}$cells=[];foreach($symbols as$a)foreach($symbols as$b){$corr=$a===$b?1.:NobitexPortfolioIntelligence::pearson($series[$a]??[],$series[$b]??[]);$cells[]=['x'=>$a,'y'=>$b,'correlation'=>$corr!==null?round($corr,4):null,'risk'=>$corr===null?'unknown':(abs($corr)>=.86?'high':(abs($corr)>=.65?'medium':'low'))];}return['symbols'=>$symbols,'cells'=>$cells,'threshold'=>.86];
+        $symbols=array_slice(array_values(array_unique(array_filter(array_map(static fn($p)=>(string)($p['symbol']??''),$positions)))),0,10);
+        $series=[];
+        foreach($symbols as$s){
+            $st=$pdo->prepare('SELECT price,created_at FROM nobitex_autotrade_signals WHERE symbol=:s AND created_at>=(UTC_TIMESTAMP()-INTERVAL 24 HOUR) ORDER BY id DESC LIMIT 240');
+            $st->execute([':s'=>$s]);
+            $rows=array_reverse($st->fetchAll());
+            $map=[];
+            foreach($rows as$row){
+                $price=(float)($row['price']??0);$ts=strtotime((string)($row['created_at']??'').' UTC');
+                if($price<=0||$ts===false)continue;
+                $bucket=gmdate('Y-m-d H:i',$ts);
+                $map[$bucket]=$price;
+            }
+            $series[$s]=$map;
+        }
+
+        $cells=[];
+        foreach($symbols as$a)foreach($symbols as$b){
+            $corr=null;$samples=0;
+            if($a===$b){$corr=1.;$samples=count($series[$a]??[]);}else{
+                $keys=array_values(array_intersect(array_keys($series[$a]??[]),array_keys($series[$b]??[])));
+                sort($keys,SORT_STRING);$ra=[];$rb=[];
+                for($i=1,$n=count($keys);$i<$n;$i++){
+                    $prev=$keys[$i-1];$cur=$keys[$i];
+                    $a0=(float)($series[$a][$prev]??0);$a1=(float)($series[$a][$cur]??0);$b0=(float)($series[$b][$prev]??0);$b1=(float)($series[$b][$cur]??0);
+                    if($a0<=0||$b0<=0)continue;
+                    $ar=(($a1-$a0)/$a0)*100;$br=(($b1-$b0)/$b0)*100;
+                    if(abs($ar)>25||abs($br)>25)continue;
+                    $ra[]=$ar;$rb[]=$br;
+                }
+                $samples=min(count($ra),count($rb));
+                if($samples>=10)$corr=NobitexPortfolioIntelligence::pearson($ra,$rb);
+            }
+            $cells[]=['x'=>$a,'y'=>$b,'correlation'=>$corr!==null?round($corr,4):null,'samples'=>$samples,'risk'=>$corr===null?'unknown':(abs($corr)>=.86?'high':(abs($corr)>=.65?'medium':'low'))];
+        }
+        return['model'=>'minute_aligned_signal_correlation_v2','symbols'=>$symbols,'cells'=>$cells,'threshold'=>.86,'minimum_aligned_returns'=>10,'window_hours'=>24];
     }
 
     private function alerts(PDO $pdo,array $status,float $accountDd):array
     {
-        $alerts=[];$n=$status['exchanges']['nobitex']??[];if(!($n['credentials_configured']??false))$alerts[]=$this->alert('critical','api','Nobitex API تنظیم نشده','اتصال صرافی آماده نیست.');if(!($status['cron_health']['healthy']??false))$alerts[]=$this->alert('critical','system','Cron سالم نیست','آخرین اجرای موتور قدیمی یا ناموفق است.');$c=$this->entryCircuit($pdo);if($c['open'])$alerts[]=$this->alert('warning','risk','Circuit باز است',(string)($c['reason']??'ورود جدید موقتاً متوقف شده است.'));$fails=$this->intSetting($pdo,'nobitex_runtime_api_failures',0,0,1000);if($fails>0)$alerts[]=$this->alert($fails>=3?'critical':'warning','api','خطای متوالی API',$fails.' خطای متوالی ثبت شده است.');$pending=(int)($n['portfolio_capacity']['pending_orders']??0);if($pending>0)$alerts[]=$this->alert('warning','execution','سفارش Pending وجود دارد',$pending.' سفارش در انتظار reconcile/fill است.');if($accountDd>=2)$alerts[]=$this->alert($accountDd>=6?'critical':'warning','risk','Drawdown حساب بالا','افت واقعی ارزش کیف پول از سقف ثبت‌شده '.round($accountDd,2).'% است.');$recent=(new TradeNotificationCenter())->recent(30,true,$pdo);foreach($recent as$r)if(in_array((string)$r['priority'],['warning','critical'],true))$alerts[]=['priority'=>$r['priority'],'category'=>$r['category'],'title'=>$r['title'],'body'=>$r['body'],'created_at'=>$r['created_at']];return array_slice($alerts,0,20);
+        $alerts=[];$n=$status['exchanges']['nobitex']??[];if(!($n['credentials_configured']??false))$alerts[]=$this->alert('critical','api','Nobitex API تنظیم نشده','اتصال صرافی آماده نیست.');if(!($status['cron_health']['healthy']??false))$alerts[]=$this->alert('critical','system','Cron سالم نیست','آخرین اجرای موتور قدیمی یا ناموفق است.');$c=$this->entryCircuit($pdo);if($c['open'])$alerts[]=$this->alert('warning','risk','Circuit باز است',(string)($c['reason']??'ورود جدید موقتاً متوقف شده است.'));$fails=$this->intSetting($pdo,'nobitex_runtime_api_failures',0,0,1000);if($fails>0)$alerts[]=$this->alert($fails>=3?'critical':'warning','api','خطای متوالی API',$fails.' خطای متوالی ثبت شده است.');$pending=(int)($n['portfolio_capacity']['pending_orders']??0);if($pending>0)$alerts[]=$this->alert('warning','execution','سفارش Pending وجود دارد',$pending.' سفارش در انتظار reconcile/fill است.');if($accountDd>=2)$alerts[]=$this->alert($accountDd>=6?'critical':'warning','risk','افت ارزش کیف پول بالا','افت ارزش کیف پول از سقف ثبت‌شده '.round($accountDd,2).'% است؛ این شاخص هنوز اثر واریز/برداشت را خنثی نمی‌کند.');$recent=(new TradeNotificationCenter())->recent(30,true,$pdo);foreach($recent as$r)if(in_array((string)$r['priority'],['warning','critical'],true))$alerts[]=['priority'=>$r['priority'],'category'=>$r['category'],'title'=>$r['title'],'body'=>$r['body'],'created_at'=>$r['created_at']];return array_slice($alerts,0,20);
     }
 
     private function accountEquity(PDO $pdo,array $global):array
     {
         $value=(float)($global['wallet_total_toman']??$global['portfolio_value_irt']??0);if($value>0){$last=$pdo->query('SELECT captured_at FROM trade_portfolio_snapshots ORDER BY id DESC LIMIT 1')->fetchColumn();$lastTs=$last!==false?(strtotime((string)$last.' UTC')?:0):0;if($lastTs<=0||time()-$lastTs>=300){$s=$pdo->prepare('INSERT INTO trade_portfolio_snapshots(portfolio_value_toman,source,captured_at) VALUES(:v,:s,UTC_TIMESTAMP())');$s->execute([':v'=>$value,':s'=>(string)($global['valuation_source']??'full_spot_wallet')]);}}
-        $rows=$pdo->query("SELECT portfolio_value_toman,captured_at FROM trade_portfolio_snapshots WHERE captured_at>=(UTC_TIMESTAMP()-INTERVAL 30 DAY) ORDER BY captured_at ASC LIMIT 10000")->fetchAll();$peak=0.;$current=$value;$maxDd=0.;$series=[];foreach($rows as$r){$v=(float)$r['portfolio_value_toman'];if($v<=0)continue;$peak=max($peak,$v);$dd=$peak>0?(($peak-$v)/$peak)*100:0;$maxDd=max($maxDd,$dd);$current=$v;$series[]=['time'=>$r['captured_at'],'portfolio_value_toman'=>round($v,2),'drawdown_percent'=>round($dd,4)];}if($value>0){$current=$value;$peak=max($peak,$value);} $currentDd=$peak>0?(($peak-$current)/$peak)*100:0;return['model'=>'account_wallet_equity_drawdown_v1','samples'=>count($series),'current_value_toman'=>round($current,2),'peak_value_toman'=>round($peak,2),'current_drawdown_percent'=>round($currentDd,4),'max_drawdown_percent'=>round($maxDd,4),'series'=>array_slice($series,-288)];
+        $rows=$pdo->query("SELECT portfolio_value_toman,captured_at FROM trade_portfolio_snapshots WHERE captured_at>=(UTC_TIMESTAMP()-INTERVAL 30 DAY) ORDER BY captured_at ASC LIMIT 10000")->fetchAll();$peak=0.;$current=$value;$maxDd=0.;$series=[];foreach($rows as$r){$v=(float)$r['portfolio_value_toman'];if($v<=0)continue;$peak=max($peak,$v);$dd=$peak>0?(($peak-$v)/$peak)*100:0;$maxDd=max($maxDd,$dd);$current=$v;$series[]=['time'=>$r['captured_at'],'portfolio_value_toman'=>round($v,2),'drawdown_percent'=>round($dd,4)];}if($value>0){$current=$value;$peak=max($peak,$value);} $currentDd=$peak>0?(($peak-$current)/$peak)*100:0;return['model'=>'raw_wallet_equity_drawdown_v2','cash_flow_adjusted'=>false,'cash_flow_adjustment_reason'=>'deposit_withdrawal_ledger_unavailable','samples'=>count($series),'current_value_toman'=>round($current,2),'peak_value_toman'=>round($peak,2),'current_drawdown_percent'=>round($currentDd,4),'max_drawdown_percent'=>round($maxDd,4),'series'=>array_slice($series,-288)];
     }
 
     private function shadowSummary(PDO $pdo):array{$enabled=$this->boolSetting($pdo,'trade_shadow_mode_enabled',true);try{$r=$pdo->query('SELECT COUNT(*) samples,AVG(return_15m) avg_15m,AVG(return_60m) avg_60m,AVG(return_240m) avg_240m,SUM(CASE WHEN return_60m>0 THEN 1 ELSE 0 END) positive_60m FROM nobitex_shadow_signal_outcomes')->fetch()?:[];$n=(int)($r['samples']??0);return['enabled'=>$enabled,'samples'=>$n,'average_return_15m'=>$r['avg_15m']!==null?round((float)$r['avg_15m'],4):null,'average_return_60m'=>$r['avg_60m']!==null?round((float)$r['avg_60m'],4):null,'average_return_240m'=>$r['avg_240m']!==null?round((float)$r['avg_240m'],4):null,'positive_60m_rate_percent'=>$n>0?round(((int)($r['positive_60m']??0)/$n)*100,2):null];}catch(\Throwable){return['enabled'=>$enabled,'samples'=>0];}}
-    private function reports(array $a):array{$i=$a['summary_by_quote']['IRT']??[];return['daily'=>['net_pnl'=>$i['today_net_pnl']??0,'unit'=>'TOMAN','scope'=>'realized_bot_pnl'],'weekly'=>['net_pnl'=>$i['week_net_pnl']??0,'unit'=>'TOMAN','scope'=>'realized_bot_pnl'],'monthly'=>['net_pnl'=>$i['month_net_pnl']??0,'unit'=>'TOMAN','scope'=>'realized_bot_pnl'],'win_rate_percent'=>$i['win_rate_percent']??0,'profit_factor'=>$i['profit_factor']??0,'max_drawdown_absolute'=>$i['max_drawdown_absolute']??0,'best_asset'=>$a['best_asset']??null,'worst_asset'=>$a['worst_asset']??null];}
+    private function reports(array $a):array{$i=$a['summary_by_quote']['IRT']??[];$u=$a['summary_by_quote']['USDT']??[];$pack=static fn(array $s,string $unit,string $quote):array=>['quote_asset'=>$quote,'unit'=>$unit,'daily'=>['net_pnl'=>$s['today_net_pnl']??0],'weekly'=>['net_pnl'=>$s['week_net_pnl']??0],'monthly'=>['net_pnl'=>$s['month_net_pnl']??0],'window'=>['net_pnl'=>$s['net_pnl']??0],'win_rate_percent'=>$s['win_rate_percent']??0,'profit_factor'=>$s['profit_factor']??0,'max_drawdown_absolute'=>$s['max_drawdown_absolute']??0];return['primary_quote'=>'IRT','combined_cross_currency_total_available'=>false,'combined_total_reason'=>'IRT and USDT are not added without an explicit FX normalization rate','daily'=>['net_pnl'=>$i['today_net_pnl']??0,'unit'=>'TOMAN','quote_asset'=>'IRT','scope'=>'realized_bot_pnl_irt_only'],'weekly'=>['net_pnl'=>$i['week_net_pnl']??0,'unit'=>'TOMAN','quote_asset'=>'IRT','scope'=>'realized_bot_pnl_irt_only'],'monthly'=>['net_pnl'=>$i['month_net_pnl']??0,'unit'=>'TOMAN','quote_asset'=>'IRT','scope'=>'realized_bot_pnl_irt_only'],'by_quote'=>['IRT'=>$pack($i,'TOMAN','IRT'),'USDT'=>$pack($u,'USDT','USDT')],'win_rate_percent'=>$i['win_rate_percent']??0,'profit_factor'=>$i['profit_factor']??0,'max_drawdown_absolute'=>$i['max_drawdown_absolute']??0,'best_asset'=>$a['best_asset']??null,'worst_asset'=>$a['worst_asset']??null];}
     private function naturalActivity(array $items):array{$o=[];foreach(array_slice($items,0,30)as$i){$t=(string)($i['type']??'');$s=(string)($i['symbol']??'');$text=match($t){'buy'=>'خرید '.$s.' تأیید شد.','sell'=>'فروش '.$s.' تأیید شد'.(isset($i['pnl_percent'])?'؛ بازده '.round((float)$i['pnl_percent'],2).'%':'').'.','external_sell'=>'تغییر موجودی '.$s.' خارج از ربات شناسایی و همگام شد.',default=>'رویداد معاملاتی '.$s};$o[]=$i+['text_fa'=>$text];}return$o;}
     private function globalPortfolio(PDO $pdo):array{try{return(new NobitexPortfolioSnapshotCache())->snapshot($pdo);}catch(\Throwable$e){return['status'=>'deferred','reason'=>'valuation_failed','message'=>mb_substr($e->getMessage(),0,240)];}}
 

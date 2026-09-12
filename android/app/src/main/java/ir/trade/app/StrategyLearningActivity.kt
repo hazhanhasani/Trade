@@ -50,6 +50,7 @@ import ir.trade.app.data.TradeApi
 import ir.trade.app.data.TradePreferences
 import kotlinx.coroutines.delay
 import org.json.JSONObject
+import java.util.Locale
 
 class StrategyLearningActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -70,6 +71,7 @@ private val LearningGreenSoft = Color(0xFFE9F8F2)
 private val LearningAmberSoft = Color(0xFFFFF6E7)
 private val LearningRedSoft = Color(0xFFFFF0F0)
 private val LearningPurpleSoft = Color(0xFFF1EFFF)
+private val LearningFaLocale = Locale("fa", "IR")
 
 private data class LearningStrategyUi(
     val key: String,
@@ -141,7 +143,7 @@ private fun StrategyLearningDashboard() {
 
         suspend fun refresh() {
             if (!prefs.isConfigured()) {
-                error = "ابتدا اپ Trade را به Backend متصل کن."
+                error = "ابتدا اپ Trade را به بک‌اند متصل کن."
                 return
             }
             loading = true
@@ -182,7 +184,7 @@ private fun StrategyLearningDashboard() {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("یادگیری و کالیبراسیون", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black)
-                            Text("Trend • Breakout • Mean Reversion", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
+                            Text("روند • شکست محدوده • بازگشت به میانگین • نوسان شدید", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
                         }
                         TextButton(onClick = { refreshKey++ }, enabled = !loading) { Text(if (loading) "…" else "بروزرسانی") }
                     }
@@ -192,7 +194,7 @@ private fun StrategyLearningDashboard() {
                     item {
                         LearningCard {
                             Text("اتصال اپ کامل نیست", color = LearningRed, fontWeight = FontWeight.Bold)
-                            Text("ابتدا Trade را به Backend متصل کن.", color = LearningMuted)
+                            Text("ابتدا Trade را به بک‌اند متصل کن.", color = LearningMuted)
                             Button(onClick = {
                                 context.startActivity(Intent(context, MainActivity::class.java))
                                 (context as? Activity)?.finish()
@@ -212,35 +214,35 @@ private fun StrategyLearningDashboard() {
                         LearningCard {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) {
-                                    Text("${ui.samples} معامله برای یادگیری", fontWeight = FontWeight.Black)
+                                    Text("${faLearningInt(ui.samples)} معامله برای یادگیری", fontWeight = FontWeight.Black)
                                     Text("فقط نتیجه خالص معاملات بسته‌شده", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
                                 }
-                                LearningBadge("Risk ↓ only", LearningGreen, LearningGreenSoft)
+                                LearningBadge("فقط کاهش ریسک", LearningGreen, LearningGreenSoft)
                             }
                             Text(
-                                "یادگیری حجم و کالیبراسیون Edge هر Strategy/Regime مستقل است. هیچ‌کدام اجازه افزایش ریسک یا آسان‌تر کردن شرط ورود را ندارند.",
+                                "یادگیری حجم و کالیبراسیون لبه برای هر ترکیب استراتژی و وضعیت بازار مستقل است. هیچ‌کدام اجازه افزایش ریسک یا آسان‌تر کردن شرط ورود را ندارند.",
                                 color = LearningMuted,
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
                     }
 
-                    item { Text("سه روش اصلی", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black) }
+                    item { Text("روش‌های معاملاتی", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black) }
                     items(ui.strategies, key = { it.key }) { strategy ->
                         StrategyLearningSummary(strategy)
                     }
 
                     item {
                         Spacer(Modifier.height(2.dp))
-                        Text("Adaptive Edge Calibration", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+                        Text("کالیبراسیون تطبیقی لبه", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
                         Text("پیش‌بینی قبل از ورود با بازده خالص واقعی مقایسه می‌شود.", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
                     }
                     item { CalibrationSummary(calibration) }
                     if (calibration.profiles.isEmpty()) {
                         item {
                             LearningCard {
-                                Text("کالیبراسیون هنوز در Warm-up است", fontWeight = FontWeight.Bold)
-                                Text("بعد از ثبت داده کافی، خطای پایدار پیش‌بینی برای همان Strategy/Regime به Buffer ورود اضافه می‌شود.", color = LearningMuted)
+                                Text("کالیبراسیون هنوز در مرحله جمع‌آوری اولیه داده است", fontWeight = FontWeight.Bold)
+                                Text("بعد از ثبت داده کافی، خطای پایدار پیش‌بینی برای همان استراتژی و وضعیت بازار به حاشیه اطمینان ورود اضافه می‌شود.", color = LearningMuted)
                             }
                         }
                     } else {
@@ -259,7 +261,7 @@ private fun StrategyLearningDashboard() {
                         item {
                             LearningCard {
                                 Text("هنوز داده کافی وجود ندارد", fontWeight = FontWeight.Bold)
-                                Text("تا ثبت معاملات بسته‌شده با موتور Multi‑Strategy، همه روش‌ها با حجم عادی کار می‌کنند.", color = LearningMuted)
+                                Text("تا ثبت معاملات بسته‌شده با موتور چنداستراتژی، همه روش‌ها با حجم عادی کار می‌کنند.", color = LearningMuted)
                             }
                         }
                     } else {
@@ -295,9 +297,9 @@ private fun StrategyLearningSummary(item: LearningStrategyUi) {
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(strategyFa(item.key), fontWeight = FontWeight.Black)
-                Text("${item.trades} معامله بسته‌شده", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
+                Text("${faLearningInt(item.trades)} معامله بسته‌شده", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
             }
-            LearningBadge("${(multiplier * 100).toInt()}٪", statusColor, statusBg)
+            LearningBadge("${faLearningInt((multiplier * 100).toInt())}٪", statusColor, statusBg)
         }
         LinearProgressIndicator(
             progress = { multiplier.toFloat() },
@@ -306,8 +308,8 @@ private fun StrategyLearningSummary(item: LearningStrategyUi) {
             trackColor = Color(0xFFE9ECF3),
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("پروفایل دارای داده: ${item.matureProfiles}", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
-            Text("متوقف: ${item.blockedProfiles}", color = if (item.blockedProfiles > 0) LearningRed else LearningMuted, style = MaterialTheme.typography.bodySmall)
+            Text("پروفایل دارای داده: ${faLearningInt(item.matureProfiles)}", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
+            Text("متوقف: ${faLearningInt(item.blockedProfiles)}", color = if (item.blockedProfiles > 0) LearningRed else LearningMuted, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -318,20 +320,20 @@ private fun CalibrationSummary(item: CalibrationUi) {
     LearningCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("خطای پیش‌بینی → Buffer ورود", fontWeight = FontWeight.Black)
-                Text("حداقل ${item.minimumTrades} معامله • تلورانس ${two(item.toleratedBias)}٪", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
+                Text("خطای پیش‌بینی → حاشیه اطمینان ورود", fontWeight = FontWeight.Black)
+                Text("حداقل ${faLearningInt(item.minimumTrades)} معامله • تلورانس ${two(item.toleratedBias)}٪", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
             }
             LearningBadge(
-                if (active) "${item.penalizedProfiles} فعال" else "خنثی",
+                if (active) "${faLearningInt(item.penalizedProfiles)} فعال" else "خنثی",
                 if (active) LearningAmber else LearningGreen,
                 if (active) LearningAmberSoft else LearningGreenSoft,
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            LearningMetric("بیشترین Buffer", "+${three(item.maxPenalty)}٪", Modifier.weight(1f))
-            LearningMetric("سیاست", "Tighten only", Modifier.weight(1f))
+            LearningMetric("بیشترین حاشیه", "+${three(item.maxPenalty)}٪", Modifier.weight(1f))
+            LearningMetric("سیاست", "فقط سخت‌گیرانه‌تر", Modifier.weight(1f))
         }
-        Text("اگر Edge فعلی بعد از Buffer کالیبراسیون مثبت نماند، Candidate رد می‌شود و Smart Fallback فرصت بعدی را بررسی می‌کند.", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
+        Text("اگر لبه فعلی بعد از حاشیه کالیبراسیون مثبت نماند، فرصت رد می‌شود و جایگزین هوشمند فرصت بعدی را بررسی می‌کند.", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -348,18 +350,18 @@ private fun CalibrationProfile(item: CalibrationProfileUi) {
                 when {
                     active -> "+${three(item.penalty)}٪"
                     item.ready -> "دقیق / خنثی"
-                    else -> "Warm-up"
+                    else -> "جمع‌آوری داده"
                 },
                 if (active) LearningAmber else if (item.ready) LearningGreen else LearningPrimary,
                 if (active) LearningAmberSoft else if (item.ready) LearningGreenSoft else LearningPurpleSoft,
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            LearningMetric("Edge پیش‌بینی", item.predictedEdge?.let { "${three(it)}٪" } ?: "—", Modifier.weight(1f))
+            LearningMetric("لبه پیش‌بینی", item.predictedEdge?.let { "${three(it)}٪" } ?: "—", Modifier.weight(1f))
             LearningMetric("بازده واقعی", "${three(item.realizedReturn)}٪", Modifier.weight(1f))
-            LearningMetric("تحقق Edge", item.captureRatio?.let { "${one(it * 100)}٪" } ?: "—", Modifier.weight(1f))
+            LearningMetric("تحقق لبه", item.captureRatio?.let { "${one(it * 100)}٪" } ?: "—", Modifier.weight(1f))
         }
-        Text("${item.trades} معامله بسته‌شده • Buffer اضافه ورود +${three(item.penalty)}٪", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
+        Text("${faLearningInt(item.trades)} معامله بسته‌شده • حاشیه اضافه ورود +${three(item.penalty)}٪", color = LearningMuted, style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -400,14 +402,14 @@ private fun StrategyLearningProfile(item: LearningProfileUi) {
             trackColor = Color(0xFFE9ECF3),
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            LearningMetric("معامله", item.trades.toString(), Modifier.weight(1f))
+            LearningMetric("معامله", faLearningInt(item.trades), Modifier.weight(1f))
             LearningMetric("برد", "${one(item.winRate * 100)}٪", Modifier.weight(1f))
-            LearningMetric("حجم بعدی", "${(multiplier * 100).toInt()}٪", Modifier.weight(1f))
+            LearningMetric("حجم بعدی", "${faLearningInt((multiplier * 100).toInt())}٪", Modifier.weight(1f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             LearningMetric("بازده میانگین", "${one(item.avgReturn)}٪", Modifier.weight(1f))
-            LearningMetric("سود/زیان", one(item.profitFactor), Modifier.weight(1f))
-            LearningMetric("زیان متوالی", item.lossStreak.toString(), Modifier.weight(1f))
+            LearningMetric("ضریب سود", one(item.profitFactor), Modifier.weight(1f))
+            LearningMetric("زیان متوالی", faLearningInt(item.lossStreak), Modifier.weight(1f))
         }
     }
 }
@@ -504,14 +506,16 @@ private fun strategyFa(key: String): String = when (key) {
     "trend_momentum_v1" -> "روند و مومنتوم"
     "breakout_v1" -> "شکست محدوده"
     "mean_reversion_v1" -> "بازگشت به میانگین"
+    "high_volatility_momentum_v3" -> "مومنتوم نوسان شدید"
     else -> key.ifBlank { "نامشخص" }
 }
 
 private fun strategyShort(key: String): String = when (key) {
-    "trend_momentum_v1" -> "TR"
-    "breakout_v1" -> "BR"
-    "mean_reversion_v1" -> "MR"
-    else -> "AI"
+    "trend_momentum_v1" -> "ر"
+    "breakout_v1" -> "ش"
+    "mean_reversion_v1" -> "م"
+    "high_volatility_momentum_v3" -> "ن"
+    else -> "هـ"
 }
 
 private fun regimeFa(key: String): String = when (key) {
@@ -525,9 +529,10 @@ private fun regimeFa(key: String): String = when (key) {
     else -> key.ifBlank { "نامشخص" }
 }
 
-private fun one(value: Double): String = if (value.isFinite()) String.format(java.util.Locale.US, "%.1f", value) else "—"
-private fun two(value: Double): String = if (value.isFinite()) String.format(java.util.Locale.US, "%.2f", value) else "—"
-private fun three(value: Double): String = if (value.isFinite()) String.format(java.util.Locale.US, "%.3f", value) else "—"
+private fun one(value: Double): String = if (value.isFinite()) String.format(LearningFaLocale, "%.1f", value) else "—"
+private fun two(value: Double): String = if (value.isFinite()) String.format(LearningFaLocale, "%.2f", value) else "—"
+private fun three(value: Double): String = if (value.isFinite()) String.format(LearningFaLocale, "%.3f", value) else "—"
+private fun faLearningInt(value: Int): String = String.format(LearningFaLocale, "%d", value)
 
 private fun learningHttpError(response: TradeApi.Response): String {
     return try {

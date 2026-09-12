@@ -105,6 +105,7 @@ private val V4Blue = Color(0xFF2864D7)
 private val V4BlueSoft = Color(0xFFEDF4FF)
 private val V4Stroke = Color(0xFFE5E8F0)
 private val FaLocale = Locale("fa", "IR")
+private const val LIVE_REFRESH_MS = 30_000L
 
 private data class V4Nav(val label: String, val icon: ImageVector)
 
@@ -129,7 +130,7 @@ fun TradeAppV4() {
     var emergencyConfirm by remember { mutableStateOf<String?>(null) }
 
     // Keep each page where the user left it instead of jumping to the top whenever
-    // tabs are switched or a 10-second live refresh recomposes the screen.
+    // tabs are switched or a live refresh recomposes the screen.
     val homeScroll = rememberLazyListState()
     val marketScroll = rememberLazyListState()
     val tradesScroll = rememberLazyListState()
@@ -150,14 +151,11 @@ fun TradeAppV4() {
             val data = unwrap(response.body)
             val serialized = data.toString()
             snapshotJson = serialized
-            // AES/GCM + SharedPreferences serialization should not run on the UI
-            // thread every ten seconds; doing so caused visible scroll/jank on
-            // larger reports.
             withContext(Dispatchers.IO) { prefs.saveOfflineSnapshot(serialized) }
             offline = false
         } catch (e: Exception) {
             offline = !snapshotJson.isNullOrBlank()
-            error = if (offline) "نمایش آخرین Snapshot ذخیره‌شده" else (e.message ?: "خطا در دریافت اطلاعات")
+            error = if (offline) "نمایش آخرین نسخه ذخیره‌شده" else (e.message ?: "خطا در دریافت اطلاعات")
         } finally {
             loading = false
             refreshing = false
@@ -167,7 +165,7 @@ fun TradeAppV4() {
     LaunchedEffect(Unit) {
         refresh()
         while (true) {
-            delay(10_000)
+            delay(LIVE_REFRESH_MS)
             refresh()
         }
     }
@@ -358,20 +356,20 @@ private fun V4Home(root: JSONObject, offline: Boolean, listState: LazyListState)
                 chips = listOf(
                     "API ${statusFa(strip.optString("api", "—"))}",
                     "مدار ریسک ${statusFa(strip.optString("circuit", "—"))}",
-                    "Cron ${if (strip.optBoolean("cron_healthy")) "سالم" else "نیازمند بررسی"}",
+                    "زمان‌بندی ${if (strip.optBoolean("cron_healthy")) "سالم" else "نیازمند بررسی"}",
                 ),
             )
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 V4Metric("ارزش کل", money(headline.optDouble("portfolio_value_irt")), "تومان • کیف پول زنده", Modifier.weight(1f))
-                V4Metric("سود/زیان امروز ربات", signedMoney(headline.optDouble("today_net_pnl_irt")), "تومان • پنل زنده", Modifier.weight(1f))
+                V4Metric("سود/زیان امروز ربات", signedMoney(headline.optDouble("today_net_pnl_irt")), "تومان • بازارهای تومانی", Modifier.weight(1f))
             }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                V4Metric("سود/زیان کل ربات", signedMoney(headline.optDouble("total_realized_pnl_irt")), "تومان • پنل زنده", Modifier.weight(1f))
-                V4Metric("افت سرمایه", "${fmt(headline.optDouble("current_drawdown_percent"), 2)}٪", "افت واقعی حساب", Modifier.weight(1f))
+                V4Metric("سود/زیان کل ربات", signedMoney(headline.optDouble("total_realized_pnl_irt")), "تومان • بازارهای تومانی", Modifier.weight(1f))
+                V4Metric("افت ارزش کیف پول", "${fmt(headline.optDouble("current_drawdown_percent"), 2)}٪", "بدون تعدیل واریز/برداشت", Modifier.weight(1f))
             }
         }
         item {
@@ -380,7 +378,7 @@ private fun V4Home(root: JSONObject, offline: Boolean, listState: LazyListState)
                 V4Metric("در انتظار", "${faInt(headline.optInt("pending_orders"))}/${faInt(headline.optInt("max_pending_orders"))}", "سفارش در انتظار", Modifier.weight(1f))
             }
         }
-        if (!offline) item { V4Banner("همگام با داده زنده پنل • بروزرسانی خودکار هر ۱۰ ثانیه", V4GreenSoft, V4Green) }
+        if (!offline) item { V4Banner("همگام با داده زنده پنل • بروزرسانی خودکار هر ۳۰ ثانیه", V4GreenSoft, V4Green) }
         if (offline) item { V4Banner("اطلاعات آفلاین است و برای تصمیم اجرایی نباید به‌عنوان وضعیت لحظه‌ای صرافی استفاده شود.", V4AmberSoft, V4Amber) }
         item { V4SectionTitle("چرا این تصمیم؟", "آخرین توضیح موتور") }
         item {
@@ -507,13 +505,16 @@ private fun V4Trades(root: JSONObject, listState: LazyListState, onReplay: (Long
                 }
             }
         }
-        item { V4SectionTitle("نقشه حرارتی ریسک", "همبستگی پوزیشن‌های فعال") }
+        item { V4SectionTitle("نقشه حرارتی ریسک", "همبستگی بر پایه نمونه‌های زمانی هم‌تراز") }
         if (cells.isEmpty()) item { Text("برای نقشه حرارتی حداقل دو پوزیشن با داده کافی لازم است.", color = V4Muted) }
         items(cells.take(30), key = { "heat:${it.optString("x")}:${it.optString("y")}" }) { cell ->
             val risk = cell.optString("risk", "unknown")
             V4MiniCard {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("${cell.optString("x")} / ${cell.optString("y")}", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Column(Modifier.weight(1f)) {
+                        Text("${cell.optString("x")} / ${cell.optString("y")}", fontWeight = FontWeight.Bold)
+                        Text("${faInt(cell.optInt("samples"))} بازده هم‌زمان", color = V4Muted, style = MaterialTheme.typography.labelSmall)
+                    }
                     V4Pill(if (cell.isNull("correlation")) "—" else fmt(cell.optDouble("correlation"), 3), categoryColor(risk), when (risk) { "high" -> V4Red; "medium" -> V4Amber; else -> V4Green })
                 }
             }
@@ -533,6 +534,9 @@ private fun V4Reports(root: JSONObject, api: TradeApi, listState: LazyListState)
     val scope = rememberCoroutineScope()
     val performance = root.optJSONObject("performance") ?: JSONObject()
     val reports = root.optJSONObject("reports") ?: JSONObject()
+    val byQuote = reports.optJSONObject("by_quote") ?: JSONObject()
+    val irtReport = byQuote.optJSONObject("IRT") ?: JSONObject()
+    val usdtReport = byQuote.optJSONObject("USDT") ?: JSONObject()
     val strategies = jsonObjects(performance.optJSONArray("by_strategy"))
     val coins = jsonObjects(performance.optJSONArray("by_coin"))
     val curve = jsonObjects(root.optJSONArray("equity_curve"))
@@ -549,20 +553,36 @@ private fun V4Reports(root: JSONObject, api: TradeApi, listState: LazyListState)
         contentPadding = PaddingValues(14.dp, 12.dp, 14.dp, 24.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        item { V4SectionTitle("گزارش عملکرد", "روزانه، هفتگی و ماهانه") }
+        item { V4SectionTitle("گزارش عملکرد", "سود/زیان هر ارز پایه جداگانه نمایش داده می‌شود") }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                V4Metric("امروز", money(reports.optJSONObject("daily")?.optDouble("net_pnl") ?: 0.0), "تومان", Modifier.weight(1f))
-                V4Metric("هفته", money(reports.optJSONObject("weekly")?.optDouble("net_pnl") ?: 0.0), "تومان", Modifier.weight(1f))
+            V4Card {
+                Text("بازارهای تومانی", fontWeight = FontWeight.Black)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    V4TinyMetric("امروز", signedMoney(irtReport.optJSONObject("daily")?.optDouble("net_pnl") ?: reports.optJSONObject("daily")?.optDouble("net_pnl") ?: 0.0), Modifier.weight(1f))
+                    V4TinyMetric("هفته", signedMoney(irtReport.optJSONObject("weekly")?.optDouble("net_pnl") ?: reports.optJSONObject("weekly")?.optDouble("net_pnl") ?: 0.0), Modifier.weight(1f))
+                    V4TinyMetric("ماه", signedMoney(irtReport.optJSONObject("monthly")?.optDouble("net_pnl") ?: reports.optJSONObject("monthly")?.optDouble("net_pnl") ?: 0.0), Modifier.weight(1f))
+                }
+                Text("واحد: تومان", color = V4Muted, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        item {
+            V4Card {
+                Text("بازارهای USDT", fontWeight = FontWeight.Black)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    V4TinyMetric("امروز", signedDecimal(usdtReport.optJSONObject("daily")?.optDouble("net_pnl") ?: 0.0, 4), Modifier.weight(1f))
+                    V4TinyMetric("هفته", signedDecimal(usdtReport.optJSONObject("weekly")?.optDouble("net_pnl") ?: 0.0, 4), Modifier.weight(1f))
+                    V4TinyMetric("ماه", signedDecimal(usdtReport.optJSONObject("monthly")?.optDouble("net_pnl") ?: 0.0, 4), Modifier.weight(1f))
+                }
+                Text("واحد: USDT • برای جلوگیری از خطای تبدیل، با تومان جمع نمی‌شود.", color = V4Muted, style = MaterialTheme.typography.labelSmall)
             }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                V4Metric("ماه", money(reports.optJSONObject("monthly")?.optDouble("net_pnl") ?: 0.0), "تومان", Modifier.weight(1f))
-                V4Metric("ضریب سود", fmt(reports.optDouble("profit_factor"), 2), "تحقق‌یافته", Modifier.weight(1f))
+                V4Metric("ضریب سود تومانی", fmt(reports.optDouble("profit_factor"), 2), "تحقق‌یافته", Modifier.weight(1f))
+                V4Metric("نرخ برد تومانی", "${fmt(reports.optDouble("win_rate_percent"), 1)}٪", "معاملات بسته", Modifier.weight(1f))
             }
         }
-        item { V4SectionTitle("نمودار ارزش حساب", "ارزش واقعی کیف پول در طول زمان") }
+        item { V4SectionTitle("نمودار ارزش کیف پول", "کل بازه موجود با نمونه‌برداری نمایشی") }
         item { V4EquityBars(curve) }
         item { V4SectionTitle("عملکرد بر اساس استراتژی", "استراتژی و پروفایل") }
         items(strategies.take(12), key = { "strategy:${it.optString("strategy_key")}:${it.optString("profile_key")}:${it.optString("quote_asset")}" }) { s ->
@@ -601,8 +621,6 @@ private fun V4Reports(root: JSONObject, api: TradeApi, listState: LazyListState)
         item { V4SectionTitle("آزمایشگاه استراتژی", "سناریوی تاریخی؛ بدون سفارش واقعی") }
         item {
             V4Card {
-                // Three weighted text fields in one row were too narrow on common
-                // Android widths and made cursor/editing unreliable. Stack them.
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(positionPct, { positionPct = it }, label = { Text("درصد پوزیشن") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                     OutlinedTextField(stopPct, { stopPct = it }, label = { Text("حد ضرر ٪") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
@@ -612,7 +630,10 @@ private fun V4Reports(root: JSONObject, api: TradeApi, listState: LazyListState)
                     onClick = {
                         scope.launch {
                             labBusy = true
-                            val body = JSONObject().put("position_percent", positionPct.toDoubleOrNull() ?: 2.0).put("stop_loss_percent", stopPct.toDoubleOrNull() ?: 3.0).put("take_profit_percent", takePct.toDoubleOrNull() ?: 5.0)
+                            val body = JSONObject()
+                                .put("position_percent", localizedDoubleOrNull(positionPct) ?: 2.0)
+                                .put("stop_loss_percent", localizedDoubleOrNull(stopPct) ?: 3.0)
+                                .put("take_profit_percent", localizedDoubleOrNull(takePct) ?: 5.0)
                             val r = runCatching { api.strategyLab(body.toString()) }.getOrNull()
                             labResult = if (r?.ok == true) unwrap(r.body) else JSONObject().put("error", "آزمایشگاه استراتژی در دسترس نیست")
                             labBusy = false
@@ -663,8 +684,6 @@ private fun V4Settings(
     var minPriority by rememberSaveable { mutableStateOf(rules.optString("min_priority", "warning")) }
     var busy by remember { mutableStateOf(false) }
     var settingsDirty by rememberSaveable { mutableStateOf(false) }
-    // Do not key editable fields to root.toString(). Live refresh changes root every
-    // 10 seconds and previously erased what the user was typing mid-edit.
     var customPosition by rememberSaveable { mutableStateOf(current.optDouble("position_percent", 2.0).toString()) }
     var customExposure by rememberSaveable { mutableStateOf(current.optDouble("nobitex_portfolio_exposure_percent", 35.0).toString()) }
     var customMax by rememberSaveable { mutableStateOf(current.optInt("nobitex_max_positions", 6).toString()) }
@@ -751,10 +770,10 @@ private fun V4Settings(
                     OutlinedTextField(customDaily, { customDaily = it; settingsDirty = true }, label = { Text("حد زیان روزانه") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 }
                 val body = JSONObject()
-                    .put("position_percent", customPosition.toDoubleOrNull() ?: current.optDouble("position_percent",2.0))
-                    .put("nobitex_portfolio_exposure_percent", customExposure.toDoubleOrNull() ?: current.optDouble("nobitex_portfolio_exposure_percent",35.0))
-                    .put("nobitex_max_positions", customMax.toIntOrNull() ?: current.optInt("nobitex_max_positions",6))
-                    .put("daily_loss_limit_percent", customDaily.toDoubleOrNull() ?: current.optDouble("daily_loss_limit_percent",2.0))
+                    .put("position_percent", localizedDoubleOrNull(customPosition) ?: current.optDouble("position_percent",2.0))
+                    .put("nobitex_portfolio_exposure_percent", localizedDoubleOrNull(customExposure) ?: current.optDouble("nobitex_portfolio_exposure_percent",35.0))
+                    .put("nobitex_max_positions", localizedIntOrNull(customMax) ?: current.optInt("nobitex_max_positions",6))
+                    .put("daily_loss_limit_percent", localizedDoubleOrNull(customDaily) ?: current.optDouble("daily_loss_limit_percent",2.0))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { scope.launch { val r=runCatching{api.previewSettings(body.toString())}.getOrNull();preview=if(r?.ok==true)unwrap(r.body) else null } }, modifier = Modifier.weight(1f)) { Text("پیش‌نمایش") }
                     Button(onClick = { scope.launch { busy=true; val r=runCatching{api.updateBotSettings(body.toString())}.getOrNull(); if(r?.ok==true){settingsDirty=false;reloadHistory();onReload()};busy=false } }, enabled=!busy, modifier=Modifier.weight(1f)) { Text("ذخیره") }
@@ -767,12 +786,12 @@ private fun V4Settings(
         }
         item { V4SectionTitle("ارزیابی آزمایشی", "بررسی سیگنال‌ها بدون افزایش ریسک") }
         item {
-            V4SettingRow("ارزیابی Shadow", "نتیجه سیگنال‌ها را بعداً مقایسه می‌کند", shadowEnabled) { enabled ->
+            V4SettingRow("ارزیابی سایه", "نتیجه سیگنال‌ها را بعداً مقایسه می‌کند", shadowEnabled) { enabled ->
                 shadowEnabled = enabled
                 scope.launch { runCatching { api.setShadowMode(enabled) }; onReload() }
             }
         }
-        item { V4SectionTitle("اعلان‌های هوشمند", "Android طبق محدودیت سیستم حداقل هر ۱۵ دقیقه در پس‌زمینه بررسی می‌کند") }
+        item { V4SectionTitle("اعلان‌های هوشمند", "اندروید طبق محدودیت سیستم حداقل هر ۱۵ دقیقه در پس‌زمینه بررسی می‌کند") }
         item {
             V4SettingRow("اعلان پس‌زمینه", "هشدارهای مهم طبق قوانین پنل", alertsEnabled) { enabled ->
                 alertsEnabled = enabled
@@ -801,15 +820,15 @@ private fun V4Settings(
         }
         item { V4SectionTitle("امنیت اپ", "قفل بیومتریک") }
         item {
-            V4SettingRow("قفل بیومتریک", if (Build.VERSION.SDK_INT >= 28) "برای بازکردن اپ اثرانگشت/بیومتریک بخواه" else "در Android این دستگاه پشتیبانی نمی‌شود", biometric, enabled = Build.VERSION.SDK_INT >= 28) { enabled ->
+            V4SettingRow("قفل بیومتریک", if (Build.VERSION.SDK_INT >= 28) "برای بازکردن اپ اثرانگشت/بیومتریک بخواه" else "در نسخه اندروید این دستگاه پشتیبانی نمی‌شود", biometric, enabled = Build.VERSION.SDK_INT >= 28) { enabled ->
                 biometric = enabled; prefs.setBiometricEnabled(enabled); if (enabled) onLockNow()
             }
         }
         item { V4SectionTitle("نسخه آفلاین", "آخرین وضعیت مرکز فرمان به‌صورت رمزگذاری‌شده روی دستگاه") }
         item {
             V4Card {
-                Text(if (prefs.offlineSnapshotAt() > 0) "Snapshot ذخیره شده است." else "هنوز Snapshot ذخیره نشده است.", fontWeight = FontWeight.Bold)
-                Text("این Snapshot فقط برای مشاهده آفلاین است و مبنای اجرای معامله نیست.", color = V4Muted)
+                Text(if (prefs.offlineSnapshotAt() > 0) "نسخه ذخیره‌شده موجود است." else "هنوز نسخه آفلاین ذخیره نشده است.", fontWeight = FontWeight.Bold)
+                Text("این نسخه فقط برای مشاهده آفلاین است و مبنای اجرای معامله نیست.", color = V4Muted)
             }
         }
         item { V4SectionTitle("تاریخچه تنظیمات و بازگردانی", "${faInt(history.size)} نسخه اخیر") }
@@ -889,7 +908,6 @@ private fun V4Hero(title: String, subtitle: String, chips: List<String>) {
                     Text(subtitle, color = Color(0xFFC7CAD4))
                 }
             }
-            // Vertical pills avoid clipped text on narrow RTL screens.
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { chips.take(3).forEach { V4Pill(it, Color(0xFF292D42), Color.White) } }
         }
     }
@@ -964,9 +982,7 @@ private fun V4EquityBars(curve: List<JSONObject>) {
             Text("داده کافی برای نمودار وجود ندارد.", color = V4Muted)
             return@V4Card
         }
-        // Scale exactly the points that are visible. Previously one historical
-        // outlier among up to 288 samples flattened the last 30 bars.
-        val window = curve.takeLast(30)
+        val window = downsample(curve, 48)
         val metricKey = if (window.any { it.has("portfolio_value_toman") }) "portfolio_value_toman" else "cumulative_net_pnl"
         val values = window.map { it.optDouble(metricKey) }
         val min = values.minOrNull() ?: 0.0
@@ -979,7 +995,7 @@ private fun V4EquityBars(curve: List<JSONObject>) {
                 Box(Modifier.weight(1f).height((20 + normalized * 120).dp).background(if (metricKey == "portfolio_value_toman" || value >= 0) V4Green else V4Red, RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)))
             }
         }
-        Text("کمینه ${money(min)} • بیشینه ${money(max)} تومان", color = V4Muted, style = MaterialTheme.typography.labelSmall)
+        Text("${faInt(curve.size)} نمونه • نمایش فشرده ${faInt(window.size)} نقطه • کمینه ${money(min)} • بیشینه ${money(max)} تومان", color = V4Muted, style = MaterialTheme.typography.labelSmall)
     }
 }
 
@@ -999,6 +1015,32 @@ private fun jsonObjects(array: JSONArray?): List<JSONObject> {
         for (i in 0 until array.length()) array.optJSONObject(i)?.let(::add)
     }
 }
+
+private fun downsample(points: List<JSONObject>, maxPoints: Int): List<JSONObject> {
+    if (points.size <= maxPoints || maxPoints < 2) return points
+    val result = ArrayList<JSONObject>(maxPoints)
+    for (i in 0 until maxPoints) {
+        val index = ((i.toLong() * (points.size - 1)) / (maxPoints - 1)).toInt()
+        result += points[index]
+    }
+    return result
+}
+
+private fun normalizeLocalizedNumber(value: String): String = value
+    .trim()
+    .map { c ->
+        when (c) {
+            in '۰'..'۹' -> ('0'.code + (c.code - '۰'.code)).toChar()
+            in '٠'..'٩' -> ('0'.code + (c.code - '٠'.code)).toChar()
+            '٫', '٬', ',' -> if (c == '٫') '.' else if (c == '٬') '\u0000' else '.'
+            else -> c
+        }
+    }
+    .filter { it != '\u0000' && !it.isWhitespace() }
+    .joinToString("")
+
+private fun localizedDoubleOrNull(value: String): Double? = normalizeLocalizedNumber(value).toDoubleOrNull()
+private fun localizedIntOrNull(value: String): Int? = normalizeLocalizedNumber(value).toIntOrNull()
 
 private fun categoryColor(category: String): Color = when (category.lowercase()) {
     "excellent", "low" -> V4GreenSoft
@@ -1102,13 +1144,14 @@ private fun fmt(value: Double, digits: Int = 2): String = NumberFormat.getNumber
 }.format(value)
 private fun money(value: Double): String = NumberFormat.getNumberInstance(FaLocale).apply { maximumFractionDigits = 0 }.format(value)
 private fun signedMoney(value: Double): String = (if (value > 0) "+" else "") + money(value)
+private fun signedDecimal(value: Double, digits: Int): String = (if (value > 0) "+" else "") + fmt(value, digits)
 private fun faInt(value: Number): String = NumberFormat.getIntegerInstance(FaLocale).format(value)
 private fun faDigits(value: String): String = value.map { c -> if (c in '0'..'9') "۰۱۲۳۴۵۶۷۸۹"[c - '0'] else c }.joinToString("")
 private fun percentOrDash(obj: JSONObject, key: String): String = if (!obj.has(key) || obj.isNull(key)) "—" else "${fmt(obj.optDouble(key), 3)}٪"
 private fun emergencyDescription(mode: String): String = when (mode) {
-    "normal" -> "حالت اضطراری لغو و ورودهای جدید دوباره طبق قوانین عادی مجاز می‌شوند."
-    "pause_buys" -> "خریدهای جدید متوقف می‌شوند؛ خروج‌ها و Reconcile همچنان فعال می‌مانند."
+    "normal" -> "حالت اضطراری لغو می‌شود. اگر Kill Switch پیش از حالت توقف کامل به‌صورت دستی فعال بوده باشد، فعال باقی می‌ماند."
+    "pause_buys" -> "خریدهای جدید متوقف می‌شوند؛ خروج‌ها و همگام‌سازی همچنان فعال می‌مانند."
     "graceful_close" -> "خرید متوقف می‌شود و پوزیشن‌های باز به‌صورت ترتیبی و کنترل‌شده بسته می‌شوند. پس از پایان، خرید همچنان متوقف می‌ماند."
-    "full_stop" -> "Kill Switch فعال می‌شود. از این گزینه فقط وقتی توقف کامل لازم است استفاده کن."
+    "full_stop" -> "Kill Switch فعال می‌شود. خروج از این حالت فقط Kill Switchای را خاموش می‌کند که خود حالت اضطراری روشن کرده باشد."
     else -> "اعمال کنترل اضطراری"
 }

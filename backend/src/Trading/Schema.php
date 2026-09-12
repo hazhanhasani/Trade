@@ -8,7 +8,7 @@ use PDO;
 use Trade\Config;
 use Trade\Database;
 
-/** Canonical shared settings and one-time retirement cleanup for execution. */
+/** Canonical shared settings plus CLI-only one-time retirement cleanup. */
 final class Schema
 {
     private const CLEANUP_VERSION='3';
@@ -21,17 +21,22 @@ final class Schema
         if(self::tableExists($pdo,'autotrade_settings')){$legacy=$pdo->query('SELECT * FROM autotrade_settings WHERE id=1 LIMIT 1')->fetch();if(is_array($legacy)){$stmt=$pdo->prepare("INSERT INTO nobitex_autotrade_settings (id,enabled,quote_asset,risk_profile,position_percent,max_position_percent,stop_loss_percent,take_profit_percent,daily_loss_limit_percent,min_signal_score,cooldown_minutes,last_trade_at,updated_at) VALUES (1,0,:quote,:profile,:position,:max_position,:stop,:take,:daily,:score,:cooldown,:last_trade,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE quote_asset=VALUES(quote_asset),risk_profile=VALUES(risk_profile),position_percent=VALUES(position_percent),max_position_percent=VALUES(max_position_percent),stop_loss_percent=VALUES(stop_loss_percent),take_profit_percent=VALUES(take_profit_percent),daily_loss_limit_percent=VALUES(daily_loss_limit_percent),min_signal_score=VALUES(min_signal_score),cooldown_minutes=VALUES(cooldown_minutes),last_trade_at=VALUES(last_trade_at),updated_at=UTC_TIMESTAMP()");$quote=strtoupper((string)($legacy['quote_asset']??'IRT'));$stmt->execute([':quote'=>in_array($quote,['IRT','USDT'],true)?$quote:'IRT',':profile'=>(string)($legacy['risk_profile']??'balanced'),':position'=>(float)($legacy['position_percent']??5),':max_position'=>(float)($legacy['max_position_percent']??10),':stop'=>(float)($legacy['stop_loss_percent']??3),':take'=>(float)($legacy['take_profit_percent']??6),':daily'=>(float)($legacy['daily_loss_limit_percent']??5),':score'=>(int)($legacy['min_signal_score']??60),':cooldown'=>(int)($legacy['cooldown_minutes']??15),':last_trade'=>$legacy['last_trade_at']??null]);}}
         $pdo->exec("INSERT IGNORE INTO nobitex_autotrade_settings (id,enabled,quote_asset,risk_profile,position_percent,max_position_percent,stop_loss_percent,take_profit_percent,daily_loss_limit_percent,min_signal_score,cooldown_minutes,updated_at) VALUES (1,0,'IRT','balanced',5,10,3,6,5,60,15,UTC_TIMESTAMP())");
         self::ensureConfiguredRuntimeDefaults($pdo);
-        self::cleanupLegacyExecution($pdo);self::$ensured=true;
+        self::$ensured=true;
+    }
+
+    /**
+     * Destructive retirement work is intentionally separate from ensure().
+     * Call only from CLI/maintenance after a real PDO connection exists.
+     */
+    public static function runLegacyCleanup(PDO $pdo):void
+    {
+        self::cleanupLegacyExecution($pdo);
     }
 
     public static function settings(?PDO $pdo=null):array{self::ensure();$pdo??=Database::connection();$row=$pdo->query('SELECT * FROM nobitex_autotrade_settings WHERE id=1')->fetch();if(!$row)throw new \RuntimeException('Nobitex auto-trading settings row is missing.');return$row;}
 
     private static function ensureConfiguredRuntimeDefaults(PDO $pdo):void
     {
-        // The installer stores max_orders_per_hour in protected config. Older
-        // releases never copied it into the DB key used by NobitexOrderService,
-        // so the runtime silently fell back to 30. Seed the real guard exactly
-        // once while preserving any later Admin/user override.
         $maxOrders=max(5,min(120,(int)Config::get('trading.max_orders_per_hour',30)));
         $stmt=$pdo->prepare("INSERT IGNORE INTO settings (key_name,value_text,updated_at) VALUES ('nobitex_max_buy_orders_per_hour',:value,UTC_TIMESTAMP())");
         $stmt->execute([':value'=>(string)$maxOrders]);
@@ -45,7 +50,6 @@ final class Schema
         try{$pdo->exec("DELETE FROM trades WHERE LOWER(COALESCE(raw_json,'')) LIKE '%bitpin%'");}catch(\Throwable){}
         $pdo->exec("DELETE FROM orders WHERE exchange_name='bitpin'");$pdo->exec("DELETE FROM exchange_credentials WHERE exchange_name='bitpin'");$pdo->exec("DELETE FROM settings WHERE LOWER(key_name) LIKE '%bitpin%' OR key_name IN ('live_trading_enabled','autotrade_schema_version')");
         try{$pdo->exec("DELETE FROM audit_logs WHERE LOWER(event_name) LIKE '%bitpin%' OR LOWER(COALESCE(context_json,'')) LIKE '%bitpin%'");}catch(\Throwable){}
-        // Keep modern Nobitex runs that merely list Bitpin as a read-only market source.
         try{$pdo->exec("DELETE FROM bot_runs WHERE LOWER(COALESCE(summary_json,'')) LIKE '%\"execution_exchange\":\"bitpin\"%' OR LOWER(COALESCE(summary_json,'')) LIKE '%\"exchanges\":{\"bitpin\"%'");}catch(\Throwable){}
         foreach(['autotrade_pnl','autotrade_events','autotrade_signals','autotrade_positions','autotrade_settings','bitpin_market_history_cache']as$table)$pdo->exec('DROP TABLE IF EXISTS '.$table);
         self::removeObsoleteFiles();self::cleanupStoredConfig();$mark=$pdo->prepare("INSERT INTO settings (key_name,value_text,updated_at) VALUES ('legacy_execution_cleanup_version',:version,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE value_text=VALUES(value_text),updated_at=UTC_TIMESTAMP()");$mark->execute([':version'=>self::CLEANUP_VERSION]);

@@ -13,6 +13,9 @@ reportAssert(str_contains($analytics,"'asset_ranking_metric'=>'average_return_pe
 reportAssert(str_contains($analytics,'$byReturn=((float)$b[\'average_return_percent\'])<=>((float)$a[\'average_return_percent\'])'),'Asset ranking must sort by percentage return instead of incomparable quote-currency money.');
 reportAssert(!str_contains($analytics,'usort($rows,static fn(array $a,array $b):int=>((float)$b[\'net_pnl\'])<=>((float)$a[\'net_pnl\']))'),'Asset ranking must never compare Toman PnL directly with USDT PnL.');
 reportAssert(str_contains($command,"'equity_curve'=>\$accountEquity['series'] ?? []"),'Command Center must expose account-truth equity series to Android.');
-reportAssert(str_contains($app,'curve.takeLast(30)'),'Android chart must bound visible equity samples.');
+reportAssert(str_contains($app,'val window = downsample(curve, 48)'),'Android chart must bound rendering while sampling the full available equity window.');
+reportAssert(str_contains($app,'private fun downsample('),'Android chart must use deterministic downsampling instead of discarding older equity history.');
+reportAssert(!str_contains($app,'curve.takeLast(30)'),'Android chart must not regress to a short trailing-only window.');
+reportAssert(str_contains($app,'reports.optJSONObject("by_quote")'),'Android reports must keep IRT and USDT PnL separated.');
 
 echo "Reporting currency safety regression tests passed.\n";

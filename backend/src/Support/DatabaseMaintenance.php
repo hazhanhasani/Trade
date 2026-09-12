@@ -11,6 +11,8 @@ use PDO;
  *
  * Financial truth tables (orders, trades, positions and PnL) are deliberately
  * never pruned here. Only derived telemetry/cache/history data is bounded.
+ * One-time destructive legacy retirement is also executed here so web/API
+ * requests never perform DROP/DELETE/unlink cleanup during schema ensure.
  */
 final class DatabaseMaintenance
 {
@@ -34,6 +36,7 @@ final class DatabaseMaintenance
                 return ['status'=>'not_due','last_run'=>$last];
             }
 
+            \Trade\Trading\Schema::runLegacyCleanup($pdo);
             $indexes = self::ensureIndexes($pdo);
             $deleted = [];
             $policies = [
@@ -55,7 +58,7 @@ final class DatabaseMaintenance
             );
             $mark->execute([':key'=>self::MARKER]);
 
-            return ['status'=>'ok','deleted'=>$deleted,'indexes'=>$indexes,'retention_model'=>'telemetry_only_v1'];
+            return ['status'=>'ok','legacy_cleanup'=>'checked','deleted'=>$deleted,'indexes'=>$indexes,'retention_model'=>'telemetry_only_v1'];
         } catch (\Throwable $e) {
             return ['status'=>'deferred','reason'=>'maintenance_failed','message'=>mb_substr($e->getMessage(),0,240)];
         }

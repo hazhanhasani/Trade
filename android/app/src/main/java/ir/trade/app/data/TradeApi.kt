@@ -2,6 +2,7 @@ package ir.trade.app.data
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -42,6 +43,7 @@ class TradeApi(private val baseUrl: String, private val apiToken: String) {
     suspend fun analytics(days:Int=30):Response{requireCapability("analytics.performance_v1");return request("GET","/api/analytics?days=${days.coerceIn(7,180)}")}
     suspend fun notifications(limit:Int=50,unreadOnly:Boolean=false):Response{requireCapability("notifications.center_v1");return request("GET","/api/notifications?limit=${limit.coerceIn(1,100)}&unread=${if(unreadOnly)1 else 0}")}
     suspend fun markNotificationRead(id:Long?=null,all:Boolean=false):Response{requireCapability("notifications.center_v1");val body=JSONObject();if(all)body.put("all",true)else body.put("id",requireNotNull(id){"Notification id is required"});return request("POST","/api/notifications/read",body.toString())}
+    suspend fun markNotificationsRead(ids:Collection<Long>):Response{requireCapability("notifications.batch_read_v1");val clean=ids.filter{it>0}.distinct().take(100);require(clean.isNotEmpty()){"At least one notification id is required"};val array=JSONArray();clean.forEach(array::put);return request("POST","/api/notifications/read",JSONObject().put("ids",array).toString())}
 
     suspend fun markets(exchange:String="nobitex"):Response=request("GET","/api/markets?exchange=${exchangeArg(exchange)}")
     suspend fun wallets(exchange:String="nobitex"):Response=request("GET","/api/wallets?exchange=${exchangeArg(exchange)}")
