@@ -20,6 +20,7 @@ final class NobitexExternalMarketOracle
     private const HARD_PREMIUM_BLOCK_PERCENT = 7.5;
     private const PENALTY_DEAD_BAND_PERCENT = 0.25;
     private const MAX_PENALTY_PERCENT = 0.30;
+    private const MAX_SOURCE_AGE_SECONDS = 12;
 
     public function __construct(private readonly MarketDataHub $hub = new MarketDataHub()) {}
 
@@ -39,7 +40,18 @@ final class NobitexExternalMarketOracle
 
         try { $snapshot = $this->hub->snapshot($asset,$quote); }
         catch (\Throwable $e) { return self::unavailable('market_data_unavailable',$e->getMessage()); }
-        $consensus = is_array($snapshot['consensus'] ?? null)?$snapshot['consensus']:[];
+
+        // Never let a crossed/malformed or stale external book participate in an
+        // execution decision. The collector is intentionally tolerant so admin
+        // diagnostics can show provider responses; this oracle is the final live
+        // execution quality gate and recomputes consensus from sanitized sources.
+        $rawSources = is_array($snapshot['sources'] ?? null) ? $snapshot['sources'] : [];
+        $sources = self::sanitizeSources($rawSources, time());
+        $consensus = MarketDataHub::consensusFromQuotes($sources);
+        $snapshot['sources'] = $sources;
+        $snapshot['consensus'] = $consensus;
+        $snapshot['execution_quality_gate'] = 'crossed_and_stale_sources_rejected';
+
         if (!($consensus['available'] ?? false)) return self::unavailable((string)($consensus['reason']??'consensus_unavailable')) + ['snapshot'=>$snapshot];
 
         return self::assessFromConsensus($candidate,$consensus) + [
@@ -48,6 +60,47 @@ final class NobitexExternalMarketOracle
             'candidate_unit'=>$quote==='IRT'?'TOMAN':$quote,
             'snapshot'=>$snapshot,
         ];
+    }
+
+    /**
+     * Pure quality gate for deterministic tests and execution diagnostics.
+     * @param array<string,array<string,mixed>> $sources
+     * @return array<string,array<string,mixed>>
+     */
+    public static function sanitizeSources(array $sources, ?int $now = null): array
+    {
+        $now ??= time();
+        $out = [];
+        foreach ($sources as $name => $row) {
+            if (!is_array($row)) continue;
+            $row['source'] = (string)($row['source'] ?? $name);
+            if (($row['status'] ?? '') !== 'ok') {
+                $out[(string)$name] = $row;
+                continue;
+            }
+
+            $bid = self::positive($row['bid'] ?? 0);
+            $ask = self::positive($row['ask'] ?? 0);
+            if ($bid > 0.0 && $ask > 0.0 && $ask < $bid) {
+                $row['status'] = 'error';
+                $row['reason'] = 'crossed_orderbook_rejected';
+                $row['quality_error'] = 'best_ask_below_best_bid';
+                $out[(string)$name] = $row;
+                continue;
+            }
+
+            $received = isset($row['received_unix']) && is_numeric($row['received_unix']) ? (int)$row['received_unix'] : 0;
+            if ($received > 0 && max(0,$now-$received) > self::MAX_SOURCE_AGE_SECONDS) {
+                $row['status'] = 'error';
+                $row['reason'] = 'stale_external_quote_rejected';
+                $row['age_seconds'] = max(0,$now-$received);
+                $out[(string)$name] = $row;
+                continue;
+            }
+
+            $out[(string)$name] = $row;
+        }
+        return $out;
     }
 
     /** @return array<string,mixed> */
@@ -85,5 +138,11 @@ final class NobitexExternalMarketOracle
         if($ask>0&&$bid>0&&$ask>=$bid)return($ask+$bid)/2.0;
         return self::positive($market['price']??0);
     }
-    private static function positive(mixed$v):float{if(!is_numeric($v))return 0.0;$n=(float)$v;return is_finite($n)&&$n>0?$n:0.0;}
+
+    private static function positive(mixed$v):float
+    {
+        if(!is_numeric($v))return 0.0;
+        $n=(float)$v;
+        return is_finite($n)&&$n>0?$n:0.0;
+    }
 }
