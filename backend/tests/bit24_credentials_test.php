@@ -22,8 +22,18 @@ bit24Assert(str_contains($admin, 'name="api_key" required'), 'Bit24 API key must
 bit24Assert(str_contains($admin, 'name="secret" required'), 'Bit24 secret/private key must be required.');
 bit24Assert(str_contains($admin, 'ذخیره امن هر دو کلید'), 'Bit24 UI must explicitly save both credentials.');
 
-bit24Assert(str_contains($store, "$source === 'bit24' && $secret === ''"), 'Bit24 secret must be enforced server-side.');
-bit24Assert(str_contains($store, "$source === 'bit24' && trim((string)($credentials['secret'] ?? '')) === ''"), 'Bit24 configured status must require a non-empty secret.');
-bit24Assert(str_contains($store, "'requires_secret'=>$source === 'bit24'"), 'Bit24 status must expose its secret requirement.');
+$saveGuard = <<<'TXT'
+$source === 'bit24' && $secret === ''
+TXT;
+$configuredGuard = <<<'TXT'
+$source === 'bit24' && trim((string)($credentials['secret'] ?? '')) === ''
+TXT;
+$statusMarker = <<<'TXT'
+'requires_secret'=>$source === 'bit24'
+TXT;
+
+bit24Assert(str_contains($store, $saveGuard), 'Bit24 secret must be enforced server-side.');
+bit24Assert(str_contains($store, $configuredGuard), 'Bit24 configured status must require a non-empty secret.');
+bit24Assert(str_contains($store, $statusMarker), 'Bit24 status must expose its secret requirement.');
 
 echo "Bit24 two-key credential regression tests passed.\n";
