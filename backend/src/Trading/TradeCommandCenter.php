@@ -154,12 +154,16 @@ final class TradeCommandCenter
         $current=$this->emergencyMode($pdo);
         $controller=new BotController();
         $killBefore=$this->boolSetting($pdo,'kill_switch',false);
+        $ownedBefore=$current==='full_stop'&&$this->boolSetting($pdo,'trade_emergency_kill_switch_owned',false);
 
-        // Emergency may temporarily own the kill switch only when it changed it
-        // from OFF to ON. Leaving emergency must never disable a manually-enabled
-        // kill switch that existed before full_stop was entered.
+        // Emergency owns the kill switch only when it turns an existing OFF state
+        // ON. Leaving full_stop for any weaker emergency mode releases only that
+        // emergency-owned switch; an independently/manual enabled switch survives.
         if($mode==='full_stop'&&$current!=='full_stop'){
             $this->setSetting($pdo,'trade_emergency_kill_switch_owned',$killBefore?'0':'1');
+        }elseif($current==='full_stop'&&$mode!=='full_stop'){
+            if($ownedBefore)$controller->setKillSwitch(false);
+            $this->setSetting($pdo,'trade_emergency_kill_switch_owned','0');
         }
 
         $this->setSetting($pdo,'trade_emergency_mode',$mode);
@@ -168,9 +172,6 @@ final class TradeCommandCenter
         if($mode==='full_stop'){
             $controller->setKillSwitch(true);
         }elseif($mode==='normal'){
-            $owned=$current==='full_stop'&&$this->boolSetting($pdo,'trade_emergency_kill_switch_owned',false);
-            if($owned)$controller->setKillSwitch(false);
-            $this->setSetting($pdo,'trade_emergency_kill_switch_owned','0');
             if(str_starts_with((string)($this->setting($pdo,'nobitex_entry_circuit_reason')??''),'emergency_')){
                 $this->setSetting($pdo,'nobitex_entry_circuit_until','');
                 $this->setSetting($pdo,'nobitex_entry_circuit_reason','');
@@ -180,9 +181,11 @@ final class TradeCommandCenter
             $this->setSetting($pdo,'nobitex_entry_circuit_reason','emergency_'.$mode);
         }
 
-        $this->event($pdo,'warning','trade.emergency.mode_changed',['from'=>$current,'to'=>$mode,'kill_switch_before'=>$killBefore,'kill_switch_owned'=>$this->boolSetting($pdo,'trade_emergency_kill_switch_owned',false)]);
+        $killAfter=$this->boolSetting($pdo,'kill_switch',false);
+        $ownedAfter=$this->boolSetting($pdo,'trade_emergency_kill_switch_owned',false);
+        $this->event($pdo,'warning','trade.emergency.mode_changed',['from'=>$current,'to'=>$mode,'kill_switch_before'=>$killBefore,'kill_switch_after'=>$killAfter,'kill_switch_owned'=>$ownedAfter]);
         try{(new TradeNotificationCenter())->emit('emergency:'.time(),'risk',$mode==='normal'?'info':'critical','حالت اضطراری تغییر کرد','وضعیت جدید: '.$mode,['from'=>$current,'to'=>$mode],$pdo);}catch(\Throwable){}
-        return['mode'=>$mode,'previous'=>$current,'kill_switch_preserved'=>$mode==='normal'&&!$this->boolSetting($pdo,'trade_emergency_kill_switch_owned',false),'graceful_action'=>$mode==='graceful_close'?(new NobitexEmergencyController())->enforce($pdo):null];
+        return['mode'=>$mode,'previous'=>$current,'kill_switch_before'=>$killBefore,'kill_switch_after'=>$killAfter,'kill_switch_owned'=>$ownedAfter,'manual_kill_switch_preserved'=>$current==='full_stop'&&$mode!=='full_stop'&&!$ownedBefore&&$killBefore&&$killAfter,'graceful_action'=>$mode==='graceful_close'?(new NobitexEmergencyController())->enforce($pdo):null];
     }
 
     public function emergencyMode(?PDO $pdo=null):string
