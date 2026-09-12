@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
-// Faster Nobitex decision micro-cycles, reduced balanced/aggressive re-entry cooldown,
-// and durable Bale BUY/SELL recovery with per-cycle delivery retries.
-return '1.4.36';
+// Full exchange/analysis/execution debug: Bit24 read-only auth correction,
+// external quote quality filtering, fresh pre-BUY Nobitex revalidation,
+// ambiguous order submission recovery, and post-BUY wallet/Bale alignment.
+return '1.4.37';
