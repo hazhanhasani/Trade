@@ -1,0 +1,129 @@
+name: Apply live multi-strategy hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/live-multistrategy-hotfix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: curl, pdo_mysql, openssl
+
+      - name: Apply cost-aware live multi-strategy hotfix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, gzip, pathlib
+
+          payloads = {
+              'backend/src/Trading/NobitexInternalSignalEngine.php': '.hotfix/internal.gz.b64',
+              'backend/src/Trading/RiskManager.php': '.hotfix/risk.gz.b64',
+              'backend/tests/trading_strategy_test.php': '.hotfix/test.gz.b64',
+          }
+          for target, payload_path in payloads.items():
+              payload = pathlib.Path(payload_path).read_text().strip()
+              pathlib.Path(target).write_bytes(gzip.decompress(base64.b64decode(payload)))
+
+          def replace_once(path, old, new):
+              p = pathlib.Path(path)
+              s = p.read_text()
+              if old not in s:
+                  raise SystemExit(f'Expected patch anchor missing in {path}: {old[:120]!r}')
+              if s.count(old) != 1:
+                  raise SystemExit(f'Patch anchor is not unique in {path}: {old[:120]!r}')
+              p.write_text(s.replace(old, new, 1))
+
+          replace_once(
+              'backend/src/Trading/NobitexAutoTraderEngine.php',
+              "        NobitexUniverseScanner::resetProcessCache();\n        $safety = $this->safeRuntimeSafety();",
+              "        NobitexUniverseScanner::resetProcessCache();\n        NobitexInternalSignalEngine::resetActivityCache();\n        $safety = $this->safeRuntimeSafety();"
+          )
+
+          replace_once(
+              'backend/src/Trading/NobitexStrategyLearning.php',
+              "        'mean_reversion_v1',\n    ];",
+              "        'mean_reversion_v1',\n        'high_volatility_momentum_v3',\n    ];"
+          )
+
+          replace_once(
+              'backend/src/Trading/NobitexRuntimeModels.php',
+              "     * Profit-first v5 is the primary economic selector. Multi-strategy remains\n     * shadow telemetry; Adaptive Policy Learner may only tune residual forecast\n     * uncertainty after explicit costs have already been deducted.\n     */\n    public const STRATEGY_MODE = 'profit_first_v5_shadow_multi_strategy_v1';\n    public const DECISION = 'profit_first_net_edge_v5_uncertainty_buffer_v2';\n    public const SELECTION = 'positive_tradable_net_edge_after_explicit_costs_uncertainty_buffer_v2';",
+              "     * The regime router is live. Every selected strategy must still prove a\n     * positive edge after explicit fees/spread/slippage and the bounded residual\n     * uncertainty buffer before a real BUY can be submitted.\n     */\n    public const STRATEGY_MODE = 'live_cost_aware_multi_strategy_v1';\n    public const DECISION = 'cost_aware_live_multistrategy_v1';\n    public const SELECTION = 'best_positive_tradable_edge_across_live_strategies_v1';"
+          )
+
+          replace_once(
+              'backend/src/ReleaseContract.php',
+              "        'trading.multi_strategy_regime_router_v1',\n",
+              "        'trading.multi_strategy_regime_router_v1',\n        'trading.live_multi_strategy_v1',\n        'trading.bounded_entry_starvation_v1',\n        'trading.time_based_capital_recycling_v1',\n"
+          )
+
+          reporter = pathlib.Path('backend/src/Observability/NobitexDecisionReporter.php')
+          rs = reporter.read_text()
+          substitutions = [
+              ("'Backend: ' . $backendVersion . ' | مدل اصلی BUY: Profit-First v5'",
+               "'Backend: ' . $backendVersion . ' | موتور BUY: Live Multi-Strategy + Cost Gate'"),
+              ("'محل تصمیم: backend/src/Trading/NobitexInternalSignalEngine.php → Profit-First v5 | سپس NobitexPortfolioEngine.php → entryBudget()'",
+               "'محل تصمیم: NobitexInternalSignalEngine.php → Live Regime Router + Cost Gate | سپس NobitexPortfolioEngine.php → entryBudget()'"),
+              ("'نکته: Profit-First ابتدا هزینه‌های صریح اجرا را از Gross کم می‌کند؛ Buffer جدید فقط عدم‌قطعیت باقی‌مانده مدل را پوشش می‌دهد و هزینه‌ها را دوباره شارژ نمی‌کند. سپس Risk/Balance/Capacity بررسی می‌شود.'",
+               "'نکته: هر استراتژی Live فقط وقتی BUY می‌دهد که پس از کارمزد، Spread، Slippage و Buffer عدم‌قطعیت هنوز Edge مثبت داشته باشد. Anti-starvation فقط Buffer عدم‌قطعیت را محدوداً کاهش می‌دهد و هزینه/ریسک سخت را دور نمی‌زند.'"),
+              ("'primary_entry_model'=>'profit_first_v5',\n                'multi_strategy_role'=>'shadow_diagnostics',",
+               "'primary_entry_model'=>'cost_aware_live_multistrategy_v1',\n                'multi_strategy_role'=>'live_execution',"),
+              ("'range_reversion_not_entry_ready' => 'این علت مربوط به Shadow/نسخه چنداستراتژی است و دیگر به‌تنهایی گیت اصلی Profit-First را نمی‌بندد.',",
+               "'range_reversion_not_entry_ready' => 'استراتژی Mean Reversion در این وضعیت Entry آماده ندارد؛ Router استراتژی‌های Live دیگر را نیز بررسی می‌کند.',"),
+              ("'strategy_edge_below_execution_costs' => 'این علت مربوط به مدل چنداستراتژی است؛ در مسیر اصلی، Edge Profit-First بعد از کل هزینه‌ها ملاک است.',",
+               "'strategy_edge_below_execution_costs' => 'Edge استراتژی پس از هزینه‌های اجرا مثبت نیست و سفارش Live ثبت نمی‌شود.',"),
+              ("'high_volatility_edge_not_positive' => 'این وضعیت در Shadow Multi-Strategy ثبت شده است؛ در نسخه اصلاح‌شده به‌تنهایی BUY اصلی Profit-First را قفل نمی‌کند.',",
+               "'high_volatility_edge_not_positive' => 'استراتژی نوسان شدید Live است، اما در این لحظه Edge مثبت قابل معامله پس از هزینه‌ها ندارد.',"),
+          ]
+          for old, new in substitutions:
+              if old in rs:
+                  rs = rs.replace(old, new, 1)
+          reporter.write_text(rs)
+
+          replace_once(
+              'backend/tests/strategy_learning_v2_test.php',
+              "assertLearning(NobitexStrategyLearning::strategyKey($breakout) === 'breakout_v1', 'selected strategy fallback mismatch');\n",
+              "assertLearning(NobitexStrategyLearning::strategyKey($breakout) === 'breakout_v1', 'selected strategy fallback mismatch');\nassertLearning(NobitexStrategyLearning::supportsStrategy('high_volatility_momentum_v3'), 'high-volatility live strategy must participate in learning');\n"
+          )
+
+          pathlib.Path('.github/workflows/live-multistrategy-hotfix.yml').unlink()
+          for p in pathlib.Path('.hotfix').glob('*'):
+              p.unlink()
+          pathlib.Path('.hotfix').rmdir()
+          PY
+
+          php -l backend/src/Trading/NobitexInternalSignalEngine.php
+          php -l backend/src/Trading/RiskManager.php
+          php -l backend/src/Trading/NobitexAutoTraderEngine.php
+          php -l backend/src/Trading/NobitexStrategyLearning.php
+          php -l backend/src/Trading/NobitexRuntimeModels.php
+          php -l backend/src/ReleaseContract.php
+          php -l backend/src/Observability/NobitexDecisionReporter.php
+          php backend/tests/trading_strategy_test.php
+          php backend/tests/multi_strategy_test.php
+          php backend/tests/strategy_learning_v2_test.php
+          php backend/tests/nobitex_full_debug_v1422_test.php
+
+      - name: Commit verified hotfix directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Enable cost-aware live multi-strategy trading"
+          git push origin HEAD:main
