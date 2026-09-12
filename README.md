@@ -6,7 +6,7 @@ Trade is a production-oriented crypto trading backend for cPanel/shared hosting 
 
 ## Current release
 
-**Backend 1.4.32**
+**Backend 1.4.33**
 
 The stable channel publishes coordinated cPanel and Android artifacts under `trade-latest`.
 
@@ -32,7 +32,7 @@ Use `/admin/exchanges.php`:
 - **Tabdeal** — public Order Book; optional private keys can be stored for future data features.
 - **Bitpin** — public Order Book only; no private credential, wallet, bot or order surface exists.
 
-Upgrades to 1.4.32 remove the retired Bitpin execution implementation and its old database/config state while preserving the public Market Data adapter.
+The 1.4.32 cleanup removed the retired Bitpin execution implementation and its old database/config state. Version 1.4.33 also removes the final private Bitpin diagnostics from Repair/System Health, leaving Bitpin exclusively inside `MarketDataHub`.
 
 ## Operator pages
 
@@ -46,7 +46,7 @@ Upgrades to 1.4.32 remove the retired Bitpin execution implementation and its ol
 - `/admin/notifications.php` — notification center
 - `/admin/system.php` — host/backend health
 - `/admin/logs.php` — runtime errors
-- `/admin/repair.php` — diagnostics/Cron
+- `/admin/repair.php` — Nobitex/Market Data/Cron diagnostics
 - `/admin/update/` — updater
 
 ## BUY readiness
