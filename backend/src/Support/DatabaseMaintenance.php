@@ -37,15 +37,11 @@ final class DatabaseMaintenance
             $indexes = self::ensureIndexes($pdo);
             $deleted = [];
             $policies = [
-                // Account-equity charts read only 30 days; keep 90 for diagnostics.
                 ['trade_portfolio_snapshots', 'captured_at', 90, null],
-                // Runtime observability is useful for troubleshooting, not forever.
                 ['nobitex_autotrade_events', 'created_at', 90, null],
                 ['bot_runs', 'started_at', 90, null],
-                // Keep unread notifications; remove old rows only after delivery/read.
                 ['trade_notifications', 'created_at', 60, 'read_at IS NOT NULL'],
                 ['trade_settings_history', 'created_at', 365, null],
-                // Audit history is retained longer than runtime telemetry.
                 ['audit_logs', 'created_at', 365, null],
             ];
             foreach ($policies as [$table,$column,$days,$extra]) {
@@ -61,8 +57,6 @@ final class DatabaseMaintenance
 
             return ['status'=>'ok','deleted'=>$deleted,'indexes'=>$indexes,'retention_model'=>'telemetry_only_v1'];
         } catch (\Throwable $e) {
-            // Maintenance must never prevent trading/API boot. The next process
-            // will retry after the failure because the success marker was not set.
             return ['status'=>'deferred','reason'=>'maintenance_failed','message'=>mb_substr($e->getMessage(),0,240)];
         }
     }
@@ -88,9 +82,8 @@ final class DatabaseMaintenance
                 try {
                     $pdo->exec("ALTER TABLE `{$table}` ADD INDEX `{$name}` {$columns}");
                     $added[] = $table.'.'.$name;
-                } catch (\Throwable) {
-                    // Concurrent first requests may race to create the same index.
-                    if (!self::indexExists($pdo, $table, $name)) throw;
+                } catch (\Throwable $e) {
+                    if (!self::indexExists($pdo, $table, $name)) throw $e;
                 }
             }
         }
