@@ -105,7 +105,7 @@ final class NobitexSchema
         ];
         foreach($statements as$sql)$pdo->exec($sql);
 
-        if($previous!=='4'){
+        if(!in_array($previous,['4','5'],true)){
             self::ensureColumn($pdo,'nobitex_autotrade_positions','entry_fee_quote','DECIMAL(36,18) NULL');
             self::ensureColumn($pdo,'nobitex_autotrade_positions','entry_fee_source','VARCHAR(24) NULL');
             self::ensureColumn($pdo,'nobitex_autotrade_positions','estimated_exit_fee_quote','DECIMAL(36,18) NULL');
@@ -135,7 +135,10 @@ final class NobitexSchema
         self::seedSetting($pdo,'nobitex_max_positions','5');
         self::seedSetting($pdo,'nobitex_scan_limit','20');
         self::seedSetting($pdo,'nobitex_portfolio_exposure_percent','60');
-        self::seedSetting($pdo,'nobitex_analysis_interval_seconds','60');
+        self::seedSetting($pdo,'nobitex_analysis_interval_seconds','12');
+        self::seedSetting($pdo,'nobitex_fast_cycles_per_tick','4');
+        self::seedSetting($pdo,'nobitex_fast_cycle_interval_seconds','12');
+        self::seedSetting($pdo,'nobitex_fast_max_runtime_seconds','50');
         self::seedSetting($pdo,'nobitex_signal_source','internal_mtf_1m_5m_15m');
         self::seedSetting($pdo,'nobitex_taker_fee_irt_percent','0.25');
         self::seedSetting($pdo,'nobitex_taker_fee_usdt_percent','0.13');
@@ -154,14 +157,27 @@ final class NobitexSchema
             self::writeSetting($pdo,'nobitex_bootstrap_first_buy_pending','1');
             self::writeSetting($pdo,'nobitex_bootstrap_first_buy_armed_at',gmdate('Y-m-d H:i:s'));
         }
-        if($previous!=='3'&&$previous!=='4'){
+        if(!in_array($previous,['3','4','5'],true)){
             self::writeSetting($pdo,'tradingview_enabled','0');
             self::writeSetting($pdo,'nobitex_scan_limit','20');
-            self::writeSetting($pdo,'nobitex_analysis_interval_seconds','60');
             self::writeSetting($pdo,'nobitex_signal_source','internal_mtf_1m_5m_15m');
         }
 
-        self::writeSetting($pdo,'nobitex_schema_version','4');
+        if($previous!=='5'){
+            // Existing balanced/aggressive installations were deliberately
+            // conservative at 15 minutes. Fast-cycle mode reduces only this
+            // re-entry cooldown; Safe mode remains governed by RiskManager's
+            // 30-minute minimum. Economic edge/risk gates are untouched.
+            try{
+                $pdo->exec("UPDATE nobitex_autotrade_settings SET cooldown_minutes=LEAST(cooldown_minutes,3),updated_at=UTC_TIMESTAMP() WHERE risk_profile IN ('balanced','aggressive')");
+            }catch(\Throwable){}
+            self::writeSetting($pdo,'nobitex_analysis_interval_seconds','12');
+            self::writeSetting($pdo,'nobitex_fast_cycles_per_tick','4');
+            self::writeSetting($pdo,'nobitex_fast_cycle_interval_seconds','12');
+            self::writeSetting($pdo,'nobitex_fast_max_runtime_seconds','50');
+        }
+
+        self::writeSetting($pdo,'nobitex_schema_version','5');
         self::$ensured=true;
     }
 
@@ -215,7 +231,7 @@ final class NobitexSchema
     {
         if(!preg_match('/^[a-z0-9_]+$/i',$table)||!preg_match('/^[a-z0-9_]+$/i',$column))throw new \InvalidArgumentException('Invalid schema identifier.');
         $quoted=$pdo->quote($column);$stmt=$pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$quoted}");if($stmt&&$stmt->fetch())return;
-        try{$pdo->exec("ALTER TABLE `{$table}` ADD COLUMN `{$column}` {$definition}");}
+        try{$pdo->exec("ALTER TABLE `{$table}` ADD COLUMN `{$column}` {$definition}");
         catch(\PDOException $e){$check=$pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$quoted}");if($check&&$check->fetch())return;throw$e;}
     }
 
