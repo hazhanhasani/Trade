@@ -13,6 +13,6 @@ dbAssert(str_contains($source,"RELEASE SAVEPOINT ' . \$savepoint"),'Successful n
 dbAssert(str_contains($source,"ROLLBACK TO SAVEPOINT ' . \$savepoint"),'Nested failures must roll back only to their own savepoint.');
 dbAssert(str_contains($source,'if ($outermost)'),'Outer transaction ownership must be explicit.');
 dbAssert(str_contains($source,'if ($pdo->inTransaction()) $pdo->commit();'),'Only an active outer transaction may commit.');
-dbAssert(!str_contains($source,"$pdo->beginTransaction();\n        try"),'Legacy unconditional beginTransaction wrapper must be retired.');
+dbAssert(!str_contains($source,"\$pdo->beginTransaction();\n        try"),'Legacy unconditional beginTransaction wrapper must be retired.');
 
 echo "Database nested transaction regression tests passed.\n";
