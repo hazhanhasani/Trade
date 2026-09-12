@@ -62,12 +62,12 @@ foreach ([
 expectCommandCenter(str_contains($apiSource,'markReadMany($ids)'), 'Notification API must support exact batch acknowledgements.');
 
 $centerSource = file_get_contents(dirname(__DIR__) . '/src/Trading/TradeCommandCenter.php') ?: '';
-expectCommandCenter(str_contains($centerSource,"trade_emergency_kill_switch_owned"), 'Emergency mode must track kill-switch ownership.');
-expectCommandCenter(!str_contains($centerSource,"elseif($mode==='normal'){$controller->setKillSwitch(false)"), 'Returning to normal must not blindly disable a manually-enabled kill switch.');
-expectCommandCenter(str_contains($centerSource,"minute_aligned_signal_correlation_v2"), 'Risk heatmap must use time-aligned correlation samples.');
-expectCommandCenter(str_contains($centerSource,"minimum_aligned_returns"), 'Risk heatmap must enforce a minimum aligned sample count.');
+expectCommandCenter(str_contains($centerSource,'trade_emergency_kill_switch_owned'), 'Emergency mode must track kill-switch ownership.');
+expectCommandCenter(!str_contains($centerSource,'elseif($mode===\'normal\'){$controller->setKillSwitch(false)'), 'Returning to normal must not blindly disable a manually-enabled kill switch.');
+expectCommandCenter(str_contains($centerSource,'minute_aligned_signal_correlation_v2'), 'Risk heatmap must use time-aligned correlation samples.');
+expectCommandCenter(str_contains($centerSource,'minimum_aligned_returns'), 'Risk heatmap must enforce a minimum aligned sample count.');
 expectCommandCenter(str_contains($centerSource,"combined_cross_currency_total_available'=>false"), 'Reports must not add IRT and USDT PnL without FX normalization.');
-expectCommandCenter(str_contains($centerSource,"realized_bot_pnl_irt_only"), 'Primary report totals must state their IRT-only scope.');
+expectCommandCenter(str_contains($centerSource,'realized_bot_pnl_irt_only'), 'Primary report totals must state their IRT-only scope.');
 expectCommandCenter(str_contains($centerSource,"cash_flow_adjusted'=>false"), 'Raw wallet drawdown must disclose that deposits/withdrawals are not normalized.');
 
 $emergencySource = file_get_contents(dirname(__DIR__) . '/src/Trading/NobitexEmergencyController.php') ?: '';
