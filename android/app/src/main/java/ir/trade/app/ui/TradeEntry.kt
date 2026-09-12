@@ -21,6 +21,35 @@ import org.json.JSONObject
 
 private const val TRUSTED_SERVER = "https://rado-taxi.sbs"
 
+private suspend fun redeemPairingCode(code: String, prefs: TradePreferences) {
+    val normalized = code.uppercase().filter { it.isLetterOrDigit() }
+    if (normalized.length != 10) throw IllegalArgumentException("کد اتصال باید ۱۰ کاراکتر باشد.")
+
+    val response = TradeApi(TRUSTED_SERVER, "").pair(normalized)
+    if (!response.ok) {
+        val message = try {
+            val root = JSONObject(response.body)
+            root.optString("message").ifBlank { root.optString("error") }
+        } catch (_: Exception) { "" }
+        throw IllegalStateException(message.ifBlank { "اتصال با کد یک‌بارمصرف ناموفق بود (HTTP ${response.code})." })
+    }
+
+    val data = JSONObject(response.body).getJSONObject("data")
+    val token = data.getString("token").trim()
+    val server = data.optString("server_url", TRUSTED_SERVER).trimEnd('/')
+    if (server != TRUSTED_SERVER) throw SecurityException("آدرس سرور تأیید نشد.")
+    if (token.isBlank()) throw IllegalStateException("Backend توکن اتصال معتبری برنگرداند.")
+
+    val pairedApi = TradeApi(server, token)
+    val status = pairedApi.status()
+    if (!status.ok) throw IllegalStateException("توکن اتصال تأیید نشد (HTTP ${status.code}).")
+    if (!pairedApi.isContractCompatible()) {
+        throw IllegalStateException("نسخه Backend و اپ هماهنگ نیست؛ اتصال ذخیره نشد.")
+    }
+
+    withContext(Dispatchers.IO) { prefs.save(server, token) }
+}
+
 @Composable
 fun TradeEntry(pairingUri: String?, onPairingHandled: () -> Unit) {
     val context = LocalContext.current
@@ -28,44 +57,23 @@ fun TradeEntry(pairingUri: String?, onPairingHandled: () -> Unit) {
     var pairing by remember(pairingUri) { mutableStateOf(!pairingUri.isNullOrBlank()) }
     var error by remember(pairingUri) { mutableStateOf("") }
     var paired by remember(pairingUri) { mutableStateOf(false) }
+    var pairCodeSetup by remember { mutableStateOf(false) }
     var manualSetup by remember { mutableStateOf(false) }
 
+    // Legacy callback support remains for already-created links, but the app no
+    // longer registers the unverified custom-scheme callback in the manifest and
+    // Admin no longer generates such links. New connections use an entered
+    // one-time code, so another installed app cannot intercept the credential flow.
     LaunchedEffect(pairingUri) {
         if (pairingUri.isNullOrBlank()) return@LaunchedEffect
         try {
             val uri = Uri.parse(pairingUri)
             if (uri.scheme != "trade" || uri.host != "pair") throw IllegalArgumentException("لینک اتصال معتبر نیست.")
             val code = uri.getQueryParameter("code")?.trim().orEmpty()
-            if (code.isBlank()) throw IllegalArgumentException("کد اتصال در لینک وجود ندارد.")
-
-            val response = TradeApi(TRUSTED_SERVER, "").pair(code)
-            if (!response.ok) {
-                val message = try {
-                    val root = JSONObject(response.body)
-                    root.optString("message").ifBlank { root.optString("error") }
-                } catch (_: Exception) { "" }
-                throw IllegalStateException(message.ifBlank { "اتصال خودکار ناموفق بود (HTTP ${response.code})." })
-            }
-
-            val data = JSONObject(response.body).getJSONObject("data")
-            val token = data.getString("token").trim()
-            val server = data.optString("server_url", TRUSTED_SERVER).trimEnd('/')
-            if (server != TRUSTED_SERVER) throw SecurityException("آدرس سرور تأیید نشد.")
-            if (token.isBlank()) throw IllegalStateException("Backend توکن اتصال معتبری برنگرداند.")
-
-            // A pairing code is only the credential exchange step. Before the
-            // token enters encrypted device storage, prove that it authenticates
-            // against the trusted server and that Backend/App contracts match.
-            val pairedApi = TradeApi(server, token)
-            val status = pairedApi.status()
-            if (!status.ok) throw IllegalStateException("توکن اتصال تأیید نشد (HTTP ${status.code}).")
-            if (!pairedApi.isContractCompatible()) {
-                throw IllegalStateException("نسخه Backend و اپ هماهنگ نیست؛ اتصال ذخیره نشد.")
-            }
-
-            withContext(Dispatchers.IO) { prefs.save(server, token) }
+            redeemPairingCode(code, prefs)
             paired = true
             pairing = false
+            pairCodeSetup = false
             manualSetup = false
             onPairingHandled()
         } catch (e: Exception) {
@@ -76,11 +84,16 @@ fun TradeEntry(pairingUri: String?, onPairingHandled: () -> Unit) {
 
     when {
         paired || prefs.isConfigured() -> TradeAppV4()
-        pairing -> PairingStatusCard("در حال اتصال امن به پنل…", null)
+        pairing -> PairingStatusCard("در حال بررسی اتصال قدیمی…", null)
         error.isNotBlank() -> PairingStatusCard(
-            title = "اتصال خودکار انجام نشد",
+            title = "اتصال انجام نشد",
             error = error,
             action = { error = ""; onPairingHandled() },
+        )
+        pairCodeSetup -> PairCodeSetupScreen(
+            prefs = prefs,
+            onConnected = { paired = true; pairCodeSetup = false },
+            onCancel = { pairCodeSetup = false },
         )
         manualSetup -> ManualSetupScreen(
             onConnected = { paired = true; manualSetup = false },
@@ -88,13 +101,14 @@ fun TradeEntry(pairingUri: String?, onPairingHandled: () -> Unit) {
         )
         else -> SmartSetupScreen(
             onOpenAdmin = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("$TRUSTED_SERVER/admin/"))) },
+            onPairCodeSetup = { pairCodeSetup = true },
             onManualSetup = { manualSetup = true },
         )
     }
 }
 
 @Composable
-private fun SmartSetupScreen(onOpenAdmin: () -> Unit, onManualSetup: () -> Unit) {
+private fun SmartSetupScreen(onOpenAdmin: () -> Unit, onPairCodeSetup: () -> Unit, onManualSetup: () -> Unit) {
     val colors = lightColorScheme(primary = androidx.compose.ui.graphics.Color(0xFF0B63F6))
     MaterialTheme(colorScheme = colors) {
         Surface(modifier = Modifier.fillMaxSize(), color = androidx.compose.ui.graphics.Color(0xFFF5F7FB)) {
@@ -102,17 +116,75 @@ private fun SmartSetupScreen(onOpenAdmin: () -> Unit, onManualSetup: () -> Unit)
                 Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
                     Column(modifier = Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
                         Text("Trade", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold)
-                        Text("اتصال اپ بدون واردکردن توکن")
+                        Text("اتصال امن اپ بدون واردکردن توکن")
                         Card(colors = CardDefaults.cardColors(containerColor = androidx.compose.ui.graphics.Color(0xFFEEF5FF)), shape = RoundedCornerShape(16.dp)) {
                             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Text("روش پیشنهادی", fontWeight = FontWeight.Bold)
-                                Text("۱) پنل مدیریت را باز کن.\n۲) در «دستگاه‌ها» یک کد اتصال بساز.\n۳) همان‌جا «اتصال مستقیم به اپ» را بزن.\nتوکن جدید خودکار و رمزگذاری‌شده روی گوشی ذخیره می‌شود.")
+                                Text("۱) پنل مدیریت را باز کن.\n۲) در «دستگاه‌ها» یک کد اتصال ۱۰ دقیقه‌ای بساز.\n۳) به اپ برگرد و همان کد را وارد کن.\nتوکن نهایی فقط پس از تأیید Backend و قرارداد API، رمزگذاری‌شده روی گوشی ذخیره می‌شود.")
                             }
                         }
-                        Button(onClick = onOpenAdmin, modifier = Modifier.fillMaxWidth()) { Text("باز کردن پنل مدیریت") }
-                        OutlinedButton(onClick = onManualSetup, modifier = Modifier.fillMaxWidth()) { Text("ورود دستی توکن — فقط برای مواقع اضطراری") }
+                        Button(onClick = onPairCodeSetup, modifier = Modifier.fillMaxWidth()) { Text("وارد کردن کد اتصال") }
+                        OutlinedButton(onClick = onOpenAdmin, modifier = Modifier.fillMaxWidth()) { Text("باز کردن پنل مدیریت") }
+                        TextButton(onClick = onManualSetup, modifier = Modifier.fillMaxWidth()) { Text("ورود دستی توکن — فقط برای مواقع اضطراری") }
                         Text("API Key و Secret صرافی وارد گوشی نمی‌شوند و روی Backend باقی می‌مانند.", style = MaterialTheme.typography.bodySmall)
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PairCodeSetupScreen(prefs: TradePreferences, onConnected: () -> Unit, onCancel: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var code by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf("") }
+
+    Surface(modifier = Modifier.fillMaxSize(), color = androidx.compose.ui.graphics.Color(0xFFF5F7FB)) {
+        Box(modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(20.dp), contentAlignment = Alignment.Center) {
+            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp), elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
+                Column(modifier = Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("کد اتصال", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+                    Text("کد ۱۰ کاراکتری ساخته‌شده در بخش «دستگاه‌ها» را وارد کن. کد فقط ۱۰ دقیقه اعتبار دارد.")
+                    OutlinedTextField(
+                        value = code,
+                        onValueChange = { raw ->
+                            code = raw.uppercase().filter { it.isLetterOrDigit() }.take(10)
+                            error = ""
+                        },
+                        label = { Text("کد یک‌بارمصرف") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        enabled = !busy,
+                    )
+                    if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    Button(
+                        onClick = {
+                            if (code.length != 10) {
+                                error = "کد اتصال باید ۱۰ کاراکتر باشد."
+                                return@Button
+                            }
+                            scope.launch {
+                                busy = true
+                                error = ""
+                                try {
+                                    redeemPairingCode(code, prefs)
+                                    onConnected()
+                                } catch (e: Exception) {
+                                    error = e.message ?: "اتصال با کد ناموفق بود."
+                                } finally {
+                                    busy = false
+                                }
+                            }
+                        },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        else Text("تأیید و اتصال")
+                    }
+                    OutlinedButton(onClick = onCancel, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("بازگشت") }
                 }
             }
         }
@@ -192,10 +264,10 @@ private fun PairingStatusCard(title: String, error: String?, action: (() -> Unit
                     Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     if (error == null) {
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        Text("کد یک‌بارمصرف از rado-taxi.sbs بررسی می‌شود و توکن اپ به‌صورت امن روی گوشی ذخیره خواهد شد.")
+                        Text("کد یک‌بارمصرف از rado-taxi.sbs بررسی می‌شود و توکن فقط پس از اعتبارسنجی روی گوشی ذخیره خواهد شد.")
                     } else {
                         Text(error, color = MaterialTheme.colorScheme.error)
-                        if (action != null) OutlinedButton(onClick = action, modifier = Modifier.fillMaxWidth()) { Text("بازگشت به اتصال هوشمند") }
+                        if (action != null) OutlinedButton(onClick = action, modifier = Modifier.fillMaxWidth()) { Text("بازگشت به اتصال امن") }
                     }
                 }
             }
