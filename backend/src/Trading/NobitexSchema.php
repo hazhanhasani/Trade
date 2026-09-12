@@ -231,7 +231,7 @@ final class NobitexSchema
     {
         if(!preg_match('/^[a-z0-9_]+$/i',$table)||!preg_match('/^[a-z0-9_]+$/i',$column))throw new \InvalidArgumentException('Invalid schema identifier.');
         $quoted=$pdo->quote($column);$stmt=$pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$quoted}");if($stmt&&$stmt->fetch())return;
-        try{$pdo->exec("ALTER TABLE `{$table}` ADD COLUMN `{$column}` {$definition}");
+        try{$pdo->exec("ALTER TABLE `{$table}` ADD COLUMN `{$column}` {$definition}");}
         catch(\PDOException $e){$check=$pdo->query("SHOW COLUMNS FROM `{$table}` LIKE {$quoted}");if($check&&$check->fetch())return;throw$e;}
     }
 
