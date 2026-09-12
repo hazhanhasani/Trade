@@ -51,6 +51,8 @@ jobs:
         run: php backend/tests/nobitex_position_limit_test.php
       - name: Nobitex runtime safety regression tests
         run: php backend/tests/nobitex_runtime_safety_test.php
+      - name: Nobitex ambiguous submission recovery regression tests
+        run: php backend/tests/nobitex_ambiguous_submission_recovery_test.php
       - name: External Nobitex trade reconciliation v2 regression tests
         run: php backend/tests/nobitex_external_trade_reconciliation_test.php
       - name: Nobitex executable symbol policy regression tests
