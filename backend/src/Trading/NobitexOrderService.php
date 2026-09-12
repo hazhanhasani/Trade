@@ -106,6 +106,7 @@ final class NobitexOrderService
         $adaptiveExecution=null;
         $entryContext=is_array($input['_trade_entry_context']??null)?$input['_trade_entry_context']:[];
         $globalRisk=null;
+        $orderRules=null;
         $client=null;
 
         if($side==='buy'&&str_starts_with($source,'autotrade_nobitex')){
@@ -150,20 +151,6 @@ final class NobitexOrderService
             if($price===null||$price<=0) throw new \RuntimeException('Automated BUY has no safe execution price bound.');
         }
 
-        $maxOrderValue=(float)Config::get('trading.max_order_value',0);
-        $guardPrice=NobitexOrderValueGuard::priceBound($mode,$price,$input);
-        $reductionOnlyExit=$side==='sell'&&str_starts_with($source,'autotrade_nobitex');
-        $orderValueGuard=$reductionOnlyExit
-            ? NobitexOrderValueGuard::reductionOnlyExitAssessment($amount,$guardPrice,$maxOrderValue)
-            : NobitexOrderValueGuard::assertWithinLimit($amount,$guardPrice,$maxOrderValue);
-
-        if($side==='buy'&&str_starts_with($source,'autotrade_nobitex')){
-            $client??=$this->client();
-            $globalRisk=(new NobitexGlobalRiskRuntime())->assertFreshAutomatedBuy(
-                $pdo,$client,$symbol,$amount,(float)$price,$replacePositionId>0?$replacePositionId:null
-            );
-        }
-
         $clientOrderId=trim((string)($input['clientOrderId']??$input['identifier']??''));
         if($clientOrderId==='') $clientOrderId='trd-'.substr(bin2hex(random_bytes(12)),0,24);
         $clientOrderId=substr($clientOrderId,0,32);
@@ -189,7 +176,56 @@ final class NobitexOrderService
             }
         }
 
+        // Final exchange-contract preflight. The same normalized payload is
+        // persisted and submitted, preventing amount/price step drift between
+        // Trade's ledger and Nobitex validation.
+        $client??=$this->client();
+        $prepared=$client->prepareOrder($payload);
+        $orderRules=is_array($prepared['rules']??null)?$prepared['rules']:[];
+        if(!($prepared['valid']??false)){
+            $reason=(string)($prepared['reason']??'exchange_order_rules_rejected');
+            $assessment=['source'=>$source,'side'=>$side,'mode'=>$mode,'order_rules'=>$orderRules,'rule_reason'=>$reason];
+            $this->audit('nobitex.order_rules_rejected',['symbol'=>$symbol]+$assessment);
+            if($side==='sell'&&str_starts_with($source,'autotrade_nobitex')){
+                throw new NobitexCandidateRejectedException($symbol,'global_portfolio_exit_order_rules_rejected',$assessment);
+            }
+            throw new \InvalidArgumentException('Nobitex order rules rejected payload: '.$reason);
+        }
+        $payload=(array)$prepared['payload'];
+        $amount=$this->positive($payload['amount']??null,'amount');
+        $price=isset($payload['price'])&&$payload['price']!==''?$this->positive($payload['price'],'price'):null;
+
+        $reductionOnlyExit=$side==='sell'&&str_starts_with($source,'autotrade_nobitex');
+        if($reductionOnlyExit&&($orderRules['below_minimum']??false)){
+            $assessment=[
+                'source'=>$source,
+                'side'=>$side,
+                'mode'=>$mode,
+                'amount'=>$amount,
+                'price'=>$price,
+                'estimated_order_value'=>$orderRules['estimated_order_value']??null,
+                'min_order_quote'=>$orderRules['min_order_quote']??null,
+                'quote_asset'=>$quote,
+                'order_rules'=>$orderRules,
+            ];
+            $this->audit('nobitex.exit_below_exchange_minimum',['symbol'=>$symbol]+$assessment);
+            throw new NobitexCandidateRejectedException($symbol,'global_portfolio_exit_below_exchange_minimum',$assessment);
+        }
+
+        $maxOrderValue=(float)Config::get('trading.max_order_value',0);
+        $guardPrice=NobitexOrderValueGuard::priceBound($mode,$price,$input);
+        $orderValueGuard=$reductionOnlyExit
+            ? NobitexOrderValueGuard::reductionOnlyExitAssessment($amount,$guardPrice,$maxOrderValue)
+            : NobitexOrderValueGuard::assertWithinLimit($amount,$guardPrice,$maxOrderValue);
+
+        if($side==='buy'&&str_starts_with($source,'autotrade_nobitex')){
+            $globalRisk=(new NobitexGlobalRiskRuntime())->assertFreshAutomatedBuy(
+                $pdo,$client,$symbol,$amount,(float)$price,$replacePositionId>0?$replacePositionId:null
+            );
+        }
+
         $requestLog=$payload;
+        $requestLog['_trade_order_rules']=$orderRules;
         $requestLog['_trade_order_value_guard']=$orderValueGuard;
         if($executionPlan!==null) $requestLog['_trade_execution_plan']=$executionPlan;
         if($executionLearning!==null) $requestLog['_trade_execution_learning']=$executionLearning;
@@ -213,7 +249,6 @@ final class NobitexOrderService
         ]);
 
         try{
-            $client??=$this->client();
             $response=$client->createOrder($payload);
             $order=$this->firstOrder($response);
             $exchangeId=trim((string)($order['id']??''));
@@ -232,6 +267,7 @@ final class NobitexOrderService
                 'side'=>$side,
                 'mode'=>$mode,
                 'source'=>$source,
+                'order_rules'=>$orderRules,
                 'order_value_guard'=>$orderValueGuard,
                 'execution_plan'=>$executionPlan,
                 'execution_learning'=>$executionLearning,
@@ -253,6 +289,7 @@ final class NobitexOrderService
                 'local_id'=>$localId,
                 'exchange'=>$response,
                 'order'=>$order,
+                'order_rules'=>$orderRules,
                 'order_value_guard'=>$orderValueGuard,
                 'execution_plan'=>$executionPlan,
                 'execution_learning'=>$executionLearning,
@@ -262,7 +299,7 @@ final class NobitexOrderService
         }catch(\Throwable $e){
             $stmt=$pdo->prepare("UPDATE orders SET status='failed',error_text=:error,updated_at=UTC_TIMESTAMP() WHERE local_id=:local");
             $stmt->execute([':error'=>mb_substr($e->getMessage(),0,1000),':local'=>$localId]);
-            $this->audit('nobitex.order_failed',['local_id'=>$localId,'error'=>$e->getMessage(),'source'=>$source]);
+            $this->audit('nobitex.order_failed',['local_id'=>$localId,'error'=>$e->getMessage(),'source'=>$source,'symbol'=>$symbol,'side'=>$side,'mode'=>$mode,'order_rules'=>$orderRules]);
             try{
                 (new TradeNotificationCenter())->emit(
                     'order-failed:'.$localId,
