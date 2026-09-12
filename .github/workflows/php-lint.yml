@@ -27,6 +27,8 @@ jobs:
           extensions: curl, pdo_mysql, openssl
       - name: PHP syntax
         run: find backend -type f -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Database nested transaction regression tests
+        run: php backend/tests/database_nested_transaction_test.php
       - name: Nobitex strategy regression tests
         run: php backend/tests/trading_strategy_test.php
       - name: Multi-strategy regime/router regression tests
