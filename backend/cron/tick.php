@@ -12,7 +12,6 @@ use Trade\Observability\ErrorReporter;
 use Trade\Observability\HostHealthSentinel;
 use Trade\Observability\NobitexDecisionReporter;
 use Trade\Support\IranClock;
-use Trade\Trading\AutoTraderEngine;
 use Trade\Trading\NobitexAutoTraderEngine;
 use Trade\Trading\NobitexDisplayMoney;
 use Trade\Trading\NobitexDustConverter;
@@ -39,12 +38,49 @@ if(($update['status']??'')==='updated'&&!$updatedThisProcess){$update['previous_
 if($updatedThisProcess){
     $heartbeat['status']='updated_deferred';$heartbeat['finished_at']=gmdate(DATE_ATOM);$heartbeat['finished_at_iran']=IranClock::nowPayload();$heartbeat['backend_version']=$versionAfterUpdate;$writeHeartbeat($heartbeat);
     ErrorReporter::log('Backend با موفقیت داخل Cron به نسخه جدید به‌روزرسانی شد؛ اجرای معامله عمداً به Tick بعدی موکول شد.','cron_update',['status'=>'updated_deferred','from_version'=>$versionBeforeUpdate,'to_version'=>$versionAfterUpdate],'info');
-    echo json_encode(['status'=>'success','update'=>$update,'backend_version'=>$versionAfterUpdate,'exchanges'=>['bitpin'=>['status'=>'deferred','reason'=>'backend_updated_restart_next_tick'],'nobitex'=>['status'=>'deferred','reason'=>'backend_updated_restart_next_tick']],'time_utc'=>gmdate(DATE_ATOM),'time_iran'=>IranClock::nowPayload()],JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE).PHP_EOL;exit(0);
+    echo json_encode([
+        'status'=>'success',
+        'update'=>$update,
+        'backend_version'=>$versionAfterUpdate,
+        'execution_exchange'=>'nobitex',
+        'exchanges'=>['nobitex'=>['status'=>'deferred','reason'=>'backend_updated_restart_next_tick']],
+        'market_data_sources'=>['bitpin','abantether','bit24','tabdeal'],
+        'time_utc'=>gmdate(DATE_ATOM),
+        'time_iran'=>IranClock::nowPayload(),
+    ],JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE).PHP_EOL;exit(0);
 }
 
 try{
     NobitexSchema::ensure();$runId=bin2hex(random_bytes(12));$stmt=$pdo->prepare("INSERT INTO bot_runs (run_id,status,started_at) VALUES (:id,'running',UTC_TIMESTAMP())");$stmt->execute([':id'=>$runId]);
-    $baseSummary=['run_id'=>$runId,'strategy_mode'=>NobitexRuntimeModels::STRATEGY_MODE,'decision_model'=>NobitexRuntimeModels::DECISION,'selection_model'=>NobitexRuntimeModels::SELECTION,'execution_model'=>NobitexRuntimeModels::EXECUTION,'execution_learning_model'=>NobitexRuntimeModels::EXECUTION_LEARNING,'adaptive_execution_model'=>NobitexRuntimeModels::ADAPTIVE_EXECUTION,'global_portfolio_model'=>NobitexRuntimeModels::GLOBAL_PORTFOLIO,'strategy_learning_model'=>NobitexRuntimeModels::STRATEGY_LEARNING,'edge_calibration_model'=>NobitexRuntimeModels::EDGE_CALIBRATION,'order_value_guard_model'=>NobitexRuntimeModels::ORDER_VALUE_GUARD,'nobitex_universe'=>'all_executable_irt_usdt_spot_markets','universe_awareness'=>'full_orderbook_scan_each_tick','deep_analysis'=>'all_executable_markets_no_top_n_gate','score_based_selection'=>false,'signal_source'=>'nobitex_internal_1m_5m_15m','tradingview_dependency'=>false,'analysis_interval_target_seconds'=>60,'quote_priority'=>['IRT','USDT'],'execution_mode'=>'live_only','update'=>$update,'backend_version'=>$versionAfterUpdate,'time_utc'=>gmdate(DATE_ATOM),'time_iran'=>IranClock::nowPayload()];
+    $baseSummary=[
+        'run_id'=>$runId,
+        'strategy_mode'=>NobitexRuntimeModels::STRATEGY_MODE,
+        'decision_model'=>NobitexRuntimeModels::DECISION,
+        'selection_model'=>NobitexRuntimeModels::SELECTION,
+        'execution_model'=>NobitexRuntimeModels::EXECUTION,
+        'execution_learning_model'=>NobitexRuntimeModels::EXECUTION_LEARNING,
+        'adaptive_execution_model'=>NobitexRuntimeModels::ADAPTIVE_EXECUTION,
+        'global_portfolio_model'=>NobitexRuntimeModels::GLOBAL_PORTFOLIO,
+        'strategy_learning_model'=>NobitexRuntimeModels::STRATEGY_LEARNING,
+        'edge_calibration_model'=>NobitexRuntimeModels::EDGE_CALIBRATION,
+        'order_value_guard_model'=>NobitexRuntimeModels::ORDER_VALUE_GUARD,
+        'nobitex_universe'=>'all_executable_irt_usdt_spot_markets',
+        'universe_awareness'=>'full_orderbook_scan_each_tick',
+        'deep_analysis'=>'all_executable_markets_no_top_n_gate',
+        'score_based_selection'=>false,
+        'signal_source'=>'nobitex_internal_1m_5m_15m_plus_external_market_consensus',
+        'market_data_sources'=>['bitpin','abantether','bit24','tabdeal'],
+        'market_data_role'=>'read_only_intelligence',
+        'tradingview_dependency'=>false,
+        'analysis_interval_target_seconds'=>60,
+        'quote_priority'=>['IRT','USDT'],
+        'execution_mode'=>'nobitex_only',
+        'execution_exchange'=>'nobitex',
+        'update'=>$update,
+        'backend_version'=>$versionAfterUpdate,
+        'time_utc'=>gmdate(DATE_ATOM),
+        'time_iran'=>IranClock::nowPayload(),
+    ];
 
     // External Trade Reconciliation v2 runs first. It reads exact Nobitex user
     // fills and excludes order IDs owned by Trade, so manual SELLs can carry
@@ -84,9 +120,20 @@ try{
         }
     }catch(Throwable $e){$positionReconciliation=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];if(($externalTradeReconciliation['status']??'')==='skipped')$externalTradeReconciliation=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];ErrorReporter::captureThrowable($e,'warning','nobitex_position_reconciliation',['exchange'=>'nobitex','run_id'=>$runId]);}
 
+    // Nobitex is the only trading engine. Bitpin/AbanTether/Bit24/Tabdeal are
+    // consumed only through the read-only MarketDataHub inside the Nobitex BUY
+    // execution guard and are never scheduled as exchange runners.
     $results=[];$enabledCount=0;$failedCount=0;
-    $runExchange=static function(string $exchange,callable $runner)use(&$results,&$enabledCount,&$failedCount,$runId):void{if(!NobitexSchema::botEnabled($exchange)){$results[$exchange]=['status'=>'disabled','exchange'=>$exchange];return;}$enabledCount++;try{$results[$exchange]=$runner();}catch(Throwable $e){$failedCount++;$results[$exchange]=['status'=>'failed','exchange'=>$exchange,'error'=>$e->getMessage()];ErrorReporter::captureThrowable($e,'error','cron_exchange',['exchange'=>$exchange,'status'=>'failed','run_id'=>$runId]);}};
-    $runExchange('bitpin',static fn():array=>(new AutoTraderEngine())->run());$runExchange('nobitex',static function():array{$engine=new NobitexAutoTraderEngine();$engine->runBootstrapIfPending();return$engine->run();});
+    if(!NobitexSchema::botEnabled('nobitex')){
+        $results['nobitex']=['status'=>'disabled','exchange'=>'nobitex'];
+    }else{
+        $enabledCount++;
+        try{
+            $engine=new NobitexAutoTraderEngine();$engine->runBootstrapIfPending();$results['nobitex']=$engine->run();
+        }catch(Throwable $e){
+            $failedCount++;$results['nobitex']=['status'=>'failed','exchange'=>'nobitex','error'=>$e->getMessage()];ErrorReporter::captureThrowable($e,'error','cron_exchange',['exchange'=>'nobitex','status'=>'failed','run_id'=>$runId]);
+        }
+    }
 
     $dust=['status'=>'disabled'];try{$dust=(new NobitexDustConverter())->runIfDue($pdo);}catch(Throwable $e){$dust=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];ErrorReporter::captureThrowable($e,'error','dust_converter_cron',['exchange'=>'nobitex','run_id'=>$runId]);}
     $hostHealth=['status'=>'ok','alert_count'=>0];try{$hostHealth=(new HostHealthSentinel())->run();}catch(Throwable $e){$hostHealth=['status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];ErrorReporter::captureThrowable($e,'warning','host_health_sentinel',['run_id'=>$runId]);}
@@ -98,7 +145,6 @@ try{
     $heartbeat['status']=$overall;$heartbeat['finished_at']=gmdate(DATE_ATOM);$heartbeat['finished_at_iran']=IranClock::nowPayload();$heartbeat['run_id']=$runId;$heartbeat['backend_version']=$versionAfterUpdate;$writeHeartbeat($heartbeat);
 
     $nobitexResult=is_array($results['nobitex']??null)?$results['nobitex']:[];
-    $bitpinResult=is_array($results['bitpin']??null)?$results['bitpin']:[];
     try{
         (new NobitexDecisionReporter())->report($nobitexResult,$runId);
     }catch(Throwable $e){
@@ -107,18 +153,18 @@ try{
     ErrorReporter::log(
         'چرخه Cron پایان یافت. وضعیت کل: '.$overall
         .' | Nobitex: '.(string)($nobitexResult['status']??'unknown')
-        .(($nobitexResult['reason']??'')!==''?' | دلیل Nobitex: '.(string)$nobitexResult['reason']:'')
-        .' | Bitpin: '.(string)($bitpinResult['status']??'unknown'),
+        .(($nobitexResult['reason']??'')!==''?' | دلیل Nobitex: '.(string)$nobitexResult['reason']:''),
         'cron_cycle',
         [
             'run_id'=>$runId,
             'status'=>$overall,
             'exchange'=>'nobitex',
+            'execution_exchange'=>'nobitex',
+            'market_data_sources'=>['bitpin','abantether','bit24','tabdeal'],
             'nobitex_status'=>$nobitexResult['status']??null,
             'nobitex_reason'=>$nobitexResult['reason']??null,
             'active_positions'=>$nobitexResult['active_positions']??null,
             'pending_orders'=>$nobitexResult['pending_orders']??null,
-            'bitpin_status'=>$bitpinResult['status']??null,
             'backend_version'=>$versionAfterUpdate,
         ],
         'info'
