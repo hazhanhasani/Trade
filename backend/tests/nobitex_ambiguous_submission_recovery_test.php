@@ -39,7 +39,7 @@ $createStart=strpos($client,'public function createOrder');
 $cancelStart=$createStart===false?false:strpos($client,'public function cancelOrder',$createStart);
 ambiguousAssert($createStart!==false&&$cancelStart!==false,'Nobitex createOrder source block is missing.');
 $createBody=substr($client,$createStart,$cancelStart-$createStart);
-ambiguousAssert(str_contains($createBody,"return $this->request('POST','/market/orders/add'")||str_contains($createBody,"return \$this->request('POST','/market/orders/add'"),'createOrder must submit exactly through the add endpoint.');
+ambiguousAssert(str_contains($createBody,"return \$this->request('POST','/market/orders/add'"),'createOrder must submit exactly through the add endpoint.');
 ambiguousAssert(!str_contains($createBody,'authenticatedRead('),'createOrder must not be automatically retried by the HTTP client.');
 
 echo "Nobitex ambiguous submission recovery regression tests passed.\n";
