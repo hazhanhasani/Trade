@@ -49,7 +49,10 @@ expectFastCycle(str_contains($runner, 'replacement_slots_released'), 'Fast-cycle
 expectFastCycle(str_contains($runner, 'NobitexCandidateRejectedException'), 'Candidate rejections must have an explicit non-fatal path.');
 expectFastCycle(str_contains($runner, "'buy_hourly_safety_limit_reached'"), 'Hourly BUY throttle must be classified as a safe no-trade reason.');
 expectFastCycle(str_contains($runner, "'expected_rejection'=>true"), 'Expected safety rejections must be marked as expected telemetry.');
-expectFastCycle(str_contains($runner, "trim($e->getMessage()) === 'Nobitex buy order safety limit reached.'"), 'Legacy hourly safety exception must be normalized instead of reported as cron failure.');
+$hourlyGuard = <<<'PHP'
+trim($e->getMessage()) === 'Nobitex buy order safety limit reached.'
+PHP;
+expectFastCycle(str_contains($runner, $hourlyGuard), 'Legacy hourly safety exception must be normalized instead of reported as cron failure.');
 
 // Exchange-minimum residuals, previous partial exits and amount-step leftovers
 // from a supposedly completed SELL must not turn into permanent tiny holdings.
