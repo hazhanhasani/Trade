@@ -163,11 +163,17 @@ final class BaleTradeNotifier
             $buysQueued++;
         }
 
+        // Realized rows are first inserted as provisional gross values by the
+        // fill reconciler. Fee accounting then replaces pnl/pnl_percent with final
+        // net values and sets accounted_at. Never let Bale race ahead of that
+        // accounting step and permanently publish a gross placeholder as net PnL.
         $stmt=$pdo->prepare("SELECT r.id AS pnl_id,r.position_id,r.pnl,r.pnl_percent,r.net_pnl,r.exit_price,r.amount,r.created_at,
                 p.symbol,p.asset,p.quote_asset,p.entry_price,p.entry_order_local_id
             FROM nobitex_autotrade_pnl r
             JOIN nobitex_autotrade_positions p ON p.id=r.position_id
             WHERE r.created_at>=:since
+              AND r.accounted_at IS NOT NULL
+              AND r.net_pnl IS NOT NULL
               AND NOT EXISTS (
                 SELECT 1 FROM bale_trade_deliveries d
                 WHERE d.event_key=CONCAT('nobitex-sell-pnl:',r.id)
@@ -182,7 +188,7 @@ final class BaleTradeNotifier
                 'position_id'=>$positionId,'symbol'=>(string)$row['symbol'],'asset'=>(string)$row['asset'],
                 'quote_asset'=>(string)$row['quote_asset'],'amount'=>(float)$row['amount'],'entry_price'=>(float)$row['entry_price'],
                 'exit_price'=>(float)$row['exit_price'],'pnl'=>(float)$row['pnl'],
-                'net_pnl'=>$row['net_pnl']!==null?(float)$row['net_pnl']:(float)$row['pnl'],
+                'net_pnl'=>(float)$row['net_pnl'],
                 'pnl_percent'=>(float)$row['pnl_percent'],'strategy_key'=>$meta['strategy_key']??null,
                 'market_regime'=>$meta['market_regime']??null,'exit_reason'=>$reasons[$positionId]??'autotrade_exit',
                 'time_iran'=>IranClock::formatUtc((string)$row['created_at']),
@@ -429,5 +435,5 @@ final class BaleTradeNotifier
     private static function iranFromUtc(string $utc):string{return IranClock::formatUtc($utc);}
     private static function strategyFa(string $key):string{return match($key){'trend_momentum_v1'=>'روند و مومنتوم','breakout_v1'=>'شکست محدوده','mean_reversion_v1'=>'بازگشت به میانگین',default=>trim($key)};}
     private static function regimeFa(string $key):string{return match($key){'trending_up'=>'روند صعودی','trending_down'=>'روند نزولی','breakout_up'=>'شکست صعودی','breakout_down'=>'شکست نزولی','ranging'=>'بازار رنج','high_volatility'=>'نوسان شدید','uncertain'=>'نامطمئن',default=>trim($key)};}
-    private static function exitReasonFa(string $reason):string{$normalized=strtolower(trim(str_replace(['-',' '],'_',$reason)));return match($normalized){'stop_loss'=>'حد ضرر','take_profit'=>'حد سود','trailing_stop'=>'حد ضرر متحرک','trailing_profit_lock'=>'قفل سود متحرک / برگشت از اوج','profit_lock'=>'قفل سود','profit_giveback'=>'قفل سود / برگشت از اوج','stale_capital_release'=>'آزادسازی سرمایه راکد','signal_reversal'=>'تغییر جهت سیگنال','rotation'=>'تعویض با فرصت بهتر','autotrade_exit'=>'خروج خودکار ربات',default=>str_replace('_',' ',$normalized)};}
+    private static function exitReasonFa(string $reason):string{$normalized=strtolower(trim(str_replace(['-',' '],'_',$reason)));return match($normalized){'stop_loss'=>'حد ضرر','take_profit'=>'حد سود','trailing_stop'=>'حد ضرر متحرک','trailing_profit_lock'=>'قفل سود متحرک / برگشت از اوج','trailing_reversal_protection_after_costs'=>'خروج حفاظتی پس از برگشت از اوج (پس از هزینه‌ها)','profit_lock'=>'قفل سود','profit_giveback'=>'قفل سود / برگشت از اوج','stale_capital_release'=>'آزادسازی سرمایه راکد','signal_reversal'=>'تغییر جهت سیگنال','rotation'=>'تعویض با فرصت بهتر','autotrade_exit'=>'خروج خودکار ربات',default=>str_replace('_',' ',$normalized)};}
 }
