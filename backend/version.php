@@ -14,4 +14,7 @@ declare(strict_types=1);
 // resolves failed-run warnings after recovery, and expires transient scan warnings.
 // 1.4.50 makes trailing-exit classification fee-aware and waits for finalized
 // net SELL accounting before publishing confirmed trade notifications.
-return '1.4.50';
+// 1.4.51 carries proven Trade-owned IRT dust into the next same-asset managed IRT
+// position using a weighted cost basis, so the next normal exit can liquidate the
+// combined quantity without absorbing unexplained/manual wallet inventory.
+return '1.4.51';
