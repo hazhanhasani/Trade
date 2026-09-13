@@ -57,6 +57,8 @@ jobs:
         run: php backend/tests/nobitex_order_fill_test.php
       - name: Nobitex fill integration regression tests
         run: php backend/tests/nobitex_fill_integration_test.php
+      - name: Trailing exit and confirmed PnL truth regression tests
+        run: php backend/tests/nobitex_trailing_pnl_truth_test.php
       - name: Nobitex manual position reconciliation regression tests
         run: php backend/tests/nobitex_position_reconciliation_test.php
       - name: Nobitex active position limit regression tests
