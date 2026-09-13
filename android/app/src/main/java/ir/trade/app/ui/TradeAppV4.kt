@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -296,7 +297,7 @@ fun TradeAppV4() {
                     LazyColumn(Modifier.fillMaxWidth().height(420.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         val steps = jsonObjects(replay?.optJSONArray("steps"))
                         if (steps.isEmpty()) item { Text(replay?.optString("error", "داده‌ای برای بازپخش نیست") ?: "—") }
-                        items(steps, key = { "replay:${it.optString("time")}:${it.optString("text")}" }) { step ->
+                        itemsIndexed(steps, key = { index, step -> "replay:${index}:${step.optString("time")}:${step.optString("text")}" }) { _, step ->
                             V4MiniCard {
                                 Text(step.optString("text", "رویداد"), fontWeight = FontWeight.Bold)
                                 Text(step.optString("time", ""), color = V4Muted)
@@ -386,7 +387,7 @@ private fun V4Home(root: JSONObject, offline: Boolean, listState: LazyListState)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(decision.optString("symbol", "بدون نماد"), fontWeight = FontWeight.Black, style = MaterialTheme.typography.titleLarge)
-                        Text(decision.optString("reason_fa", decision.optString("reason", "هنوز تصمیمی ثبت نشده")), color = V4Muted)
+                        Text(decisionReasonFa(decision), color = V4Muted)
                     }
                     V4Pill(actionFa(decision.optString("action", "—")), V4PrimarySoft, V4Primary)
                 }
@@ -401,7 +402,7 @@ private fun V4Home(root: JSONObject, offline: Boolean, listState: LazyListState)
         }
         item { V4SectionTitle("هشدارها", if (alerts.isEmpty()) "همه‌چیز عادی است" else "${faInt(alerts.size)} مورد نیازمند توجه") }
         if (alerts.isEmpty()) item { V4Banner("هشدار مهمی فعال نیست.", V4GreenSoft, V4Green) }
-        items(alerts.take(8), key = { "alert:${it.optString("category")}:${it.optString("title")}:${it.optString("created_at")}" }) { alert ->
+        itemsIndexed(alerts.take(8), key = { index, alert -> "alert:${index}:${alert.optString("category")}:${alert.optString("title")}:${alert.optString("created_at")}" }) { _, alert ->
             val critical = alert.optString("priority") == "critical"
             V4Card(container = if (critical) V4RedSoft else V4AmberSoft) {
                 Text(alert.optString("title", "هشدار"), fontWeight = FontWeight.Bold, color = if (critical) V4Red else V4Amber)
@@ -409,7 +410,7 @@ private fun V4Home(root: JSONObject, offline: Boolean, listState: LazyListState)
             }
         }
         item { V4SectionTitle("تایم‌لاین فعالیت", "تصمیم‌ها و معاملات به زبان ساده") }
-        items(activity.take(12), key = { "home:${it.optLong("id", -1)}:${it.optString("created_at_utc")}:${it.optString("text_fa")}" }) { event ->
+        itemsIndexed(activity.take(12), key = { index, event -> "home:${index}:${event.optLong("id", -1)}:${event.optString("created_at_utc")}:${event.optString("text_fa")}" }) { _, event ->
             V4MiniCard {
                 Text(event.optString("text_fa", "رویداد معاملاتی"), fontWeight = FontWeight.SemiBold)
                 Text(event.optString("created_at_iran", event.optString("created_at_utc", "")), color = V4Muted, style = MaterialTheme.typography.labelSmall)
@@ -451,7 +452,7 @@ private fun V4Market(root: JSONObject, listState: LazyListState) {
             }
         }
         item { V4SectionTitle("۱۰ فرصت برتر", "رتبه‌بندی نمایشی؛ سفارش خرید نیست") }
-        items(ranking, key = { "rank:${it.optString("symbol")}:${it.optString("quote_asset")}" }) { item ->
+        itemsIndexed(ranking, key = { index, item -> "rank:${index}:${item.optString("symbol")}:${item.optString("quote_asset")}" }) { _, item ->
             V4Card {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -483,7 +484,7 @@ private fun V4Trades(root: JSONObject, listState: LazyListState, onReplay: (Long
     ) {
         item { V4SectionTitle("پوزیشن‌های فعال", "برای بازپخش معامله روی کارت بزن") }
         if (positions.isEmpty()) item { V4Banner("پوزیشن فعالی وجود ندارد.", V4BlueSoft, V4Blue) }
-        items(positions, key = { "position:${it.optLong("id")}" }) { p ->
+        itemsIndexed(positions, key = { index, p -> "position:${index}:${p.optLong("id")}" }) { _, p ->
             val pnl = p.optDouble("unrealized_net_pnl_percent")
             V4Card(modifier = Modifier.clickable { onReplay(p.optLong("id")) }) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -507,7 +508,7 @@ private fun V4Trades(root: JSONObject, listState: LazyListState, onReplay: (Long
         }
         item { V4SectionTitle("نقشه حرارتی ریسک", "همبستگی بر پایه نمونه‌های زمانی هم‌تراز") }
         if (cells.isEmpty()) item { Text("برای نقشه حرارتی حداقل دو پوزیشن با داده کافی لازم است.", color = V4Muted) }
-        items(cells.take(30), key = { "heat:${it.optString("x")}:${it.optString("y")}" }) { cell ->
+        itemsIndexed(cells.take(30), key = { index, cell -> "heat:${index}:${cell.optString("x")}:${cell.optString("y")}" }) { _, cell ->
             val risk = cell.optString("risk", "unknown")
             V4MiniCard {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -520,7 +521,7 @@ private fun V4Trades(root: JSONObject, listState: LazyListState, onReplay: (Long
             }
         }
         item { V4SectionTitle("معاملات اخیر", "تایم‌لاین تأییدشده") }
-        items(activity.take(20), key = { "trade:${it.optLong("id", -1)}:${it.optString("created_at_utc")}:${it.optString("text_fa")}" }) { event ->
+        itemsIndexed(activity.take(20), key = { index, event -> "trade:${index}:${event.optLong("id", -1)}:${event.optString("created_at_utc")}:${event.optString("text_fa")}" }) { _, event ->
             V4MiniCard {
                 Text(event.optString("text_fa", "رویداد"), fontWeight = FontWeight.SemiBold)
                 Text(event.optString("created_at_iran", event.optString("created_at_utc", "")), color = V4Muted)
@@ -585,7 +586,7 @@ private fun V4Reports(root: JSONObject, api: TradeApi, listState: LazyListState)
         item { V4SectionTitle("نمودار ارزش کیف پول", "کل بازه موجود با نمونه‌برداری نمایشی") }
         item { V4EquityBars(curve) }
         item { V4SectionTitle("عملکرد بر اساس استراتژی", "استراتژی و پروفایل") }
-        items(strategies.take(12), key = { "strategy:${it.optString("strategy_key")}:${it.optString("profile_key")}:${it.optString("quote_asset")}" }) { s ->
+        itemsIndexed(strategies.take(12), key = { index, s -> "strategy:${index}:${s.optString("strategy_key")}:${s.optString("profile_key")}:${s.optString("quote_asset")}" }) { _, s ->
             V4MiniCard {
                 Row(Modifier.fillMaxWidth()) {
                     Column(Modifier.weight(1f)) {
@@ -600,7 +601,7 @@ private fun V4Reports(root: JSONObject, api: TradeApi, listState: LazyListState)
             }
         }
         item { V4SectionTitle("عملکرد بر اساس دارایی", "بهترین و ضعیف‌ترین دارایی‌ها بر اساس بازده درصدی") }
-        items(coins.take(12), key = { "coin:${it.optString("asset")}:${it.optString("quote_asset")}" }) { c ->
+        itemsIndexed(coins.take(12), key = { index, c -> "coin:${index}:${c.optString("asset")}:${c.optString("quote_asset")}" }) { _, c ->
             V4MiniCard {
                 Row(Modifier.fillMaxWidth()) {
                     Text(c.optString("asset", "—"), fontWeight = FontWeight.Black, modifier = Modifier.weight(1f))
@@ -832,7 +833,7 @@ private fun V4Settings(
             }
         }
         item { V4SectionTitle("تاریخچه تنظیمات و بازگردانی", "${faInt(history.size)} نسخه اخیر") }
-        items(history.take(15), key = { "history:${it.optLong("id")}" }) { h ->
+        itemsIndexed(history.take(15), key = { index, h -> "history:${index}:${h.optLong("id")}" }) { _, h ->
             V4MiniCard {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -908,7 +909,7 @@ private fun V4Hero(title: String, subtitle: String, chips: List<String>) {
                     Text(subtitle, color = Color(0xFFC7CAD4))
                 }
             }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { chips.take(3).forEach { V4Pill(it, Color(0xFF292D42), Color.White) } }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { chips.take(3).forEach { V4Pill(it, Color(0xFF292D42), Color.White, Modifier.fillMaxWidth()) } }
         }
     }
 }
@@ -945,8 +946,8 @@ private fun V4TinyMetric(label: String, value: String, modifier: Modifier = Modi
 }
 
 @Composable
-private fun V4Pill(text: String, bg: Color, fg: Color) {
-    Text(text, modifier = Modifier.fillMaxWidth().background(bg, RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 6.dp), color = fg, style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+private fun V4Pill(text: String, bg: Color, fg: Color, modifier: Modifier = Modifier) {
+    Text(text, modifier = modifier.background(bg, RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 6.dp), color = fg, style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
 }
 
 @Composable
@@ -1064,6 +1065,25 @@ private fun regimeFa(value: String): String = when (value.lowercase()) {
     "range", "ranging", "sideways" -> "خنثی"
     "volatile", "high_volatility" -> "پرنوسان"
     else -> value.ifBlank { "—" }
+}
+
+private fun decisionReasonFa(decision: JSONObject): String {
+    val translated = decision.optString("reason_fa", "").trim()
+    if (translated.isNotEmpty()) return translated
+    val reason = decision.optString("reason", "").trim().lowercase()
+    return when (reason) {
+        "after_costs_and_buffer", "hold_after_costs_and_buffer", "net_edge_below_costs_and_buffer" -> "پس از کسر کارمزد و حاشیه اطمینان، لبه کافی برای معامله وجود ندارد."
+        "no_candidate_passed_signal_and_risk_filters" -> "هیچ کاندیدایی از فیلترهای سیگنال و ریسک عبور نکرد."
+        "buy_hourly_safety_limit_reached" -> "سقف ایمنی خرید ساعتی فعال است؛ خرید جدید موقتاً انجام نمی‌شود."
+        "strategy_profile_persistently_unprofitable" -> "پروفایل این استراتژی به‌دلیل عملکرد ضعیف موقتاً اجازه ورود ندارد."
+        "adaptive_policy_tightened_edge_below_margin" -> "سیاست تطبیقی پس از محاسبه هزینه‌ها حاشیه ورود را کافی ندانست."
+        "effective_position_capacity_reached", "configured_position_capacity_reached" -> "ظرفیت مجاز پوزیشن‌ها تکمیل است."
+        "daily_loss_limit" -> "حد زیان روزانه مانع ورود جدید شده است."
+        "portfolio_exposure_limit" -> "سقف سرمایه درگیر پرتفوی اجازه ورود جدید نمی‌دهد."
+        "runtime_entry_circuit_open" -> "مدار ایمنی ورود موقتاً باز است؛ خرید جدید انجام نمی‌شود."
+        "" -> "هنوز تصمیمی ثبت نشده"
+        else -> reason.replace('_', ' ').ifBlank { "هنوز تصمیمی ثبت نشده" }
+    }
 }
 
 private fun actionFa(value: String): String = when (value.lowercase()) {

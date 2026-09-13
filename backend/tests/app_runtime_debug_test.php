@@ -71,6 +71,11 @@ appDebugAssert(str_contains($app,'private fun normalizeLocalizedNumber'),'Persia
 appDebugAssert(str_contains($app,'localizedDoubleOrNull(customPosition)'),'Custom risk fields must parse localized digits.');
 appDebugAssert(str_contains($app,'reports.optJSONObject("by_quote")'),'Reports must consume quote-separated PnL instead of implying one cross-currency total.');
 appDebugAssert(str_contains($app,'private val FaLocale = Locale("fa", "IR")'),'Primary Android dashboard numbers must use Persian locale formatting.');
+appDebugAssert(str_contains($app,'import androidx.compose.foundation.lazy.itemsIndexed'),'Dynamic LazyColumn rows must support index-salted stable keys.');
+appDebugAssert(str_contains($app,'itemsIndexed(alerts.take(8)')&&str_contains($app,'"alert:${index}:'),'Alert rows must include their list index so duplicate backend alerts cannot crash Compose.');
+appDebugAssert(str_contains($app,'itemsIndexed(activity.take(12)')&&str_contains($app,'itemsIndexed(activity.take(20)'),'Activity timelines must be duplicate-key safe.');
+appDebugAssert(str_contains($app,'private fun V4Pill(text: String, bg: Color, fg: Color, modifier: Modifier = Modifier)')&&str_contains($app,'modifier = modifier.background')&&str_contains($app,'Color.White, Modifier.fillMaxWidth())'),'Pills inside Rows must wrap content; only hero chips may fill available width.');
+appDebugAssert(str_contains($app,'private fun decisionReasonFa(')&&str_contains($app,'after_costs_and_buffer'),'Decision reason fallback must remain readable and localized when reason_fa is absent.');
 appDebugAssert(str_contains($app,'Futures/معاملات اهرمی در این مسیر اجرا نمی‌شوند'),'App must make the current Spot-only execution boundary explicit.');
 
 // Specialized dashboards may observe learning/rotation, but they must bootstrap

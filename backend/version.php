@@ -8,4 +8,5 @@ declare(strict_types=1);
 // Expected BUY-rate safety throttles remain enforced but are reported as normal
 // no-trade backpressure instead of false cron failures. 1.4.47 aligns the full
 // observability regression suite with the managed-dust ownership safety model.
-return '1.4.47';
+// Android 1.4.48: duplicate-safe LazyColumn keys, Row-safe pills and localized decision fallback.
+return '1.4.48';
