@@ -7,4 +7,5 @@ declare(strict_types=1);
 // stop consuming active slots; sellable residuals continue their original exit;
 // recently closed rows can recover mathematically known wallet dust without
 // fabricating an exit price or realized PnL.
+// CI startup retry: no runtime/version behavior change.
 return '1.4.43';
