@@ -18,7 +18,7 @@ use Trade\Observability\ErrorReporter;
  */
 final class NobitexFastCycleRunner
 {
-    public const MODEL = 'nobitex_fast_cycle_v1';
+    public const MODEL = 'nobitex_fast_cycle_v2';
     public const DEFAULT_CYCLES = 4;
     public const DEFAULT_INTERVAL_SECONDS = 12;
     public const DEFAULT_MAX_RUNTIME_SECONDS = 50;
@@ -45,6 +45,35 @@ final class NobitexFastCycleRunner
             $baleRuns = [];
             $walletReconcileRuns = [];
             $last = ['status'=>'no_trade','exchange'=>'nobitex','reason'=>'no_cycle_completed'];
+
+            // Reconcile real external/manual sells immediately before live
+            // decisions as well as in the outer cron. This is intentionally
+            // idempotent: a manual full sale closes the managed position first,
+            // releasing its slot so the same fast run can look for a replacement.
+            $externalTradeReconcile = ['status'=>'deferred','reason'=>'not_run'];
+            try {
+                $externalTradeReconcile = (new NobitexExternalTradeReconciler())->reconcile($pdo);
+            } catch (\Throwable $e) {
+                $externalTradeReconcile = ['status'=>'deferred','reason'=>'external_trade_reconcile_error','error'=>mb_substr($e->getMessage(),0,500)];
+                ErrorReporter::captureThrowable($e, 'warning', 'nobitex_fast_cycle_external_trade_reconcile', [
+                    'exchange'=>'nobitex','run_id'=>$runId,
+                ]);
+            }
+
+            // The wallet-only fallback runs before RuntimeSafety. Therefore a
+            // manual/external reduction that is visible in the wallet but late in
+            // trade history cannot leave a phantom position occupying a slot.
+            $preDecisionWalletReconcile = ['status'=>'deferred','reason'=>'not_run'];
+            try {
+                $preDecisionWalletReconcile = (new NobitexPositionReconciler())->reconcile($pdo);
+            } catch (\Throwable $e) {
+                $preDecisionWalletReconcile = ['status'=>'deferred','reason'=>'wallet_reconcile_error','error'=>mb_substr($e->getMessage(),0,500)];
+                ErrorReporter::captureThrowable($e, 'warning', 'nobitex_fast_cycle_predecision_reconcile', [
+                    'exchange'=>'nobitex','run_id'=>$runId,
+                ]);
+            }
+
+            $replacementSlotsReleased = $this->releasedSlots($externalTradeReconcile, $preDecisionWalletReconcile);
 
             // Partial/cancelled exits may leave a real balance that is below the
             // exchange minimum. Such a residual must not remain an `open`
@@ -90,6 +119,18 @@ final class NobitexFastCycleRunner
                         'time_utc'=>gmdate(DATE_ATOM),
                     ];
                 } catch (\Throwable $e) {
+                    $expected = $this->expectedNoTrade($e);
+                    if ($expected !== null) {
+                        $last = ['status'=>'no_trade','exchange'=>'nobitex'] + $expected;
+                        $results[] = ['cycle'=>$cycle,'status'=>'no_trade'] + $expected;
+                        // An hourly BUY throttle applies to every candidate, so
+                        // spinning through the remaining micro-cycles would only
+                        // repeat the same safe rejection. Candidate-specific
+                        // rejections may be re-evaluated on the next fresh cycle.
+                        if (($expected['reason'] ?? '') === 'buy_hourly_safety_limit_reached') break;
+                        continue;
+                    }
+
                     ErrorReporter::captureThrowable($e, 'error', 'cron_exchange_fast_cycle', [
                         'exchange'=>'nobitex','run_id'=>$runId,'cycle'=>$cycle,'status'=>'failed',
                     ]);
@@ -144,6 +185,9 @@ final class NobitexFastCycleRunner
                 'fast_cycle_interval_seconds'=>$interval,
                 'fast_cycle_max_runtime_seconds'=>$maxRuntime,
                 'fast_cycle_results'=>$results,
+                'external_trade_reconciliation'=>$externalTradeReconcile,
+                'predecision_wallet_reconciliation'=>$preDecisionWalletReconcile,
+                'replacement_slots_released'=>$replacementSlotsReleased,
                 'residual_dust_reconciliation'=>$residualDust,
                 'wallet_fast_cycle_reconciliation'=>$walletReconcileRuns,
                 'bale_fast_cycle'=>$baleRuns,
@@ -152,6 +196,40 @@ final class NobitexFastCycleRunner
         } finally {
             try { $pdo->query("SELECT RELEASE_LOCK('trade_nobitex_fast_cycle_v1')"); } catch (\Throwable) {}
         }
+    }
+
+    private function expectedNoTrade(\Throwable $e): ?array
+    {
+        if ($e instanceof NobitexCandidateRejectedException) {
+            return [
+                'reason'=>$e->reasonCode(),
+                'candidate_symbol'=>$e->symbol(),
+                'assessment'=>$e->assessment(),
+                'expected_rejection'=>true,
+            ];
+        }
+
+        // This exception is a rate/backpressure guard, not an exchange outage or
+        // failed order. Reporting it as cron_exchange_fast_cycle/error produced
+        // misleading red alerts and marked the whole run failed.
+        if ($e instanceof \RuntimeException && trim($e->getMessage()) === 'Nobitex buy order safety limit reached.') {
+            return [
+                'reason'=>'buy_hourly_safety_limit_reached',
+                'safety_throttle'=>true,
+                'expected_rejection'=>true,
+            ];
+        }
+
+        return null;
+    }
+
+    private function releasedSlots(array $external, array $wallet): int
+    {
+        $released = max(0, (int)($wallet['closed'] ?? 0));
+        foreach ((array)($external['events'] ?? []) as $event) {
+            if (is_array($event) && (string)($event['type'] ?? '') === 'closed') $released++;
+        }
+        return $released;
     }
 
     private function containsBuySubmission(array $result): bool
