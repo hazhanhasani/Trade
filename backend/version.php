@@ -2,8 +2,9 @@
 
 declare(strict_types=1);
 
-// Residual-dust recovery: exchange-minimum leftovers from partial exits no longer
-// consume active position capacity forever. Trade-owned residuals are classified
-// against live Nobitex order rules before each fast cycle and are swept later only
-// when they become independently sellable; no synthetic exit/PnL is fabricated.
-return '1.4.42';
+// Residual inventory recovery: partial-exit leftovers and final SELL amount-step
+// remainders are reconciled before live decisions. Unsellable bot-owned balances
+// stop consuming active slots; sellable residuals continue their original exit;
+// recently closed rows can recover mathematically known wallet dust without
+// fabricating an exit price or realized PnL.
+return '1.4.43';

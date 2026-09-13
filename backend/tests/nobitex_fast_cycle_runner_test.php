@@ -34,26 +34,29 @@ $reconcilePos=strpos($runner,'new NobitexPositionReconciler()');
 $balePos=strpos($runner,'new BaleTradeNotifier()');
 expectFastCycle($reconcilePos!==false&&$balePos!==false&&$reconcilePos<$balePos,'Post-BUY wallet quantity must be reconciled before Bale reads confirmed trades.');
 
-// Residual positions below the live Nobitex order minimum must not consume an
-// active position slot forever. A previously confirmed partial exit must also
-// continue cleanup when the remainder is still independently sellable.
+// Exchange-minimum residuals, previous partial exits and amount-step leftovers
+// from a supposedly completed SELL must not turn into permanent tiny holdings.
 expectFastCycle(str_contains($runner, 'new NobitexResidualDustManager()'), 'Fast runner must reconcile residual dust before live decisions.');
 expectFastCycle(str_contains($runner, 'residual_dust_reconciliation'), 'Fast-cycle telemetry must expose residual dust reconciliation.');
 $dustPos=strpos($runner,'new NobitexResidualDustManager()');
 $enginePos=strpos($runner,'new NobitexAutoTraderEngine()');
 expectFastCycle($dustPos!==false&&$enginePos!==false&&$dustPos<$enginePos,'Residual dust must release blocked capacity before the first live decision cycle.');
-expectFastCycle(str_contains($dust, "MODEL = 'nobitex_residual_dust_manager_v2'"), 'Residual dust manager model marker is missing.');
+expectFastCycle(str_contains($dust, "MODEL = 'nobitex_residual_dust_manager_v3'"), 'Residual dust manager model marker is missing.');
 expectFastCycle(str_contains($dust, "SET status='dust'"), 'Unsellable residual positions must leave active status.');
 expectFastCycle(str_contains($dust, "WHERE status='dust'"), 'Residual dust must remain separately traceable for later recovery.');
 expectFastCycle(str_contains($dust, 'dustAssessment('), 'Residual dust must be classified from exchange order rules.');
 expectFastCycle(str_contains($dust, "'below_exchange_minimum'"), 'Exchange-minimum residual classification is missing.');
 expectFastCycle(str_contains($dust, "'amount_below_exchange_step'"), 'Exchange amount-step residual classification is missing.');
 expectFastCycle(str_contains($dust, 'capacity_released'), 'Residual retirement must explicitly report released trading capacity.');
-expectFastCycle(str_contains($dust, "'pnl_recorded'=>false"), 'Retiring unsellable dust must never fabricate realized PnL.');
+expectFastCycle(str_contains($dust, "'pnl_recorded'=>false"), 'Dust bookkeeping must never fabricate realized PnL.');
 expectFastCycle(str_contains($dust, "'autotrade_nobitex_dust_sweep'"), 'Sellable residuals must use guarded reduction-only Nobitex execution.');
 expectFastCycle(str_contains($dust, 'MAX_SWEEPS_PER_RUN = 1'), 'Residual cleanup must not stack multiple ambiguous SELL submissions in one pass.');
 expectFastCycle(str_contains($dust, 'exit_fill_count'), 'Residual manager must detect positions that already had a confirmed partial exit.');
 expectFastCycle(str_contains($dust, 'partial_exit_residual_cleanup'), 'Sellable partial-exit leftovers must continue their original exit instead of becoming permanent tiny holdings.');
+expectFastCycle(str_contains($dust, 'last_exit_amount'), 'Closed positions must be checked for final SELL amount-step leftovers.');
+expectFastCycle(str_contains($dust, 'closed_residual_recovered'), 'Known bot-owned wallet leftovers must be recovered from incorrectly closed rows.');
+expectFastCycle(str_contains($dust, 'final_sell_amount_step_residual'), 'Recovered closed dust must name the exact rounding cause.');
+expectFastCycle(str_contains($dust, "status IN ('pending_open','open','pending_close','dust')"), 'Closed residual recovery must subtract every already assigned managed quantity.');
 expectFastCycle(str_contains($dust, "WHERE id=:id AND status=:expected_status"), 'Residual cleanup must transition only the expected managed state.');
 
 expectFastCycle(str_contains($cron, 'use Trade\\Trading\\NobitexFastCycleRunner;'), 'Cron must import the fast-cycle runner.');

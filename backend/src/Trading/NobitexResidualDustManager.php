@@ -9,22 +9,25 @@ use Trade\Database;
 use Trade\Exchange\NobitexClient;
 
 /**
- * Keeps exchange-minimum and partial-exit residuals from deadlocking live trading.
+ * Prevents small Trade-owned exchange remainders from freezing live trading.
  *
- * A partially filled/cancelled SELL can leave a real wallet remainder. If that
- * remainder is below Nobitex's live order minimum it cannot be sold standalone;
- * keeping it `open` would still consume a position slot forever. If the remainder
- * is still sellable, a previous confirmed exit fill proves that it is cleanup
- * inventory rather than a fresh HOLD and one guarded continuation SELL may run.
+ * Three cases are handled:
+ *  1) an OPEN remainder is below Nobitex's live amount/minimum-order rules;
+ *  2) a prior partial exit left a still-sellable OPEN remainder;
+ *  3) a completed normalized SELL closed the DB row although amount-step
+ *     rounding left a smaller real wallet balance behind.
  *
- * Unsellable Trade-owned residuals become `dust`, releasing active count without
- * inventing an exit price or PnL. A dust row is swept automatically later only if
- * its own quantity becomes independently sellable under current exchange rules.
+ * Unsellable managed remainders are status=dust, so they do not consume active
+ * position count. No exit price or synthetic PnL is created merely by retiring
+ * or recovering dust. A real SELL is submitted only when that row's own amount
+ * is independently legal under current Nobitex rules, and at most one cleanup
+ * SELL is submitted per run.
  */
 final class NobitexResidualDustManager
 {
-    public const MODEL = 'nobitex_residual_dust_manager_v2';
+    public const MODEL = 'nobitex_residual_dust_manager_v3';
     private const MAX_ROWS = 50;
+    private const MAX_CLOSED_RECOVERY_ROWS = 100;
     private const MAX_SWEEPS_PER_RUN = 1;
     private const EPSILON = 0.000000000001;
 
@@ -51,9 +54,20 @@ final class NobitexResidualDustManager
             "SELECT id,symbol,asset,quote_asset,amount,entry_price,opened_at,realized_pnl FROM nobitex_autotrade_positions
              WHERE status='dust' ORDER BY id ASC LIMIT " . self::MAX_ROWS
         )->fetchAll();
-        if ($open === [] && $dust === []) {
-            return $this->result('idle', 'no_open_or_dust_positions', [
-                'checked'=>0,'retired'=>0,'partial_exit_candidates'=>0,'sweep_submitted'=>0,'depleted_closed'=>0,'deferred'=>0,
+        $closedCandidates = $pdo->query(
+            "SELECT p.id,p.symbol,p.asset,p.quote_asset,p.amount,p.entry_price,p.opened_at,p.realized_pnl,
+                    p.exit_identifier,p.exit_exchange_order_id,p.closed_at,
+                    (SELECT x.amount FROM nobitex_autotrade_pnl x WHERE x.position_id=p.id ORDER BY x.id DESC LIMIT 1) AS last_exit_amount
+             FROM nobitex_autotrade_positions p
+             WHERE p.status='closed' AND p.exit_exchange_order_id IS NOT NULL
+               AND p.closed_at IS NOT NULL AND p.closed_at >= (UTC_TIMESTAMP() - INTERVAL 30 DAY)
+             ORDER BY p.id DESC LIMIT " . self::MAX_CLOSED_RECOVERY_ROWS
+        )->fetchAll();
+
+        if ($open === [] && $dust === [] && $closedCandidates === []) {
+            return $this->result('idle', 'no_managed_residual_candidates', [
+                'checked'=>0,'retired'=>0,'closed_residuals_recovered'=>0,'partial_exit_candidates'=>0,
+                'sweep_submitted'=>0,'depleted_closed'=>0,'deferred'=>0,
             ]);
         }
 
@@ -67,11 +81,18 @@ final class NobitexResidualDustManager
         $deferred = 0;
         $depletedClosed = 0;
         $events = [];
-        $partialExitCandidates = [];
 
-        // Phase 1: classify every open row using live Nobitex amount/minimum
-        // rules. A row with a prior confirmed exit fill is also a continuation
-        // cleanup candidate when its remaining quantity is still sellable.
+        // Recover bot-owned amount-step leftovers from recently closed positions.
+        // We never claim more than both (a) the mathematically known difference
+        // between the row's pre-final amount and its final PnL fill amount and
+        // (b) wallet inventory not already assigned to a managed live/dust row.
+        $closedRecovery = $this->recoverClosedResiduals($pdo, $closedCandidates, $walletTotals);
+        $closedResidualsRecovered = (int)($closedRecovery['recovered'] ?? 0);
+        if (is_array($closedRecovery['events'] ?? null)) {
+            $events = array_merge($events, $closedRecovery['events']);
+        }
+
+        $partialExitCandidates = [];
         foreach ($open as $position) {
             $assessment = $this->assessPosition($client, $books, $position);
             if (($assessment['status'] ?? '') === 'deferred') {
@@ -89,17 +110,15 @@ final class NobitexResidualDustManager
                 continue;
             }
 
+            // A confirmed PnL fill on a row that is still open proves the
+            // previous exit only partially completed. Continue that exact exit
+            // instead of leaving a tiny permanent HOLD.
             if ((int)($position['exit_fill_count'] ?? 0) > 0) {
                 $partialExitCandidates[] = $position;
             }
         }
 
         $sweepSubmitted = 0;
-
-        // Phase 2: a position that already has a confirmed prior exit fill is a
-        // true partial-exit remainder. Continue that exit before opening fresh
-        // risk. This fixes the "many tiny holdings but no SELL" deadlock without
-        // liquidating ordinary profitable/losing HOLD positions just for churn.
         foreach ($partialExitCandidates as $position) {
             if ($sweepSubmitted >= self::MAX_SWEEPS_PER_RUN) break;
             $sweep = $this->submitSweep(
@@ -117,8 +136,9 @@ final class NobitexResidualDustManager
             }
         }
 
-        // Phase 3: revisit previously retired dust. It is never topped up or
-        // churned on purpose; it is sold only when its own amount becomes legal.
+        // Fresh query includes rows retired above and rows recovered from a
+        // formerly closed position. Dust is never topped up just to manufacture
+        // a sell; it is swept only if its own quantity is now legal.
         $dustRows = $pdo->query(
             "SELECT id,symbol,asset,quote_asset,amount,entry_price,opened_at,realized_pnl FROM nobitex_autotrade_positions
              WHERE status='dust' ORDER BY id ASC LIMIT " . self::MAX_ROWS
@@ -164,6 +184,7 @@ final class NobitexResidualDustManager
         return $this->result('ok', 'reconciled', [
             'checked'=>$checked,
             'retired'=>$retired,
+            'closed_residuals_recovered'=>$closedResidualsRecovered,
             'partial_exit_candidates'=>count($partialExitCandidates),
             'sweep_submitted'=>$sweepSubmitted,
             'depleted_closed'=>$depletedClosed,
@@ -173,9 +194,8 @@ final class NobitexResidualDustManager
     }
 
     /**
-     * Pure classification helper used by regression tests. `below_minimum` is
-     * emitted by NobitexOrderRules from live /v2/options data; amount-step
-     * rejection is also terminal for a standalone residual SELL.
+     * Pure classification helper. `below_minimum` comes from live /v2/options;
+     * amount-step rejection is also terminal for a standalone residual SELL.
      */
     public static function dustAssessment(array $prepared): array
     {
@@ -194,6 +214,72 @@ final class NobitexResidualDustManager
             'normalized_amount'=>is_numeric($rules['normalized_amount'] ?? null) ? (float)$rules['normalized_amount'] : null,
             'amount_step'=>is_numeric($rules['amount_step'] ?? null) ? (float)$rules['amount_step'] : null,
         ];
+    }
+
+    private function recoverClosedResiduals(PDO $pdo, array $closedCandidates, array $walletTotals): array
+    {
+        if ($closedCandidates === []) return ['recovered'=>0,'events'=>[]];
+
+        $assignedRows = $pdo->query(
+            "SELECT asset,amount FROM nobitex_autotrade_positions
+             WHERE status IN ('pending_open','open','pending_close','dust')"
+        )->fetchAll();
+        $assigned = [];
+        foreach ($assignedRows as $row) {
+            $asset = NobitexPositionReconciler::canonicalAsset((string)($row['asset'] ?? ''));
+            if ($asset === '') continue;
+            $assigned[$asset] = ($assigned[$asset] ?? 0.0) + max(0.0, (float)($row['amount'] ?? 0.0));
+        }
+
+        $unassigned = [];
+        foreach ($walletTotals as $asset=>$total) {
+            $asset = NobitexPositionReconciler::canonicalAsset((string)$asset);
+            $unassigned[$asset] = max(0.0, (float)$total - (float)($assigned[$asset] ?? 0.0));
+        }
+
+        $recovered = 0;
+        $events = [];
+        foreach ($closedCandidates as $position) {
+            $lastExitAmount = is_numeric($position['last_exit_amount'] ?? null) ? max(0.0, (float)$position['last_exit_amount']) : 0.0;
+            $preFinalAmount = max(0.0, (float)($position['amount'] ?? 0.0));
+            $knownResidual = max(0.0, $preFinalAmount - $lastExitAmount);
+            if ($knownResidual <= self::EPSILON) continue;
+
+            $asset = NobitexPositionReconciler::canonicalAsset((string)($position['asset'] ?? ''));
+            $availableOrphan = max(0.0, (float)($unassigned[$asset] ?? 0.0));
+            $recoverAmount = min($knownResidual, $availableOrphan);
+            $tolerance = max(self::EPSILON, $knownResidual * 0.001);
+            if ($recoverAmount <= $tolerance) continue;
+
+            $stmt = $pdo->prepare(
+                "UPDATE nobitex_autotrade_positions
+                 SET status='dust',amount=:amount,exit_price=NULL,exit_identifier='closed_residual_recovered',
+                     exit_order_local_id=NULL,exit_exchange_order_id=NULL,closed_at=NULL,updated_at=UTC_TIMESTAMP()
+                 WHERE id=:id AND status='closed'"
+            );
+            $stmt->execute([':amount'=>$recoverAmount,':id'=>(int)$position['id']]);
+            if ($stmt->rowCount() !== 1) continue;
+
+            $unassigned[$asset] = max(0.0, $availableOrphan - $recoverAmount);
+            $recovered++;
+            $event = [
+                'type'=>'closed_residual_recovered',
+                'position_id'=>(int)$position['id'],
+                'symbol'=>strtoupper((string)($position['symbol'] ?? '')),
+                'asset'=>$asset,
+                'pre_final_position_amount'=>$preFinalAmount,
+                'last_confirmed_exit_amount'=>$lastExitAmount,
+                'known_rounding_residual'=>$knownResidual,
+                'recovered_wallet_amount'=>$recoverAmount,
+                'reason'=>'final_sell_amount_step_residual',
+                'capacity_released'=>true,
+                'pnl_recorded'=>false,
+            ];
+            $this->event($pdo, 'info', 'nobitex.position.closed_residual_recovered', $event);
+            $events[] = $event;
+        }
+
+        return ['recovered'=>$recovered,'events'=>$events];
     }
 
     private function submitSweep(
