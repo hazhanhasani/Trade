@@ -1,0 +1,164 @@
+name: Trailing PnL Truth Hotfix Once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/trailing-pnl-truth-hotfix-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: curl, pdo_mysql, openssl
+      - name: Patch trailing exit and confirmed PnL truth
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f'Expected patch anchor not found in {path}')
+              p.write_text(text.replace(old, new, 1))
+
+          # 1) Keep the trailing exit protective, but classify it from fee-aware
+          # net PnL instead of calling a negative after-cost exit a profit lock.
+          replace_once(
+              'backend/src/Trading/RiskManager.php',
+              """        $trail = (float) ($position['trailing_stop'] ?? 0);\n        $peak = (float) ($position['peak_price'] ?? 0);\n        if ($stop > 0 && $price <= $stop) return 'stop_loss';\n        if ($trail > 0 && $peak > $entry && $price <= $trail) return 'trailing_profit_lock';\n\n        $entryNotional = $entry * $amount;\n""",
+              """        $trail = (float) ($position['trailing_stop'] ?? 0);\n        $peak = (float) ($position['peak_price'] ?? 0);\n        $trailTriggered = $trail > 0 && $peak > $entry && $price <= $trail;\n        if ($stop > 0 && $price <= $stop) return 'stop_loss';\n\n        $entryNotional = $entry * $amount;\n"""
+          )
+          replace_once(
+              'backend/src/Trading/RiskManager.php',
+              """        if ($configuredStopPercent > 0 && $netMovePercent <= -$configuredStopPercent) return 'stop_loss_after_fees';\n        if ($configuredTakePercent > 0 && $netMovePercent >= $configuredTakePercent) return 'take_profit_after_fees';\n\n        // Capital recycling is independent from a SELL forecast. The previous\n""",
+              """        if ($configuredStopPercent > 0 && $netMovePercent <= -$configuredStopPercent) return 'stop_loss_after_fees';\n        if ($configuredTakePercent > 0 && $netMovePercent >= $configuredTakePercent) return 'take_profit_after_fees';\n\n        // The stored trail is armed from fee-aware accounting, but a fast price\n        // gap can cross below that lock before the next fill. Preserve the SELL\n        // as protection while reporting its economic truth: only a non-negative\n        // after-cost exit is a profit lock. A negative one is a reversal-protection\n        // exit, not a profitable trailing close.\n        if ($trailTriggered) {\n            if ($netMovePercent >= 0.0) return 'trailing_profit_lock';\n            return 'trailing_reversal_protection_after_costs';\n        }\n\n        // Capital recycling is independent from a SELL forecast. The previous\n"""
+          )
+
+          # 2) Never publish a confirmed SELL notification before fee accounting
+          # has converted the provisional gross row into final net PnL.
+          replace_once(
+              'backend/src/Integrations/BaleTradeNotifier.php',
+              """            WHERE r.created_at>=:since\n              AND NOT EXISTS (\n""",
+              """            WHERE r.created_at>=:since\n              AND r.accounted_at IS NOT NULL\n              AND r.net_pnl IS NOT NULL\n              AND NOT EXISTS (\n"""
+          )
+          replace_once(
+              'backend/src/Integrations/BaleTradeNotifier.php',
+              """'trailing_profit_lock'=>'قفل سود متحرک / برگشت از اوج','profit_lock'=>'قفل سود'""",
+              """'trailing_profit_lock'=>'قفل سود متحرک / برگشت از اوج','trailing_reversal_protection_after_costs'=>'خروج حفاظتی پس از برگشت از اوج (پس از هزینه‌ها)','profit_lock'=>'قفل سود'"""
+          )
+
+          # 3) Regression coverage for the exact CATI failure mode and Bale race.
+          test = r'''<?php
+
+declare(strict_types=1);
+
+require dirname(__DIR__) . '/bootstrap.php';
+
+use Trade\Integrations\BaleTradeNotifier;
+use Trade\Trading\RiskManager;
+
+function expectTrailingTruth(bool $condition, string $message): void
+{
+    if (!$condition) {
+        fwrite(STDERR, "FAIL: {$message}\n");
+        exit(1);
+    }
+}
+
+$risk = new RiskManager();
+$base = [
+    'entry_price'=>100.0,
+    'amount'=>1.0,
+    'quote_asset'=>'IRT',
+    'stop_loss'=>97.0,
+    'take_profit'=>106.0,
+    'peak_price'=>102.0,
+    'trailing_stop'=>101.0,
+    'entry_fee_quote'=>0.25,
+];
+
+$negative = $base + ['estimated_exit_fee_quote'=>0.25];
+$negativeReason = $risk->exitReason(99.90, $negative, 'hold');
+expectTrailingTruth(
+    $negativeReason === 'trailing_reversal_protection_after_costs',
+    'A crossed trail with negative after-cost PnL must remain protective but must not be labelled as profit lock.'
+);
+
+$positive = $base + ['estimated_exit_fee_quote'=>0.252];
+$positiveReason = $risk->exitReason(100.80, $positive, 'hold');
+expectTrailingTruth(
+    $positiveReason === 'trailing_profit_lock',
+    'A crossed trail with positive after-cost PnL should keep the trailing profit-lock reason.'
+);
+
+$baleSource = file_get_contents(dirname(__DIR__) . '/src/Integrations/BaleTradeNotifier.php') ?: '';
+expectTrailingTruth(
+    str_contains($baleSource, 'AND r.accounted_at IS NOT NULL') && str_contains($baleSource, 'AND r.net_pnl IS NOT NULL'),
+    'Bale SELL discovery must wait for finalized fee accounting instead of sending provisional gross PnL.'
+);
+
+$message = BaleTradeNotifier::formatTradeMessage('sell', [
+    'asset'=>'CATI', 'quote_asset'=>'IRT', 'amount'=>8.52,
+    'entry_price'=>161250.0, 'exit_price'=>160980.0,
+    'net_pnl'=>-7300.0, 'pnl_percent'=>-0.53,
+    'exit_reason'=>'trailing_reversal_protection_after_costs',
+    'time_iran'=>'1405/06/22 13:37:21',
+]);
+expectTrailingTruth(
+    str_contains($message, 'خروج حفاظتی پس از برگشت از اوج (پس از هزینه‌ها)'),
+    'Bale must describe a negative crossed-trail exit truthfully.'
+);
+
+fwrite(STDOUT, "Trailing exit and confirmed PnL truth regression tests passed.\n");
+'''
+          Path('backend/tests/nobitex_trailing_pnl_truth_test.php').write_text(test)
+
+          # 4) Make the regression part of the permanent quality gate.
+          replace_once(
+              '.github/workflows/php-lint.yml',
+              """      - name: Nobitex fill integration regression tests\n        run: php backend/tests/nobitex_fill_integration_test.php\n""",
+              """      - name: Nobitex fill integration regression tests\n        run: php backend/tests/nobitex_fill_integration_test.php\n      - name: Trailing exit and confirmed PnL truth regression tests\n        run: php backend/tests/nobitex_trailing_pnl_truth_test.php\n"""
+          )
+
+          # 5) Coordinated release version.
+          version = Path('backend/version.php')
+          v = version.read_text()
+          if "return '1.4.49';" not in v:
+              raise SystemExit('Expected backend version 1.4.49 was not found.')
+          v = v.replace("return '1.4.49';", "return '1.4.50';", 1)
+          v = v.replace(
+              "// resolves failed-run warnings after recovery, and expires transient scan warnings.\n",
+              "// resolves failed-run warnings after recovery, and expires transient scan warnings.\n// 1.4.50 makes trailing exits fee-aware at classification time and prevents Bale\n// from publishing provisional gross SELL PnL before accounting is finalized.\n",
+              1,
+          )
+          version.write_text(v)
+          PY
+
+          php -l backend/src/Trading/RiskManager.php
+          php -l backend/src/Integrations/BaleTradeNotifier.php
+          php -l backend/tests/nobitex_trailing_pnl_truth_test.php
+          php backend/tests/nobitex_trailing_pnl_truth_test.php
+          php backend/tests/bale_trade_notifier_test.php
+          php backend/tests/trading_strategy_test.php
+
+          # This is a one-shot bootstrap workflow; do not leave it in the product.
+          rm -f .github/workflows/trailing-pnl-truth-hotfix-once.yml
+
+          git config user.name 'hazhanhasani'
+          git config user.email 'hazhanhasani4268@atomicmail.io'
+          git add -A
+          git commit -m 'Fix trailing exit and confirmed PnL truth as 1.4.50'
+          git push origin HEAD:main
