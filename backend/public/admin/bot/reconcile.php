@@ -22,7 +22,13 @@ if (!isset($_SESSION['admin_id'])) { header('Location: /admin/'); exit; }
 if (!isset($_SESSION['csrf'])) $_SESSION['csrf']=bin2hex(random_bytes(24));
 
 $pdo=Database::connection();
-function h(mixed $v):string{return htmlspecialchars((string)$v,ENT_QUOTES,'UTF-8');}
+function h(mixed $v):string{
+    if (is_array($v) || is_object($v)) {
+        $encoded=json_encode($v,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        $v=$encoded===false?'':$encoded;
+    }
+    return htmlspecialchars((string)($v??''),ENT_QUOTES,'UTF-8');
+}
 function num(mixed $v,int $d=8):string{$s=number_format((float)$v,$d,'.',',');return rtrim(rtrim($s,'0'),'.');}
 function counts(PDO $pdo):array{$out=['pending_open'=>0,'open'=>0,'pending_close'=>0,'active'=>0];$rows=$pdo->query("SELECT status,COUNT(*) c FROM nobitex_autotrade_positions WHERE status IN ('pending_open','open','pending_close') GROUP BY status")->fetchAll();foreach($rows as $r){$s=(string)$r['status'];if(array_key_exists($s,$out))$out[$s]=(int)$r['c'];}$out['active']=$out['pending_open']+$out['open']+$out['pending_close'];return$out;}
 
@@ -67,5 +73,5 @@ $version=Updater::currentVersion();$csrf=h((string)$_SESSION['csrf']);require di
 
 <?php if(is_array($exact)&&($exact['events']??[])!==[]):?><section class="panel"><div class="panel-head"><div><h2>فروش‌های دستی دقیق همین Sync</h2><p>مقدار، قیمت خروج و PnL بر اساس Fill گزارش‌شده توسط نوبیتکس.</p></div><span class="badge warn"><?=count($exact['events'])?> تغییر</span></div><div class="table-wrap"><table><thead><tr><th>بازار</th><th>نوع</th><th>مقدار فروش</th><th>قیمت خروج خام صرافی</th><th>PnL خالص خام</th></tr></thead><tbody><?php foreach($exact['events'] as $e):?><tr><td><b><?=h($e['symbol']??'—')?></b></td><td><?=h(($e['type']??'')==='closed'?'بستن کامل':'فروش جزئی')?></td><td><?=h(num($e['sold_amount']??0))?></td><td><?=h(num($e['exit_price']??0))?></td><td><?=h(num($e['net_pnl']??0))?></td></tr><?php endforeach?></tbody></table></div></section><?php endif?>
 
-<section class="panel"><div class="panel-head"><div><h2>آخرین تشخیص‌های خارجی</h2><p>رویدادهای دقیق Trade History و fallback کیف پول با زمان شمسی ایران.</p></div><span class="badge info">۲۵ رویداد اخیر</span></div><div class="table-wrap"><table><thead><tr><th>زمان ایران</th><th>نوع</th><th>بازار</th><th>وضعیت</th></tr></thead><tbody><?php if($recent===[]):?><tr><td colspan="4" class="empty">هنوز رویدادی ثبت نشده است.</td></tr><?php endif?><?php foreach($recent as $row):$ctx=json_decode((string)($row['context_json']??''),true);$ctx=is_array($ctx)?$ctx:[];$name=(string)$row['event_name'];$label=$name==='nobitex.position.external_trade_applied'?'SELL دستی دقیق':($name==='nobitex.position.external_close_detected'?'بستن Wallet fallback':'کاهش Wallet fallback');?><tr><td><?=h(IranClock::fromUtc((string)$row['created_at']))?></td><td><?=h($label)?></td><td><b><?=h($ctx['symbol']??$ctx['asset']??'—')?></b></td><td><span class="badge warn"><?=h($row['level'])?></span></td></tr><?php endforeach?></tbody></table></div></section>
+<section class="panel"><div class="panel-head"><div><h2>آخرین تشخیص‌های خارجی</h2><p>رویدادهای دقیق Trade History و fallback کیف پول با زمان شمسی ایران.</p></div><span class="badge info">۲۵ رویداد اخیر</span></div><div class="table-wrap"><table><thead><tr><th>زمان ایران</th><th>نوع</th><th>بازار</th><th>وضعیت</th></tr></thead><tbody><?php if($recent===[]):?><tr><td colspan="4" class="empty">هنوز رویدادی ثبت نشده است.</td></tr><?php endif?><?php foreach($recent as $row):$ctx=json_decode((string)($row['context_json']??''),true);$ctx=is_array($ctx)?$ctx:[];$name=(string)$row['event_name'];$label=$name==='nobitex.position.external_trade_applied'?'SELL دستی دقیق':($name==='nobitex.position.external_close_detected'?'بستن Wallet fallback':'کاهش Wallet fallback');?><tr><td><?=h(IranClock::formatUtc((string)$row['created_at']))?></td><td><?=h($label)?></td><td><b><?=h($ctx['symbol']??$ctx['asset']??'—')?></b></td><td><span class="badge warn"><?=h($row['level'])?></span></td></tr><?php endforeach?></tbody></table></div></section>
 <?php tradeAdminFooter($version); ?></div></body></html>
