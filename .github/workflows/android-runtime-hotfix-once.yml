@@ -1,0 +1,140 @@
+name: Android Runtime Hotfix Once
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/android-runtime-hotfix-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch Android runtime crash and layout regressions
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, got {count}')
+              return text.replace(old, new, 1)
+
+          app_path = Path('android/app/src/main/java/ir/trade/app/ui/TradeAppV4.kt')
+          app = app_path.read_text(encoding='utf-8')
+
+          app = replace_once(
+              app,
+              'import androidx.compose.foundation.lazy.items\nimport androidx.compose.foundation.lazy.rememberLazyListState',
+              'import androidx.compose.foundation.lazy.items\nimport androidx.compose.foundation.lazy.itemsIndexed\nimport androidx.compose.foundation.lazy.rememberLazyListState',
+              'itemsIndexed import',
+          )
+
+          replacements = [
+              (
+                  'items(steps, key = { "replay:${it.optString("time")}:${it.optString("text")}" }) { step ->',
+                  'itemsIndexed(steps, key = { index, step -> "replay:${index}:${step.optString("time")}:${step.optString("text")}" }) { _, step ->',
+                  'replay key',
+              ),
+              (
+                  'Text(decision.optString("reason_fa", decision.optString("reason", "هنوز تصمیمی ثبت نشده")), color = V4Muted)',
+                  'Text(decisionReasonFa(decision), color = V4Muted)',
+                  'decision reason',
+              ),
+              (
+                  'items(alerts.take(8), key = { "alert:${it.optString("category")}:${it.optString("title")}:${it.optString("created_at")}" }) { alert ->',
+                  'itemsIndexed(alerts.take(8), key = { index, alert -> "alert:${index}:${alert.optString("category")}:${alert.optString("title")}:${alert.optString("created_at")}" }) { _, alert ->',
+                  'alert key',
+              ),
+              (
+                  'items(activity.take(12), key = { "home:${it.optLong("id", -1)}:${it.optString("created_at_utc")}:${it.optString("text_fa")}" }) { event ->',
+                  'itemsIndexed(activity.take(12), key = { index, event -> "home:${index}:${event.optLong("id", -1)}:${event.optString("created_at_utc")}:${event.optString("text_fa")}" }) { _, event ->',
+                  'home activity key',
+              ),
+              (
+                  'items(ranking, key = { "rank:${it.optString("symbol")}:${it.optString("quote_asset")}" }) { item ->',
+                  'itemsIndexed(ranking, key = { index, item -> "rank:${index}:${item.optString("symbol")}:${item.optString("quote_asset")}" }) { _, item ->',
+                  'ranking key',
+              ),
+              (
+                  'items(positions, key = { "position:${it.optLong("id")}" }) { p ->',
+                  'itemsIndexed(positions, key = { index, p -> "position:${index}:${p.optLong("id")}" }) { _, p ->',
+                  'position key',
+              ),
+              (
+                  'items(cells.take(30), key = { "heat:${it.optString("x")}:${it.optString("y")}" }) { cell ->',
+                  'itemsIndexed(cells.take(30), key = { index, cell -> "heat:${index}:${cell.optString("x")}:${cell.optString("y")}" }) { _, cell ->',
+                  'heatmap key',
+              ),
+              (
+                  'items(activity.take(20), key = { "trade:${it.optLong("id", -1)}:${it.optString("created_at_utc")}:${it.optString("text_fa")}" }) { event ->',
+                  'itemsIndexed(activity.take(20), key = { index, event -> "trade:${index}:${event.optLong("id", -1)}:${event.optString("created_at_utc")}:${event.optString("text_fa")}" }) { _, event ->',
+                  'trade activity key',
+              ),
+              (
+                  'items(strategies.take(12), key = { "strategy:${it.optString("strategy_key")}:${it.optString("profile_key")}:${it.optString("quote_asset")}" }) { s ->',
+                  'itemsIndexed(strategies.take(12), key = { index, s -> "strategy:${index}:${s.optString("strategy_key")}:${s.optString("profile_key")}:${s.optString("quote_asset")}" }) { _, s ->',
+                  'strategy key',
+              ),
+              (
+                  'items(coins.take(12), key = { "coin:${it.optString("asset")}:${it.optString("quote_asset")}" }) { c ->',
+                  'itemsIndexed(coins.take(12), key = { index, c -> "coin:${index}:${c.optString("asset")}:${c.optString("quote_asset")}" }) { _, c ->',
+                  'coin key',
+              ),
+              (
+                  'items(history.take(15), key = { "history:${it.optLong("id")}" }) { h ->',
+                  'itemsIndexed(history.take(15), key = { index, h -> "history:${index}:${h.optLong("id")}" }) { _, h ->',
+                  'history key',
+              ),
+              (
+                  'Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { chips.take(3).forEach { V4Pill(it, Color(0xFF292D42), Color.White) } }',
+                  'Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { chips.take(3).forEach { V4Pill(it, Color(0xFF292D42), Color.White, Modifier.fillMaxWidth()) } }',
+                  'hero pill width',
+              ),
+              (
+                  '''@Composable\nprivate fun V4Pill(text: String, bg: Color, fg: Color) {\n    Text(text, modifier = Modifier.fillMaxWidth().background(bg, RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 6.dp), color = fg, style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)\n}''',
+                  '''@Composable\nprivate fun V4Pill(text: String, bg: Color, fg: Color, modifier: Modifier = Modifier) {\n    Text(text, modifier = modifier.background(bg, RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 6.dp), color = fg, style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)\n}''',
+                  'pill sizing',
+              ),
+          ]
+          for old, new, label in replacements:
+              app = replace_once(app, old, new, label)
+
+          anchor = '''private fun actionFa(value: String): String = when (value.lowercase()) {\n'''
+          helper = '''private fun decisionReasonFa(decision: JSONObject): String {\n    val translated = decision.optString("reason_fa", "").trim()\n    if (translated.isNotEmpty()) return translated\n    val reason = decision.optString("reason", "").trim().lowercase()\n    return when (reason) {\n        "after_costs_and_buffer", "hold_after_costs_and_buffer", "net_edge_below_costs_and_buffer" -> "پس از کسر کارمزد و حاشیه اطمینان، لبه کافی برای معامله وجود ندارد."\n        "no_candidate_passed_signal_and_risk_filters" -> "هیچ کاندیدایی از فیلترهای سیگنال و ریسک عبور نکرد."\n        "buy_hourly_safety_limit_reached" -> "سقف ایمنی خرید ساعتی فعال است؛ خرید جدید موقتاً انجام نمی‌شود."\n        "strategy_profile_persistently_unprofitable" -> "پروفایل این استراتژی به‌دلیل عملکرد ضعیف موقتاً اجازه ورود ندارد."\n        "adaptive_policy_tightened_edge_below_margin" -> "سیاست تطبیقی پس از محاسبه هزینه‌ها حاشیه ورود را کافی ندانست."\n        "effective_position_capacity_reached", "configured_position_capacity_reached" -> "ظرفیت مجاز پوزیشن‌ها تکمیل است."\n        "daily_loss_limit" -> "حد زیان روزانه مانع ورود جدید شده است."\n        "portfolio_exposure_limit" -> "سقف سرمایه درگیر پرتفوی اجازه ورود جدید نمی‌دهد."\n        "runtime_entry_circuit_open" -> "مدار ایمنی ورود موقتاً باز است؛ خرید جدید انجام نمی‌شود."\n        "" -> "هنوز تصمیمی ثبت نشده"\n        else -> reason.replace('_', ' ').ifBlank { "هنوز تصمیمی ثبت نشده" }\n    }\n}\n\n'''
+          app = replace_once(app, anchor, helper + anchor, 'decision reason helper')
+          app_path.write_text(app, encoding='utf-8')
+
+          test_path = Path('backend/tests/app_runtime_debug_test.php')
+          test = test_path.read_text(encoding='utf-8')
+          test_anchor = '''appDebugAssert(str_contains($app,'private val FaLocale = Locale("fa", "IR")'),'Primary Android dashboard numbers must use Persian locale formatting.');\n'''
+          test_extra = '''appDebugAssert(str_contains($app,'import androidx.compose.foundation.lazy.itemsIndexed'),'Dynamic LazyColumn rows must support index-salted stable keys.');\nappDebugAssert(str_contains($app,'itemsIndexed(alerts.take(8)')&&str_contains($app,'"alert:${index}:'),'Alert rows must include their list index so duplicate backend alerts cannot crash Compose.');\nappDebugAssert(str_contains($app,'itemsIndexed(activity.take(12)')&&str_contains($app,'itemsIndexed(activity.take(20)'),'Activity timelines must be duplicate-key safe.');\nappDebugAssert(str_contains($app,'private fun V4Pill(text: String, bg: Color, fg: Color, modifier: Modifier = Modifier)')&&str_contains($app,'modifier = modifier.background')&&str_contains($app,'Color.White, Modifier.fillMaxWidth())'),'Pills inside Rows must wrap content; only hero chips may fill available width.');\nappDebugAssert(str_contains($app,'private fun decisionReasonFa(')&&str_contains($app,'after_costs_and_buffer'),'Decision reason fallback must remain readable and localized when reason_fa is absent.');\n'''
+          test = replace_once(test, test_anchor, test_anchor + test_extra, 'Android runtime regression assertions')
+          test_path.write_text(test, encoding='utf-8')
+
+          version_path = Path('backend/version.php')
+          version = version_path.read_text(encoding='utf-8')
+          version = replace_once(version, "return '1.4.47';", "// Android 1.4.48: duplicate-safe LazyColumn keys, Row-safe pills and localized decision fallback.\nreturn '1.4.48';", 'version bump')
+          version_path.write_text(version, encoding='utf-8')
+          PY
+
+          git diff --check
+          git diff -- android/app/src/main/java/ir/trade/app/ui/TradeAppV4.kt backend/tests/app_runtime_debug_test.php backend/version.php
+
+      - name: Commit hotfix and remove bootstrap workflow
+        shell: bash
+        run: |
+          git config user.name "hazhanhasani"
+          git config user.email "hazhanhasani4268@atomicmail.io"
+          git rm .github/workflows/android-runtime-hotfix-once.yml
+          git add android/app/src/main/java/ir/trade/app/ui/TradeAppV4.kt backend/tests/app_runtime_debug_test.php backend/version.php
+          git commit -m "Fix Android duplicate keys and decision layout as 1.4.48"
+          git push origin HEAD:main
