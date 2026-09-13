@@ -17,4 +17,7 @@ declare(strict_types=1);
 // 1.4.51 carries proven Trade-owned IRT dust into the next same-asset managed IRT
 // position using a weighted cost basis, so the next normal exit can liquidate the
 // combined quantity without absorbing unexplained/manual wallet inventory.
-return '1.4.51';
+// 1.4.52 fixes the admin reconciliation page's IranClock rendering contract: the
+// UI now formats UTC timestamps to a scalar Jalali string instead of passing the
+// structured clock payload into HTML escaping, preventing Array-to-string warnings.
+return '1.4.52';
