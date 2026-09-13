@@ -44,6 +44,7 @@ final class NobitexFastCycleRunner
             $results = [];
             $baleRuns = [];
             $walletReconcileRuns = [];
+            $dustCarryRuns = [];
             $last = ['status'=>'no_trade','exchange'=>'nobitex','reason'=>'no_cycle_completed'];
 
             // Reconcile real external/manual sells immediately before live
@@ -173,6 +174,20 @@ final class NobitexFastCycleRunner
                     $baleRuns[] = ['cycle'=>$cycle,'status'=>'deferred','error'=>mb_substr($e->getMessage(),0,500)];
                 }
 
+                // After Bale has captured the confirmed BUY amount, fold any
+                // same-asset Trade-owned IRT dust into the live IRT position. The
+                // next ordinary position exit can then sell the combined managed
+                // quantity in one legal order. Wallet equality is required by the
+                // carry manager, so unrelated manual holdings are never absorbed.
+                try {
+                    $dustCarryRuns[] = ['cycle'=>$cycle] + (new NobitexManagedDustCarryForward())->reconcile($pdo);
+                } catch (\Throwable $e) {
+                    ErrorReporter::captureThrowable($e, 'warning', 'nobitex_managed_dust_carry_forward', [
+                        'exchange'=>'nobitex','run_id'=>$runId,'cycle'=>$cycle,
+                    ]);
+                    $dustCarryRuns[] = ['cycle'=>$cycle,'status'=>'deferred','reason'=>'carry_forward_error','error'=>mb_substr($e->getMessage(),0,500)];
+                }
+
                 $status = strtolower((string)($last['status'] ?? ''));
                 if (in_array($status, ['disabled','failed'], true)) break;
                 if ((microtime(true) - $started) >= $maxRuntime - 2.0) break;
@@ -191,6 +206,7 @@ final class NobitexFastCycleRunner
                 'residual_dust_reconciliation'=>$residualDust,
                 'wallet_fast_cycle_reconciliation'=>$walletReconcileRuns,
                 'bale_fast_cycle'=>$baleRuns,
+                'managed_dust_carry_forward'=>$dustCarryRuns,
                 'runtime_seconds'=>round(microtime(true)-$started,3),
             ];
         } finally {

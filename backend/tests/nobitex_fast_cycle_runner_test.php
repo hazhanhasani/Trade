@@ -10,12 +10,13 @@ function expectFastCycle(bool $condition, string $message): void
 $runner = file_get_contents(dirname(__DIR__) . '/src/Trading/NobitexFastCycleRunner.php');
 $dust = file_get_contents(dirname(__DIR__) . '/src/Trading/NobitexResidualDustManager.php');
 $dustConverter = file_get_contents(dirname(__DIR__) . '/src/Trading/NobitexDustConverter.php');
+$dustCarry = file_get_contents(dirname(__DIR__) . '/src/Trading/NobitexManagedDustCarryForward.php');
 $cron = file_get_contents(dirname(__DIR__) . '/cron/tick.php');
 $schema = file_get_contents(dirname(__DIR__) . '/src/Trading/NobitexSchema.php');
 $signal = file_get_contents(dirname(__DIR__) . '/src/Trading/NobitexInternalSignalEngine.php');
 $risk = file_get_contents(dirname(__DIR__) . '/src/Trading/RiskManager.php');
 
-foreach (['runner'=>$runner,'dust'=>$dust,'dustConverter'=>$dustConverter,'cron'=>$cron,'schema'=>$schema,'signal'=>$signal,'risk'=>$risk] as $name=>$source) {
+foreach (['runner'=>$runner,'dust'=>$dust,'dustConverter'=>$dustConverter,'dustCarry'=>$dustCarry,'cron'=>$cron,'schema'=>$schema,'signal'=>$signal,'risk'=>$risk] as $name=>$source) {
     expectFastCycle(is_string($source), 'Unable to read ' . $name . ' source.');
 }
 
@@ -90,6 +91,23 @@ expectFastCycle(str_contains($dustConverter, 'prepareOrder(['), 'Dust conversion
 expectFastCycle(str_contains($dustConverter, "'below_exchange_minimum'"), 'Unsellable dust must be deferred without becoming a runtime error.');
 expectFastCycle(str_contains($dustConverter, "'pnl_recorded'=>false"), 'Cross-quote dust conversion must not fabricate strategy PnL.');
 expectFastCycle(!str_contains($dustConverter, 'idle_assets_only_no_open_position'), 'v2 must not scan arbitrary user idle assets.');
+
+// Dust below the exchange minimum cannot be sold standalone. When Trade later
+// opens the same IRT asset again, carry the proven bot-owned dust into that live
+// position with a weighted cost basis so the next normal SELL can clear both.
+expectFastCycle(str_contains($runner, 'new NobitexManagedDustCarryForward()'), 'Fast runner must reconcile managed dust carry-forward after live cycles.');
+expectFastCycle(str_contains($runner, 'managed_dust_carry_forward'), 'Fast-cycle telemetry must expose managed dust carry-forward.');
+$carryPos=strpos($runner,'new NobitexManagedDustCarryForward()');
+expectFastCycle($balePos!==false&&$carryPos!==false&&$balePos<$carryPos,'Dust carry-forward must run after Bale captures the actual confirmed BUY amount.');
+expectFastCycle(str_contains($dustCarry, "MODEL = 'nobitex_managed_dust_carry_forward_v1'"), 'Managed dust carry-forward model marker is missing.');
+expectFastCycle(str_contains($dustCarry, "status='dust' AND quote_asset='IRT'"), 'Carry-forward must only source Trade-managed IRT dust.');
+expectFastCycle(str_contains($dustCarry, "status='open' AND quote_asset='IRT'"), 'Carry-forward must only target a live IRT position.');
+expectFastCycle(str_contains($dustCarry, 'wallet_total_does_not_match_managed_inventory'), 'Carry-forward must reject unexplained/manual wallet surplus or deficits.');
+expectFastCycle(str_contains($dustCarry, 'dust_carry_forward_weighted_basis'), 'Carry-forward must preserve an explicit weighted cost-basis marker.');
+expectFastCycle(str_contains($dustCarry, 'entry_fee_quote=:fee'), 'Carry-forward must transfer entry fee basis instead of losing fee accounting.');
+expectFastCycle(str_contains($dustCarry, "exit_identifier='dust_carried_into_irt_position'"), 'Merged dust rows must leave the standalone dust state without fabricating a sale.');
+expectFastCycle(str_contains($dustCarry, "'pnl_recorded'=>false"), 'Carry-forward bookkeeping must not fabricate realized PnL.');
+expectFastCycle(str_contains($dustCarry, "'destination'=>'future_normal_irt_exit'"), 'Carry-forward must explicitly target the next ordinary IRT exit.');
 
 expectFastCycle(str_contains($cron, 'use Trade\\Trading\\NobitexFastCycleRunner;'), 'Cron must import the fast-cycle runner.');
 expectFastCycle(str_contains($cron, "'analysis_interval_target_seconds'=>12"), 'Cron telemetry must advertise the 12-second analysis target.');
