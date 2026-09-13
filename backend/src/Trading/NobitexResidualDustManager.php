@@ -9,21 +9,21 @@ use Trade\Database;
 use Trade\Exchange\NobitexClient;
 
 /**
- * Keeps exchange-minimum residuals from deadlocking live auto-trading.
+ * Keeps exchange-minimum and partial-exit residuals from deadlocking live trading.
  *
- * A partially filled/cancelled SELL can leave a real wallet remainder that is
- * too small for Nobitex to accept as a standalone order. Such a remainder is
- * not a useful live position: it cannot be exited, but if it stays `open` it
- * consumes a configured position slot and can block every future BUY.
+ * A partially filled/cancelled SELL can leave a real wallet remainder. If that
+ * remainder is below Nobitex's live order minimum it cannot be sold standalone;
+ * keeping it `open` would still consume a position slot forever. If the remainder
+ * is still sellable, a previous confirmed exit fill proves that it is cleanup
+ * inventory rather than a fresh HOLD and one guarded continuation SELL may run.
  *
- * This manager classifies only Trade-owned open positions against Nobitex's
- * live amount/minimum-order rules. Unsellable rows become `dust`, which releases
- * the active slot without inventing an exit price or PnL. A dust row is swept
- * automatically later if its real wallet balance becomes independently sellable.
+ * Unsellable Trade-owned residuals become `dust`, releasing active count without
+ * inventing an exit price or PnL. A dust row is swept automatically later only if
+ * its own quantity becomes independently sellable under current exchange rules.
  */
 final class NobitexResidualDustManager
 {
-    public const MODEL = 'nobitex_residual_dust_manager_v1';
+    public const MODEL = 'nobitex_residual_dust_manager_v2';
     private const MAX_ROWS = 50;
     private const MAX_SWEEPS_PER_RUN = 1;
     private const EPSILON = 0.000000000001;
@@ -42,16 +42,18 @@ final class NobitexResidualDustManager
         }
 
         $open = $pdo->query(
-            "SELECT id,symbol,asset,quote_asset,amount FROM nobitex_autotrade_positions
-             WHERE status='open' ORDER BY id ASC LIMIT " . self::MAX_ROWS
+            "SELECT p.id,p.symbol,p.asset,p.quote_asset,p.amount,p.entry_price,p.opened_at,p.realized_pnl,
+                    (SELECT COUNT(*) FROM nobitex_autotrade_pnl x WHERE x.position_id=p.id) AS exit_fill_count
+             FROM nobitex_autotrade_positions p
+             WHERE p.status='open' ORDER BY p.id ASC LIMIT " . self::MAX_ROWS
         )->fetchAll();
         $dust = $pdo->query(
-            "SELECT id,symbol,asset,quote_asset,amount FROM nobitex_autotrade_positions
+            "SELECT id,symbol,asset,quote_asset,amount,entry_price,opened_at,realized_pnl FROM nobitex_autotrade_positions
              WHERE status='dust' ORDER BY id ASC LIMIT " . self::MAX_ROWS
         )->fetchAll();
         if ($open === [] && $dust === []) {
             return $this->result('idle', 'no_open_or_dust_positions', [
-                'checked'=>0,'retired'=>0,'sweep_submitted'=>0,'depleted_closed'=>0,'deferred'=>0,
+                'checked'=>0,'retired'=>0,'partial_exit_candidates'=>0,'sweep_submitted'=>0,'depleted_closed'=>0,'deferred'=>0,
             ]);
         }
 
@@ -65,9 +67,11 @@ final class NobitexResidualDustManager
         $deferred = 0;
         $depletedClosed = 0;
         $events = [];
+        $partialExitCandidates = [];
 
-        // Phase 1: release active capacity held by positions Nobitex cannot sell
-        // as standalone orders under the exchange's current live rules.
+        // Phase 1: classify every open row using live Nobitex amount/minimum
+        // rules. A row with a prior confirmed exit fill is also a continuation
+        // cleanup candidate when its remaining quantity is still sellable.
         foreach ($open as $position) {
             $assessment = $this->assessPosition($client, $books, $position);
             if (($assessment['status'] ?? '') === 'deferred') {
@@ -75,43 +79,50 @@ final class NobitexResidualDustManager
                 continue;
             }
             $checked++;
-            if (($assessment['dust'] ?? false) !== true) continue;
 
-            $stmt = $pdo->prepare(
-                "UPDATE nobitex_autotrade_positions
-                 SET status='dust',exit_price=NULL,exit_identifier='residual_dust_retired',
-                     exit_order_local_id=NULL,exit_exchange_order_id=NULL,closed_at=NULL,updated_at=UTC_TIMESTAMP()
-                 WHERE id=:id AND status='open'"
-            );
-            $stmt->execute([':id'=>(int)$position['id']]);
-            if ($stmt->rowCount() !== 1) continue;
+            if (($assessment['dust'] ?? false) === true) {
+                $retiredEvent = $this->retireOpenAsDust($pdo, $position, $assessment);
+                if ($retiredEvent !== null) {
+                    $retired++;
+                    $events[] = $retiredEvent;
+                }
+                continue;
+            }
 
-            $retired++;
-            $event = [
-                'position_id'=>(int)$position['id'],
-                'symbol'=>strtoupper((string)$position['symbol']),
-                'asset'=>(string)($position['asset'] ?? ''),
-                'amount'=>(float)($position['amount'] ?? 0),
-                'reason'=>$assessment['reason'] ?? 'below_exchange_minimum',
-                'estimated_order_value'=>$assessment['estimated_order_value'] ?? null,
-                'min_order_quote'=>$assessment['min_order_quote'] ?? null,
-                'amount_step'=>$assessment['amount_step'] ?? null,
-                'capacity_released'=>true,
-                'pnl_recorded'=>false,
-            ];
-            $this->event($pdo, 'info', 'nobitex.position.residual_dust_retired', $event);
-            $events[] = ['type'=>'dust_retired'] + $event;
+            if ((int)($position['exit_fill_count'] ?? 0) > 0) {
+                $partialExitCandidates[] = $position;
+            }
         }
 
-        // Re-read after classification so a newly retired row is eligible for a
-        // future sweep immediately if rules changed between scans. At most one
-        // real SELL is submitted per run to avoid stacking ambiguous exits.
-        $dustRows = $pdo->query(
-            "SELECT id,symbol,asset,quote_asset,amount FROM nobitex_autotrade_positions
-             WHERE status='dust' ORDER BY id ASC LIMIT " . self::MAX_ROWS
-        )->fetchAll();
         $sweepSubmitted = 0;
 
+        // Phase 2: a position that already has a confirmed prior exit fill is a
+        // true partial-exit remainder. Continue that exit before opening fresh
+        // risk. This fixes the "many tiny holdings but no SELL" deadlock without
+        // liquidating ordinary profitable/losing HOLD positions just for churn.
+        foreach ($partialExitCandidates as $position) {
+            if ($sweepSubmitted >= self::MAX_SWEEPS_PER_RUN) break;
+            $sweep = $this->submitSweep(
+                $pdo, $client, $books, $wallets, $position, 'open', 'partial_exit_residual_cleanup'
+            );
+            $status = (string)($sweep['status'] ?? 'deferred');
+            if ($status === 'submitted') {
+                $sweepSubmitted++;
+                $events[] = (array)$sweep['event'];
+            } elseif ($status === 'retired') {
+                $retired++;
+                $events[] = (array)$sweep['event'];
+            } elseif ($status === 'deferred') {
+                $deferred++;
+            }
+        }
+
+        // Phase 3: revisit previously retired dust. It is never topped up or
+        // churned on purpose; it is sold only when its own amount becomes legal.
+        $dustRows = $pdo->query(
+            "SELECT id,symbol,asset,quote_asset,amount,entry_price,opened_at,realized_pnl FROM nobitex_autotrade_positions
+             WHERE status='dust' ORDER BY id ASC LIMIT " . self::MAX_ROWS
+        )->fetchAll();
         foreach ($dustRows as $position) {
             if ($sweepSubmitted >= self::MAX_SWEEPS_PER_RUN) break;
             $symbol = strtoupper((string)($position['symbol'] ?? ''));
@@ -129,98 +140,31 @@ final class NobitexResidualDustManager
                 if ($stmt->rowCount() === 1) {
                     $depletedClosed++;
                     $event = [
-                        'position_id'=>(int)$position['id'],'symbol'=>$symbol,'asset'=>$asset,
+                        'type'=>'dust_depleted','position_id'=>(int)$position['id'],'symbol'=>$symbol,'asset'=>$asset,
                         'reason'=>'real_wallet_balance_depleted','pnl_recorded'=>false,
                     ];
                     $this->event($pdo, 'info', 'nobitex.position.residual_dust_depleted', $event);
-                    $events[] = ['type'=>'dust_depleted'] + $event;
+                    $events[] = $event;
                 }
                 continue;
             }
 
-            if ($this->pendingOrderExists($pdo, $symbol)) {
-                $deferred++;
-                continue;
-            }
-
-            $available = $this->walletAvailable($wallets, $asset);
-            $amount = min(max(0.0, (float)($position['amount'] ?? 0.0)), $available);
-            if ($amount <= self::EPSILON) {
-                $deferred++;
-                continue;
-            }
-
-            $candidate = $position;
-            $candidate['amount'] = $amount;
-            $assessment = $this->assessPosition($client, $books, $candidate);
-            if (($assessment['status'] ?? '') === 'deferred') {
-                $deferred++;
-                continue;
-            }
-            if (($assessment['dust'] ?? false) === true) continue;
-
-            $bestBid = (float)($assessment['best_bid'] ?? 0.0);
-            if ($bestBid <= 0.0) {
-                $deferred++;
-                continue;
-            }
-
-            $identifier = 'nd' . gmdate('ymdHis') . substr(bin2hex(random_bytes(5)), 0, 10);
-            try {
-                $created = $this->orders->create([
-                    'symbol'=>$symbol,
-                    'amount1'=>$amount,
-                    'price'=>max(0.00000001, $bestBid * 0.992),
-                    'mode'=>'market',
-                    'type'=>'sell',
-                    'identifier'=>$identifier,
-                ], 'autotrade_nobitex_dust_sweep');
-            } catch (NobitexCandidateRejectedException $e) {
-                // Live exchange rules are authoritative. If the amount became
-                // untradable between preflight and submit, keep it as dust.
-                $deferred++;
-                $events[] = [
-                    'type'=>'dust_sweep_deferred','position_id'=>(int)$position['id'],'symbol'=>$symbol,
-                    'reason'=>$e->reasonCode(),
-                ];
-                continue;
-            }
-
-            $remote = is_array($created['order'] ?? null) ? $created['order'] : [];
-            $exchangeId = trim((string)($remote['id'] ?? ''));
-            $stmt = $pdo->prepare(
-                "UPDATE nobitex_autotrade_positions
-                 SET status='pending_close',exit_identifier=:identifier,exit_order_local_id=:local,
-                     exit_exchange_order_id=:exchange_id,updated_at=UTC_TIMESTAMP()
-                 WHERE id=:id AND status='dust'"
+            $sweep = $this->submitSweep(
+                $pdo, $client, $books, $wallets, $position, 'dust', 'residual_became_sellable'
             );
-            $stmt->execute([
-                ':identifier'=>$identifier,
-                ':local'=>$created['local_id'] ?? null,
-                ':exchange_id'=>$exchangeId !== '' ? $exchangeId : null,
-                ':id'=>(int)$position['id'],
-            ]);
-            if ($stmt->rowCount() !== 1) {
-                // The remote SELL may already exist; normal order/position
-                // reconciliation will recover it from the persisted local order.
+            $status = (string)($sweep['status'] ?? 'deferred');
+            if ($status === 'submitted') {
+                $sweepSubmitted++;
+                $events[] = (array)$sweep['event'];
+            } elseif ($status === 'deferred') {
                 $deferred++;
-                continue;
             }
-
-            $sweepSubmitted++;
-            $event = [
-                'position_id'=>(int)$position['id'],'symbol'=>$symbol,'asset'=>$asset,'amount'=>$amount,
-                'best_bid'=>$bestBid,'order_local_id'=>$created['local_id'] ?? null,
-                'exchange_order_id'=>$exchangeId !== '' ? $exchangeId : null,
-                'reason'=>'residual_became_sellable',
-            ];
-            $this->event($pdo, 'info', 'nobitex.position.residual_dust_sell_submitted', $event);
-            $events[] = ['type'=>'dust_sell_submitted'] + $event;
         }
 
         return $this->result('ok', 'reconciled', [
             'checked'=>$checked,
             'retired'=>$retired,
+            'partial_exit_candidates'=>count($partialExitCandidates),
             'sweep_submitted'=>$sweepSubmitted,
             'depleted_closed'=>$depletedClosed,
             'deferred'=>$deferred,
@@ -250,6 +194,108 @@ final class NobitexResidualDustManager
             'normalized_amount'=>is_numeric($rules['normalized_amount'] ?? null) ? (float)$rules['normalized_amount'] : null,
             'amount_step'=>is_numeric($rules['amount_step'] ?? null) ? (float)$rules['amount_step'] : null,
         ];
+    }
+
+    private function submitSweep(
+        PDO $pdo,
+        NobitexClient $client,
+        array $books,
+        array $wallets,
+        array $position,
+        string $expectedStatus,
+        string $reason
+    ): array {
+        $symbol = strtoupper((string)($position['symbol'] ?? ''));
+        $asset = NobitexPositionReconciler::canonicalAsset((string)($position['asset'] ?? ''));
+        if ($symbol === '' || $asset === '') return ['status'=>'deferred','reason'=>'invalid_position_shape'];
+        if ($this->pendingOrderExists($pdo, $symbol)) return ['status'=>'deferred','reason'=>'sell_order_already_pending'];
+
+        $available = $this->walletAvailable($wallets, $asset);
+        $amount = min(max(0.0, (float)($position['amount'] ?? 0.0)), $available);
+        if ($amount <= self::EPSILON) return ['status'=>'deferred','reason'=>'wallet_balance_unavailable'];
+
+        $candidate = $position;
+        $candidate['amount'] = $amount;
+        $assessment = $this->assessPosition($client, $books, $candidate);
+        if (($assessment['status'] ?? '') === 'deferred') return ['status'=>'deferred','reason'=>$assessment['reason'] ?? 'assessment_deferred'];
+
+        if (($assessment['dust'] ?? false) === true) {
+            if ($expectedStatus === 'open') {
+                $event = $this->retireOpenAsDust($pdo, $position, $assessment);
+                return $event === null ? ['status'=>'deferred','reason'=>'state_conflict'] : ['status'=>'retired','event'=>$event];
+            }
+            return ['status'=>'still_dust','reason'=>$assessment['reason'] ?? 'below_exchange_minimum'];
+        }
+
+        $bestBid = (float)($assessment['best_bid'] ?? 0.0);
+        if ($bestBid <= 0.0) return ['status'=>'deferred','reason'=>'orderbook_bid_unavailable'];
+        $identifier = 'nd' . gmdate('ymdHis') . substr(bin2hex(random_bytes(5)), 0, 10);
+
+        try {
+            $created = $this->orders->create([
+                'symbol'=>$symbol,
+                'amount1'=>$amount,
+                'price'=>max(0.00000001, $bestBid * 0.992),
+                'mode'=>'market',
+                'type'=>'sell',
+                'identifier'=>$identifier,
+            ], 'autotrade_nobitex_dust_sweep');
+        } catch (NobitexCandidateRejectedException $e) {
+            return ['status'=>'deferred','reason'=>$e->reasonCode(),'assessment'=>$e->assessment()];
+        }
+
+        $remote = is_array($created['order'] ?? null) ? $created['order'] : [];
+        $exchangeId = trim((string)($remote['id'] ?? ''));
+        $stmt = $pdo->prepare(
+            "UPDATE nobitex_autotrade_positions
+             SET status='pending_close',exit_identifier=:identifier,exit_order_local_id=:local,
+                 exit_exchange_order_id=:exchange_id,updated_at=UTC_TIMESTAMP()
+             WHERE id=:id AND status=:expected_status"
+        );
+        $stmt->execute([
+            ':identifier'=>$identifier,
+            ':local'=>$created['local_id'] ?? null,
+            ':exchange_id'=>$exchangeId !== '' ? $exchangeId : null,
+            ':id'=>(int)$position['id'],
+            ':expected_status'=>$expectedStatus,
+        ]);
+        if ($stmt->rowCount() !== 1) return ['status'=>'deferred','reason'=>'state_reconcile_required'];
+
+        $event = [
+            'type'=>'dust_sell_submitted','position_id'=>(int)$position['id'],'symbol'=>$symbol,'asset'=>$asset,'amount'=>$amount,
+            'best_bid'=>$bestBid,'order_local_id'=>$created['local_id'] ?? null,
+            'exchange_order_id'=>$exchangeId !== '' ? $exchangeId : null,'reason'=>$reason,
+        ];
+        $this->event($pdo, 'info', 'nobitex.position.residual_dust_sell_submitted', $event);
+        return ['status'=>'submitted','event'=>$event];
+    }
+
+    private function retireOpenAsDust(PDO $pdo, array $position, array $assessment): ?array
+    {
+        $stmt = $pdo->prepare(
+            "UPDATE nobitex_autotrade_positions
+             SET status='dust',exit_price=NULL,exit_identifier='residual_dust_retired',
+                 exit_order_local_id=NULL,exit_exchange_order_id=NULL,closed_at=NULL,updated_at=UTC_TIMESTAMP()
+             WHERE id=:id AND status='open'"
+        );
+        $stmt->execute([':id'=>(int)$position['id']]);
+        if ($stmt->rowCount() !== 1) return null;
+
+        $event = [
+            'type'=>'dust_retired',
+            'position_id'=>(int)$position['id'],
+            'symbol'=>strtoupper((string)$position['symbol']),
+            'asset'=>(string)($position['asset'] ?? ''),
+            'amount'=>(float)($position['amount'] ?? 0),
+            'reason'=>$assessment['reason'] ?? 'below_exchange_minimum',
+            'estimated_order_value'=>$assessment['estimated_order_value'] ?? null,
+            'min_order_quote'=>$assessment['min_order_quote'] ?? null,
+            'amount_step'=>$assessment['amount_step'] ?? null,
+            'capacity_released'=>true,
+            'pnl_recorded'=>false,
+        ];
+        $this->event($pdo, 'info', 'nobitex.position.residual_dust_retired', $event);
+        return $event;
     }
 
     private function assessPosition(NobitexClient $client, array $books, array $position): array
