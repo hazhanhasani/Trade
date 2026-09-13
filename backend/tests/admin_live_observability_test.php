@@ -25,8 +25,16 @@ ok(str_contains($js,'/admin/live-dashboard.php')&&str_contains($js,'poll(async')
 ok(str_contains($system,'?ajax=live')&&str_contains($system,'NobitexDustConverter'),'system page must live-update host health and expose dust conversion');
 ok(str_contains($logs,'SystemObservability')&&str_contains($logs,'?ajax=1'),'error log dashboard must be live');
 ok(str_contains($reporter,'BaleSystemAlert')&&str_contains($reporter,'register_shutdown_function'),'runtime/fatal errors must reach retryable Bale alert path');
-ok(str_contains($dust,"'enabled'=>\$this->boolSetting")&&str_contains($dust,'false)'),'dust conversion must be opt-in by default');
-ok(str_contains($dust,'asset_in_trade_or_pending_order')&&str_contains($dust,'count($converted)>=3'),'dust conversion must skip active assets and cap each run');
+
+// Managed residual conversion is intentionally enabled by default because the
+// source set is no longer arbitrary idle wallet assets: it is limited to
+// Trade-owned status=dust rows. User-owned idle coins must remain untouched.
+ok(str_contains($dust,"self::ENABLED_KEY,true"),'managed Trade dust conversion must be enabled by default');
+ok(str_contains($dust,"WHERE status='dust'")&&str_contains($dust,"trade_owned_dust_only_to_irt_no_user_idle_assets_max_3_per_run"),'dust conversion must be restricted to Trade-owned residual rows');
+ok(str_contains($dust,'asset_has_active_position_or_pending_order')&&str_contains($dust,'MAX_CONVERSIONS_PER_RUN = 3'),'managed dust conversion must skip active assets and cap each run');
+ok(str_contains($dust,"status='dust_converting'"),'pending managed dust conversion must reserve rows against duplicate SELLs');
+ok(str_contains($dust,"'dstCurrency'=>'rls'"),'managed dust conversion must target IRT/Toman');
+
 ok(str_contains($timeline,'nobitex_autotrade_pnl')&&str_contains($timeline,'NobitexDisplayMoney')&&str_contains($timeline,'IranClock'),'timeline must use confirmed fills, Toman display and Iran time');
 ok(str_contains($api,'/api/system/observability')&&str_contains($api,'/api/market-context')&&str_contains($api,'/api/timeline'),'API must expose observability, market context and timeline');
 
