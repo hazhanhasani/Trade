@@ -101,7 +101,8 @@ final class TradeNotificationCenter
     private function syncSources(PDO $pdo):void
     {
         try{
-            $events=$pdo->query("SELECT id,level,event_name,context_json,created_at FROM nobitex_autotrade_events ORDER BY id DESC LIMIT 160")->fetchAll();
+            // Do not resurrect ancient event rows as newly-created unread alerts.
+            $events=$pdo->query("SELECT id,level,event_name,context_json,created_at FROM nobitex_autotrade_events WHERE created_at >= (UTC_TIMESTAMP() - INTERVAL 30 MINUTE) ORDER BY id DESC LIMIT 160")->fetchAll();
             foreach(array_reverse($events)as$e){
                 $name=(string)$e['event_name'];$ctx=json_decode((string)($e['context_json']??''),true);if(!is_array($ctx))$ctx=[];
                 [$category,$priority,$title,$body]=$this->mapTradingEvent($name,(string)$e['level'],$ctx);
@@ -114,25 +115,38 @@ final class TradeNotificationCenter
             $pdo->exec("UPDATE trade_notifications SET read_at=COALESCE(read_at,UTC_TIMESTAMP())
                 WHERE read_at IS NULL
                   AND event_key LIKE 'bot-run-failed:%'
-                  AND body='یکی از چرخه‌های Cron با وضعیت failed پایان یافته است.'
-                  AND created_at < (UTC_TIMESTAMP() - INTERVAL 30 MINUTE)");
+                  AND body='یکی از چرخه‌های Cron با وضعیت failed پایان یافته است.'");
+
+            // A successful newer bot run resolves every failed-run warning from
+            // the previous failure streak. The success id is embedded in new
+            // event keys so a later failure in the same 10-minute bucket can
+            // become visible again without reviving an already-resolved warning.
+            $lastSuccessId=(int)$pdo->query("SELECT COALESCE(MAX(id),0) FROM bot_runs WHERE status='success'")->fetchColumn();
+            $recoverySuffix=':s'.$lastSuccessId;
+            $cleanup=$pdo->prepare("UPDATE trade_notifications SET read_at=COALESCE(read_at,UTC_TIMESTAMP())
+                WHERE read_at IS NULL
+                  AND event_key LIKE 'bot-run-failed:%'
+                  AND event_key NOT LIKE :suffix");
+            $cleanup->execute([':suffix'=>'%'.$recoverySuffix]);
 
             $runs=$pdo->query("SELECT id,run_id,status,summary_json,started_at,finished_at
                 FROM bot_runs
                 WHERE status='failed'
+                  AND id > {$lastSuccessId}
                   AND COALESCE(finished_at,started_at) >= (UTC_TIMESTAMP() - INTERVAL 30 MINUTE)
                 ORDER BY id DESC LIMIT 30")->fetchAll();
 
             foreach($runs as$r){
                 $diag=self::failedRunDiagnostic($r);
                 $bucket=intdiv((int)$diag['timestamp'],600);
-                $eventKey='bot-run-failed:'.$diag['fingerprint'].':'.$bucket;
+                $eventKey='bot-run-failed:'.$diag['fingerprint'].':'.$bucket.$recoverySuffix;
                 $exchangeLabel=$diag['exchange']==='unknown'?'نامشخص':strtoupper((string)$diag['exchange']);
                 $body='چرخه Cron برای '.$exchangeLabel.' با خطا پایان یافت. علت: '.$diag['reason'];
                 if($diag['backend_version']!=='')$body.=' | Backend '.$diag['backend_version'];
                 $this->emit($eventKey,'system','warning','خطای اجرای ربات',$body,[
                     'run_id'=>$diag['run_id'],'exchange'=>$diag['exchange'],'status'=>'failed','reason'=>$diag['reason'],
                     'backend_version'=>$diag['backend_version'],'started_at'=>$r['started_at']??null,'finished_at'=>$r['finished_at']??null,
+                    'recovery_anchor_success_id'=>$lastSuccessId,
                 ],$pdo);
             }
         }catch(\Throwable){}
@@ -146,7 +160,7 @@ final class TradeNotificationCenter
         if(str_contains($name,'position.closed')){$pnl=$ctx['pnl_percent']??null;return['performance',((float)$pnl>=0?'success':'warning'),'پوزیشن بسته شد',trim(($symbol!==''?$symbol.' • ':'').($pnl!==null?'PnL '.round((float)$pnl,2).'%':'نتیجه معامله ثبت شد.'))];}
         if(str_contains($name,'rotation')&&str_contains($name,'submitted'))return['rotation','info','Portfolio Rotation','پوزیشن ضعیف‌تر برای آزادسازی ظرفیت و جایگزینی فرصت بهتر وارد مسیر خروج شد.'];
         if(str_contains($name,'pending.timeout'))return['execution','warning','Pending Watchdog','سفارش Pending از محدوده زمانی مجاز عبور کرد و مدیریت اجرای سفارش فعال شد.'];
-        if(str_contains($name,'scan_failed')||str_contains($name,'reconcile.error'))return['system','warning','خطای پایش بازار',$symbol!==''?$symbol.' در این چرخه کامل پایش نشد.':'یکی از مراحل پایش بازار ناموفق بود.'];
+        if(str_contains($name,'scan_failed')||str_contains($name,'reconcile.error'))return['system','warning','پایش ناقص بازار',$symbol!==''?$symbol.' در این چرخه کامل پایش نشد.':'یکی از مراحل پایش بازار در این چرخه کامل نشد.'];
         if(str_contains($name,'blocked'))return['risk','warning','ورود توسط محافظ ریسک متوقف شد',(string)($ctx['reason']??'یکی از گاردهای ایمنی فعال شد.')];
         if(strtolower($level)==='error')return['system','critical','خطای موتور معاملات',$name];
         return['','','',''];
