@@ -43,5 +43,9 @@ $source=file_get_contents(dirname(__DIR__).'/src/Trading/TradeNotificationCenter
 expectFailedRun(str_contains($source,"INTERVAL 30 MINUTE"),'Failed-run notification sync must be time-bounded.');
 expectFailedRun(str_contains($source,'intdiv((int)$diag[\'timestamp\'],600)'),'Same-cause failures must be deduplicated in a 10-minute bucket.');
 expectFailedRun(str_contains($source,"body='یکی از چرخه‌های Cron با وضعیت failed پایان یافته است.'"),'Legacy generic failed-run alerts must be recognized for cleanup.');
+expectFailedRun(str_contains($source,"MAX(id),0) FROM bot_runs WHERE status='success'"),'Failed-run alerts must be anchored to the latest successful recovery.');
+expectFailedRun(str_contains($source,'id > {$lastSuccessId}'),'Only failures after the latest successful run may remain active.');
+expectFailedRun(str_contains($source,"nobitex_autotrade_events WHERE created_at >= (UTC_TIMESTAMP() - INTERVAL 30 MINUTE)"),'Trading-event notification sync must not resurrect ancient events.');
+expectFailedRun(str_contains($source,"$recoverySuffix=':s'.$lastSuccessId"),'Failure dedupe keys must be recovery-streak aware.');
 
 fwrite(STDOUT,"Failed cron notification regression tests passed.\n");

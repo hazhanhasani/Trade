@@ -275,7 +275,54 @@ final class TradeCommandCenter
 
     private function alerts(PDO $pdo,array $status,float $accountDd):array
     {
-        $alerts=[];$n=$status['exchanges']['nobitex']??[];if(!($n['credentials_configured']??false))$alerts[]=$this->alert('critical','api','Nobitex API تنظیم نشده','اتصال صرافی آماده نیست.');if(!($status['cron_health']['healthy']??false))$alerts[]=$this->alert('critical','system','Cron سالم نیست','آخرین اجرای موتور قدیمی یا ناموفق است.');$c=$this->entryCircuit($pdo);if($c['open'])$alerts[]=$this->alert('warning','risk','Circuit باز است',(string)($c['reason']??'ورود جدید موقتاً متوقف شده است.'));$fails=$this->intSetting($pdo,'nobitex_runtime_api_failures',0,0,1000);if($fails>0)$alerts[]=$this->alert($fails>=3?'critical':'warning','api','خطای متوالی API',$fails.' خطای متوالی ثبت شده است.');$pending=(int)($n['portfolio_capacity']['pending_orders']??0);if($pending>0)$alerts[]=$this->alert('warning','execution','سفارش Pending وجود دارد',$pending.' سفارش در انتظار reconcile/fill است.');if($accountDd>=2)$alerts[]=$this->alert($accountDd>=6?'critical':'warning','risk','افت ارزش کیف پول بالا','افت ارزش کیف پول از سقف ثبت‌شده '.round($accountDd,2).'% است؛ این شاخص هنوز اثر واریز/برداشت را خنثی نمی‌کند.');$recent=(new TradeNotificationCenter())->recent(30,true,$pdo);foreach($recent as$r)if(in_array((string)$r['priority'],['warning','critical'],true))$alerts[]=['priority'=>$r['priority'],'category'=>$r['category'],'title'=>$r['title'],'body'=>$r['body'],'created_at'=>$r['created_at']];return array_slice($alerts,0,20);
+        $alerts=[];
+        $n=$status['exchanges']['nobitex']??[];
+        if(!($n['credentials_configured']??false))$alerts[]=$this->alert('critical','api','Nobitex API تنظیم نشده','اتصال صرافی آماده نیست.');
+        if(!($status['cron_health']['healthy']??false))$alerts[]=$this->alert('critical','system','Cron سالم نیست','آخرین اجرای موتور قدیمی یا ناموفق است.');
+        $c=$this->entryCircuit($pdo);
+        if($c['open'])$alerts[]=$this->alert('warning','risk','Circuit باز است',(string)($c['reason']??'ورود جدید موقتاً متوقف شده است.'));
+        $fails=$this->intSetting($pdo,'nobitex_runtime_api_failures',0,0,1000);
+        if($fails>0)$alerts[]=$this->alert($fails>=3?'critical':'warning','api','خطای متوالی API',$fails.' خطای متوالی ثبت شده است.');
+        $pending=(int)($n['portfolio_capacity']['pending_orders']??0);
+        if($pending>0)$alerts[]=$this->alert('warning','execution','سفارش Pending وجود دارد',$pending.' سفارش در انتظار reconcile/fill است.');
+        if($accountDd>=2)$alerts[]=$this->alert($accountDd>=6?'critical':'warning','risk','افت ارزش کیف پول بالا','افت ارزش کیف پول از سقف ثبت‌شده '.round($accountDd,2).'% است؛ این شاخص هنوز اثر واریز/برداشت را خنثی نمی‌کند.');
+
+        // Notification history is not the same thing as current system health.
+        // Only fresh, actionable system/risk/execution notifications are promoted
+        // into the Home alert stack. Trade outcomes stay in the timeline/reports.
+        $currentBackend=\Trade\Updater::currentVersion();
+        $recent=(new TradeNotificationCenter())->recent(50,true,$pdo);
+        foreach($recent as $r){
+            if(!self::isCurrentAlertNotification($r,$currentBackend))continue;
+            $alerts[]=['priority'=>$r['priority'],'category'=>$r['category'],'title'=>$r['title'],'body'=>$r['body'],'created_at'=>$r['created_at']];
+        }
+        return array_slice($alerts,0,20);
+    }
+
+    public static function isCurrentAlertNotification(array $row,string $currentBackendVersion,?int $now=null):bool
+    {
+        $priority=strtolower(trim((string)($row['priority']??'')));
+        if(!in_array($priority,['warning','critical'],true))return false;
+        $category=strtolower(trim((string)($row['category']??'')));
+        if(!in_array($category,['system','risk','api','execution'],true))return false;
+
+        $ctx=is_array($row['context']??null)?$row['context']:[];
+        $eventKey=(string)($row['event_key']??'');
+        $sourceTime=trim((string)($ctx['source_created_at']??$row['created_at']??''));
+        if($sourceTime!==''){
+            $hasZone=(bool)preg_match('/(?:Z|[+-]\d{2}:?\d{2})$/i',$sourceTime);
+            $ts=strtotime($sourceTime.($hasZone?'':' UTC'));
+            $now??=time();
+            if($ts!==false&&$ts<$now-1800)return false;
+            if(str_starts_with($eventKey,'nobitex-event:')&&$ts!==false&&$ts<$now-600)return false;
+        }
+
+        if(str_starts_with($eventKey,'bot-run-failed:')){
+            $alertVersion=trim((string)($ctx['backend_version']??''));
+            if($alertVersion!==''&&$currentBackendVersion!==''&&$alertVersion!==$currentBackendVersion)return false;
+            if(strtolower((string)($ctx['status']??'failed'))!=='failed')return false;
+        }
+        return true;
     }
 
     private function accountEquity(PDO $pdo,array $global):array

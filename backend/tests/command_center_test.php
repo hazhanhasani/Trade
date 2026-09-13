@@ -74,6 +74,20 @@ expectCommandCenter(str_contains($centerSource,"combined_cross_currency_total_av
 expectCommandCenter(str_contains($centerSource,'realized_bot_pnl_irt_only'), 'Primary report totals must state their IRT-only scope.');
 expectCommandCenter(str_contains($centerSource,"cash_flow_adjusted'=>false"), 'Raw wallet drawdown must disclose that deposits/withdrawals are not normalized.');
 
+$now=strtotime('2026-09-13 10:00:00 UTC');
+expectCommandCenter(!TradeCommandCenter::isCurrentAlertNotification([
+    'event_key'=>'nobitex-event:1','priority'=>'warning','category'=>'performance','created_at'=>'2026-09-13 09:59:00','context'=>[]
+],'1.4.49',$now),'Closed losing trades belong to timeline/reports, not the active alert stack.');
+expectCommandCenter(!TradeCommandCenter::isCurrentAlertNotification([
+    'event_key'=>'bot-run-failed:old','priority'=>'warning','category'=>'system','created_at'=>'2026-09-13 09:59:00','context'=>['backend_version'=>'1.4.43','status'=>'failed']
+],'1.4.49',$now),'Failed-run warnings from an older backend version must not be promoted as current alerts.');
+expectCommandCenter(!TradeCommandCenter::isCurrentAlertNotification([
+    'event_key'=>'nobitex-event:2','priority'=>'warning','category'=>'system','created_at'=>'2026-09-13 09:59:00','context'=>['source_created_at'=>'2026-09-13 09:40:00']
+],'1.4.49',$now),'Transient market-scan warnings must expire quickly.');
+expectCommandCenter(TradeCommandCenter::isCurrentAlertNotification([
+    'event_key'=>'bot-run-failed:current','priority'=>'warning','category'=>'system','created_at'=>'2026-09-13 09:59:00','context'=>['backend_version'=>'1.4.49','status'=>'failed']
+],'1.4.49',$now),'A fresh current-version failed run must remain visible.');
+
 $emergencySource = file_get_contents(dirname(__DIR__) . '/src/Trading/NobitexEmergencyController.php') ?: '';
 expectCommandCenter(str_contains($emergencySource, "mode!=='graceful_close'"), 'Emergency executor must be reduction-only outside graceful_close mode.');
 expectCommandCenter(!str_contains($emergencySource, "'type'=>'buy'"), 'Emergency executor must never submit BUY.');

@@ -10,4 +10,6 @@ declare(strict_types=1);
 // Android 1.4.48 hardens duplicate LazyColumn keys, fixes Row pill sizing so
 // decision text cannot collapse to one-character columns, and localizes common
 // backend decision reasons when reason_fa is unavailable.
-return '1.4.48';
+// 1.4.49 separates current actionable alerts from stale notification history,
+// resolves failed-run warnings after recovery, and expires transient scan warnings.
+return '1.4.49';
