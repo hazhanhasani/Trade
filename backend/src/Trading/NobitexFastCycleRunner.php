@@ -46,6 +46,22 @@ final class NobitexFastCycleRunner
             $walletReconcileRuns = [];
             $last = ['status'=>'no_trade','exchange'=>'nobitex','reason'=>'no_cycle_completed'];
 
+            // Partial/cancelled exits may leave a real balance that is below the
+            // exchange minimum. Such a residual must not remain an `open`
+            // position forever and consume all configured slots. Classify those
+            // rows before the first decision cycle; if a previously retired dust
+            // balance has become sellable, the manager may submit one guarded
+            // reduction-only SELL and the normal engine reconciles it below.
+            $residualDust = ['status'=>'deferred','reason'=>'not_run'];
+            try {
+                $residualDust = (new NobitexResidualDustManager())->reconcile($pdo);
+            } catch (\Throwable $e) {
+                $residualDust = ['status'=>'deferred','reason'=>'manager_error','error'=>mb_substr($e->getMessage(),0,500)];
+                ErrorReporter::captureThrowable($e, 'warning', 'nobitex_residual_dust_reconcile', [
+                    'exchange'=>'nobitex','run_id'=>$runId,
+                ]);
+            }
+
             for ($cycle = 1; $cycle <= $cycles; $cycle++) {
                 if ($cycle > 1) {
                     $elapsed = microtime(true) - $started;
@@ -128,6 +144,7 @@ final class NobitexFastCycleRunner
                 'fast_cycle_interval_seconds'=>$interval,
                 'fast_cycle_max_runtime_seconds'=>$maxRuntime,
                 'fast_cycle_results'=>$results,
+                'residual_dust_reconciliation'=>$residualDust,
                 'wallet_fast_cycle_reconciliation'=>$walletReconcileRuns,
                 'bale_fast_cycle'=>$baleRuns,
                 'runtime_seconds'=>round(microtime(true)-$started,3),

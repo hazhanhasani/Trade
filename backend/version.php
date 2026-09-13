@@ -2,9 +2,8 @@
 
 declare(strict_types=1);
 
-// Live trading hardening: the regime router now participates in real cost-aware
-// execution, bounded anti-starvation may relax only residual forecast uncertainty,
-// older near-flat positions may recycle capital without forcing material losses,
-// high-volatility strategy learning is live, and all existing execution/risk gates
-// remain authoritative alongside the 1.4.40 database/app/debug hardening.
-return '1.4.41';
+// Residual-dust recovery: exchange-minimum leftovers from partial exits no longer
+// consume active position capacity forever. Trade-owned residuals are classified
+// against live Nobitex order rules before each fast cycle and are swept later only
+// when they become independently sellable; no synthetic exit/PnL is fabricated.
+return '1.4.42';
