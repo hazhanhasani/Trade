@@ -129,8 +129,8 @@ final class RiskManager
         $take = (float) ($position['take_profit'] ?? 0);
         $trail = (float) ($position['trailing_stop'] ?? 0);
         $peak = (float) ($position['peak_price'] ?? 0);
+        $trailTriggered = $trail > 0 && $peak > $entry && $price <= $trail;
         if ($stop > 0 && $price <= $stop) return 'stop_loss';
-        if ($trail > 0 && $peak > $entry && $price <= $trail) return 'trailing_profit_lock';
 
         $entryNotional = $entry * $amount;
         $grossPnl = ($price - $entry) * $amount;
@@ -149,6 +149,16 @@ final class RiskManager
         $configuredTakePercent = $take > 0 ? (($take - $entry) / $entry) * 100.0 : 0.0;
         if ($configuredStopPercent > 0 && $netMovePercent <= -$configuredStopPercent) return 'stop_loss_after_fees';
         if ($configuredTakePercent > 0 && $netMovePercent >= $configuredTakePercent) return 'take_profit_after_fees';
+
+        // The stored trail is armed by fee-aware accounting. In a volatile market
+        // the next executable price can gap through that floor, so the exit must
+        // still happen for protection. Classify the result from after-cost PnL:
+        // only a non-negative exit is a profit lock; a negative one is a truthful
+        // reversal-protection exit rather than a misleading profitable close.
+        if ($trailTriggered) {
+            if ($netMovePercent >= 0.0) return 'trailing_profit_lock';
+            return 'trailing_reversal_protection_after_costs';
+        }
 
         // Capital recycling is independent from a SELL forecast. The previous
         // implementation placed stale-release logic behind the SELL-signal gate,

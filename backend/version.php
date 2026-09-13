@@ -12,4 +12,6 @@ declare(strict_types=1);
 // backend decision reasons when reason_fa is unavailable.
 // 1.4.49 separates current actionable alerts from stale notification history,
 // resolves failed-run warnings after recovery, and expires transient scan warnings.
-return '1.4.49';
+// 1.4.50 makes trailing-exit classification fee-aware and waits for finalized
+// net SELL accounting before publishing confirmed trade notifications.
+return '1.4.50';
